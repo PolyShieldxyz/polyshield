@@ -1,9 +1,9 @@
-import { createApp } from "../api.js";
+import { createApp } from "../api";
 
 const supertest = require("supertest");
 
 // Mock the relayer module so we don't need a live RPC
-jest.mock("../relayer.js", () => ({
+jest.mock("../relayer", () => ({
   relayAuthorizeBet: jest.fn().mockResolvedValue("0xabc"),
   relayCreditSettlement: jest.fn().mockResolvedValue("0xabc"),
   relayWithdraw: jest.fn().mockResolvedValue("0xabc"),

@@ -1,8 +1,8 @@
 import request from "supertest";
 import path from "path";
 import os from "os";
-import { openDatabase, upsertSettlement } from "../database.js";
-import { createApp } from "../api.js";
+import { openDatabase, upsertSettlement } from "../database";
+import { createApp } from "../api";
 
 // supertest is a dev dependency; add it to indexer package.json if running tests
 const supertest = require("supertest");

@@ -10,5 +10,9 @@
   "scripts": {
     "test": "pnpm -r test",
     "build": "pnpm -r build"
+  },
+  "dependencies": {
+    "better-sqlite3": "^12.10.0",
+    "typescript": "^5.9.3"
   }
 }

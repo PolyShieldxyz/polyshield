@@ -1,4 +1,4 @@
-import { startHeartbeat, stopHeartbeat } from "../heartbeat.js";
+import { startHeartbeat, stopHeartbeat } from "../heartbeat";
 
 describe("heartbeat", () => {
   beforeEach(() => {
