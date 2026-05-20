@@ -1,0 +1,13 @@
+balance_before_credit = ""
+market_id = ""
+merkle_path = ["", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", ""]
+merkle_path_indices = ["", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", ""]
+merkle_root = ""
+new_commitment = ""
+nonce = ""
+nullifier = ""
+nullifier_of_bet = ""
+payout_per_share = ""
+secret = ""
+shares_held = ""
+total_credit = ""

@@ -1,0 +1,20 @@
+{
+  "name": "polyshield",
+  "version": "0.1.0",
+  "private": true,
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "pnpm -r build",
+    "test": "pnpm -r test",
+    "circuits:test": "cd packages/circuits && nargo test",
+    "circuits:compile": "cd packages/circuits && nargo compile",
+    "contracts:build": "cd packages/contracts && forge build",
+    "contracts:test": "cd packages/contracts && forge test",
+    "contracts:coverage": "cd packages/contracts && forge coverage"
+  },
+  "devDependencies": {
+    "typescript": "^5.4.0"
+  }
+}

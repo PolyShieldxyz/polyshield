@@ -1,0 +1,9 @@
+[workspace]
+members = [
+  "lib",
+  "bet_auth",
+  "settlement_credit",
+  "withdrawal",
+  "bet_cancel",
+  "cancel_credit",
+]
