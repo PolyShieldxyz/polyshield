@@ -23,13 +23,13 @@ contract VaultTest is Test {
     MockUSDC public usdc;
     MockCTF public ctf;
 
-    address public owner = address(0x0wner);
-    address public operator = address(0x0P);
-    address public depositWallet = address(0xDEP);
-    address public alice = address(0xA1);
-    address public bob = address(0xB0B);
-    address public attacker = address(0xBAD);
-    address public recipient = address(0xREC);
+    address public owner = address(0x1111);
+    address public operator = address(0x2222);
+    address public depositWallet = address(0x3333);
+    address public alice = address(0xA1CE);
+    address public bob = address(0xB0B0);
+    address public attacker = address(0xBAD0);
+    address public recipient = address(0xBEEF);
 
     // Shared test data
     bytes32 constant COMMITMENT_1 = keccak256("commitment_1");
@@ -51,7 +51,7 @@ contract VaultTest is Test {
 
         // Deploy infrastructure with vault address = this contract initially,
         // then we re-deploy with the actual vault address
-        address predictedVault = vm.computeCreateAddress(address(this), vm.getNonce(address(this)) + 3);
+        address predictedVault = vm.computeCreateAddress(address(this), vm.getNonce(address(this)) + 2);
 
         registry = new NullifierRegistry(predictedVault);
         tree = new CommitmentMerkleTree(predictedVault, address(poseidon));
@@ -542,11 +542,10 @@ contract VaultTest is Test {
         _setupNAMarket();
         bytes32 root = _currentRoot();
         vault.naCancellationCredit(DUMMY_PROOF, _naCancelInputs(root));
+        // Second call with the same nullifier (NULLIFIER_2) → NullifierSpent
         bytes32 root2 = _currentRoot();
-        Vault.NACancelPublicInputs memory inputs2 = _naCancelInputs(root2);
-        inputs2.nullifier = keccak256("null_3");
         vm.expectRevert(Vault.NullifierSpent.selector);
-        vault.naCancellationCredit(DUMMY_PROOF, inputs2);
+        vault.naCancellationCredit(DUMMY_PROOF, _naCancelInputs(root2));
     }
 
     function test_naCancellationCredit_revert_wrongMarket() public {
@@ -648,7 +647,7 @@ contract VaultTest is Test {
     function test_setVerifier_onlyOwner() public {
         vm.prank(attacker);
         vm.expectRevert();
-        vault.setVerifier(vault.BET_AUTH(), address(0));
+        vault.setVerifier(0, address(0)); // 0 == BET_AUTH; avoid consuming prank on view call
     }
 
     function test_setSigningLayerOperator_onlyOwner() public {

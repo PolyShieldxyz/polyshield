@@ -55,7 +55,7 @@ contract CommitmentMerkleTree {
     /// @notice Insert a commitment leaf and return the new root.
     function insert(bytes32 commitment) external onlyVault returns (bytes32 newRoot) {
         uint32 index = nextIndex;
-        if (index >= uint32(1) << TREE_DEPTH) revert TreeFull();
+        if (uint256(index) >= uint256(1) << TREE_DEPTH) revert TreeFull();
         nextIndex = index + 1;
 
         bytes32 current = commitment;
