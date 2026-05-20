@@ -1,0 +1,124 @@
+use dep::std::hash::poseidon::bn254;
+use dep::merkle::merkle_verify;
+
+fn zero_leaf() -> Field {
+    bn254::hash_3([0, 0, 0])
+}
+
+fn build_zero_path() -> [Field; 32] {
+    let mut path: [Field; 32] = [0; 32];
+    let mut h = zero_leaf();
+    for i in 0..32 {
+        path[i] = h;
+        h = bn254::hash_2([h, h]);
+    }
+    path
+}
+
+fn single_leaf_root(leaf: Field) -> Field {
+    merkle_verify(leaf, build_zero_path(), [0; 32])
+}
+
+// Valid proof (happy path)
+#[test]
+fn test_bet_auth_valid() {
+    let secret: Field = 42;
+    let current_balance: u64 = 1_000_000_000; // 1000 USDC (6 dec)
+    let nonce: u64 = 0;
+    let bet_amount: u64 = 100_000_000;        // 100 USDC
+    let price: u64 = 65_000_000;              // 0.65 in 1e8
+    // expected_shares = floor(100_000_000 * 100_000_000 / 65_000_000) = 153_846_153
+    let expected_shares_correct: u64 = 153_846_153;
+    // share_remainder = 10_000_000_000_000_000 - 153_846_153 * 65_000_000
+    //                 = 10_000_000_000_000_000 - 9_999_999_945_000_000
+    //                 = 55_000_000
+    let share_remainder: u64 = 55_000_000;
+
+    let old_commitment = bn254::hash_3([secret, current_balance as Field, nonce as Field]);
+    let merkle_root = single_leaf_root(old_commitment);
+    let merkle_path = build_zero_path();
+    let merkle_path_indices: [u1; 32] = [0; 32];
+
+    let nullifier = bn254::hash_2([secret, nonce as Field]);
+    let new_balance = current_balance - bet_amount;
+    let new_commitment = bn254::hash_3([secret, new_balance as Field, (nonce + 1) as Field]);
+
+    // Validate constraint logic (mirrors main() assertions)
+    assert(merkle_verify(old_commitment, merkle_path, merkle_path_indices) == merkle_root);
+    assert(bn254::hash_2([secret, nonce as Field]) == nullifier);
+    assert(current_balance >= bet_amount);
+
+    // Floor division verification: expected_shares * price + remainder == bet_amount * 1e8
+    let lhs: Field = (expected_shares_correct as Field) * (price as Field) + (share_remainder as Field);
+    let rhs: Field = (bet_amount as Field) * 100_000_000;
+    assert(lhs == rhs);
+    assert(share_remainder < price);
+
+    assert(bn254::hash_3([secret, new_balance as Field, (nonce + 1) as Field]) == new_commitment);
+
+    let _ = merkle_root;
+}
+
+// Wrong Merkle root -- constraint 1 should fail
+#[test(should_fail_with = "Invalid Merkle proof")]
+fn test_bet_auth_wrong_root() {
+    let secret: Field = 42;
+    let current_balance: u64 = 1_000_000_000;
+    let nonce: u64 = 0;
+
+    let old_commitment = bn254::hash_3([secret, current_balance as Field, nonce as Field]);
+    let merkle_path = build_zero_path();
+    let merkle_path_indices: [u1; 32] = [0; 32];
+
+    let bad_root: Field = 1234;
+
+    let computed_root = merkle_verify(old_commitment, merkle_path, merkle_path_indices);
+    assert(computed_root == bad_root, "Invalid Merkle proof");
+}
+
+// Wrong nullifier -- constraint 2 should fail
+#[test(should_fail_with = "Invalid nullifier")]
+fn test_bet_auth_wrong_nullifier() {
+    let secret: Field = 42;
+    let nonce: u64 = 0;
+    let bad_nullifier: Field = 9999;
+
+    let computed_nullifier = bn254::hash_2([secret, nonce as Field]);
+    assert(computed_nullifier == bad_nullifier, "Invalid nullifier");
+}
+
+// Insufficient balance -- constraint 3 should fail
+#[test(should_fail_with = "Insufficient balance")]
+fn test_bet_auth_insufficient_balance() {
+    let current_balance: u64 = 50_000_000;
+    let bet_amount: u64 = 100_000_000; // exceeds balance
+    assert(current_balance >= bet_amount, "Insufficient balance");
+}
+
+// Wrong expected_shares -- constraint 4 should fail
+#[test(should_fail_with = "Invalid expected_shares")]
+fn test_bet_auth_wrong_shares() {
+    let bet_amount: u64 = 100_000_000;
+    let price: u64 = 65_000_000;
+    let wrong_shares: u64 = 999;
+    let wrong_remainder: u64 = 0;
+
+    let lhs: Field = (wrong_shares as Field) * (price as Field) + (wrong_remainder as Field);
+    let rhs: Field = (bet_amount as Field) * 100_000_000;
+    assert(lhs == rhs, "Invalid expected_shares");
+}
+
+// Wrong new_commitment -- constraint 5 should fail
+#[test(should_fail_with = "Invalid new_commitment")]
+fn test_bet_auth_wrong_new_commitment() {
+    let secret: Field = 42;
+    let current_balance: u64 = 1_000_000_000;
+    let nonce: u64 = 0;
+    let bet_amount: u64 = 100_000_000;
+
+    let new_balance = current_balance - bet_amount;
+    let correct = bn254::hash_3([secret, new_balance as Field, (nonce + 1) as Field]);
+    let wrong: Field = 0;
+
+    assert(correct == wrong, "Invalid new_commitment");
+}

@@ -1,0 +1,15 @@
+bet_amount = ""
+current_balance = ""
+expected_shares = ""
+market_id = ""
+merkle_path = ["", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", ""]
+merkle_path_indices = ["", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", ""]
+merkle_root = ""
+new_commitment = ""
+nonce = ""
+nullifier = ""
+outcome_side = ""
+position_id = ""
+price = ""
+secret = ""
+share_remainder = ""

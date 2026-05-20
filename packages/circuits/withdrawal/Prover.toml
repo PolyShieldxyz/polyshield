@@ -1,0 +1,10 @@
+final_balance = ""
+merkle_path = ["", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", ""]
+merkle_path_indices = ["", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", ""]
+merkle_root = ""
+nonce = ""
+nullifier = ""
+recipient_address = ""
+recipient_hash = ""
+secret = ""
+withdrawal_amount = ""

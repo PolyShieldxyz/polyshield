@@ -1,0 +1,14 @@
+{
+  "name": "@polyshield/backend",
+  "version": "0.1.0",
+  "private": true,
+  "workspaces": [
+    "signing-layer",
+    "indexer",
+    "proof-relay"
+  ],
+  "scripts": {
+    "test": "pnpm -r test",
+    "build": "pnpm -r build"
+  }
+}

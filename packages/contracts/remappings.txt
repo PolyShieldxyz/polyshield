@@ -1,0 +1,3 @@
+@openzeppelin/=lib/openzeppelin-contracts/
+@zk-kit/=lib/zk-kit/packages/
+forge-std/=lib/forge-std/src/
