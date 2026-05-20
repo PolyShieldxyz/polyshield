@@ -11,7 +11,7 @@ jest.mock("@polymarket/clob-client-v2", () => ({
 import { ethers } from "ethers";
 
 // Prevent real env var reads
-jest.mock("../config.js", () => ({
+jest.mock("../config", () => ({
   config: {
     vaultEoaPrivateKey: "0x" + "a".repeat(64),
     polyApiKey: "test-key",
@@ -23,7 +23,7 @@ jest.mock("../config.js", () => ({
   },
 }));
 
-jest.mock("../circuitBreaker.js", () => ({
+jest.mock("../circuitBreaker", () => ({
   checkResponse: jest.fn(),
   isHalted: jest.fn().mockReturnValue(false),
 }));
@@ -67,7 +67,7 @@ describe("orderBuilder", () => {
 
   it("calls reportFilled when order status is matched", async () => {
     mockCreateAndSendOrder.mockResolvedValue({ status: "matched" });
-    const { submitFOKOrder } = await import("../orderBuilder.js");
+    const { submitFOKOrder } = await import("../orderBuilder");
     const wallet = { address: "0x1234" } as unknown as ethers.Wallet;
     const provider = {} as ethers.JsonRpcProvider;
     await submitFOKOrder(event, wallet, provider);
@@ -77,7 +77,7 @@ describe("orderBuilder", () => {
 
   it("calls reportFOKFailure when order is not filled", async () => {
     mockCreateAndSendOrder.mockResolvedValue({ status: "unmatched" });
-    const { submitFOKOrder } = await import("../orderBuilder.js");
+    const { submitFOKOrder } = await import("../orderBuilder");
     const wallet = { address: "0x1234" } as unknown as ethers.Wallet;
     const provider = {} as ethers.JsonRpcProvider;
     await submitFOKOrder(event, wallet, provider);
@@ -87,7 +87,7 @@ describe("orderBuilder", () => {
 
   it("order type is always FOK", async () => {
     mockCreateAndSendOrder.mockResolvedValue({ status: "matched" });
-    const { submitFOKOrder } = await import("../orderBuilder.js");
+    const { submitFOKOrder } = await import("../orderBuilder");
     const wallet = { address: "0x1234" } as unknown as ethers.Wallet;
     const provider = {} as ethers.JsonRpcProvider;
     await submitFOKOrder(event, wallet, provider);
@@ -96,9 +96,9 @@ describe("orderBuilder", () => {
   });
 
   it("does not submit order when circuit breaker is halted", async () => {
-    const { isHalted } = require("../circuitBreaker.js");
+    const { isHalted } = require("../circuitBreaker");
     isHalted.mockReturnValue(true);
-    const { submitFOKOrder } = await import("../orderBuilder.js");
+    const { submitFOKOrder } = await import("../orderBuilder");
     const wallet = { address: "0x1234" } as unknown as ethers.Wallet;
     const provider = {} as ethers.JsonRpcProvider;
     await submitFOKOrder(event, wallet, provider);

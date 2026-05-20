@@ -1,4 +1,4 @@
-import { checkResponse } from "../circuitBreaker.js";
+import { checkResponse } from "../circuitBreaker";
 
 // Mock process.exit so we can test circuit breaker without dying
 const mockExit = jest.spyOn(process, "exit").mockImplementation((code?: string | number | null) => {

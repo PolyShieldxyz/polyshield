@@ -1,6 +1,6 @@
 import path from "path";
 import os from "os";
-import { openDatabase, upsertSettlement, getSettlement } from "../database.js";
+import { openDatabase, upsertSettlement, getSettlement } from "../database";
 
 describe("database", () => {
   beforeAll(() => {
