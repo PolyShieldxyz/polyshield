@@ -1,0 +1,31 @@
+architecture.md
+open-questions.md
+claude-code-plan-prompt.md
+threat-model.md
+polymarket-api.md
+zk-design.md
+
+
+.env
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+
+# Dependencies
+node_modules/
+.pnpm-store/
+
+# Noir build artifacts
+packages/circuits/**/target/
+
+# Foundry artifacts
+packages/contracts/out/
+packages/contracts/cache/
+
+# TypeScript build
+packages/backend/**/dist/
+
+# Misc
+.DS_Store
+*.log
