@@ -6,7 +6,7 @@ import {
   relayWithdraw,
   relayBetCancellationCredit,
   relayNACancellationCredit,
-} from "./relayer.js";
+} from "./relayer";
 
 // Source IP is NEVER logged — see pino redact config in index.ts
 const logger = pino({ name: "proof-relay-api" });

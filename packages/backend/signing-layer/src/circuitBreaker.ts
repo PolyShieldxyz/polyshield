@@ -1,5 +1,5 @@
 import pino from "pino";
-import { stopHeartbeat } from "./heartbeat.js";
+import { stopHeartbeat } from "./heartbeat";
 
 const logger = pino({ name: "circuit-breaker" });
 

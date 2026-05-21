@@ -1,8 +1,8 @@
 import { ethers } from "ethers";
 import Bottleneck from "bottleneck";
 import pino from "pino";
-import { config } from "./config.js";
-import { checkResponse, isHalted } from "./circuitBreaker.js";
+import { config } from "./config";
+import { checkResponse, isHalted } from "./circuitBreaker";
 
 const logger = pino({ name: "order-builder" });
 

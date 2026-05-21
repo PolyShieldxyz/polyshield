@@ -1,9 +1,9 @@
 import "dotenv/config";
 import { ethers } from "ethers";
 import pino from "pino";
-import { openDatabase } from "./database.js";
-import { startCTFListener } from "./ctfListener.js";
-import { createApp, startServer } from "./api.js";
+import { openDatabase } from "./database";
+import { startCTFListener } from "./ctfListener";
+import { createApp, startServer } from "./api";
 
 const logger = pino({ name: "indexer" });
 

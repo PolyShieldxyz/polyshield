@@ -1,8 +1,8 @@
 import { ethers } from "ethers";
 import pino from "pino";
-import { config } from "./config.js";
-import { startHeartbeat, stopHeartbeat } from "./heartbeat.js";
-import { startEventListener } from "./eventListener.js";
+import { config } from "./config";
+import { startHeartbeat, stopHeartbeat } from "./heartbeat";
+import { startEventListener } from "./eventListener";
 
 const logger = pino({ name: "signing-layer" });
 

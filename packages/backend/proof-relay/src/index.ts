@@ -1,8 +1,8 @@
 import "dotenv/config";
 import { ethers } from "ethers";
 import pino from "pino";
-import { initRelayer } from "./relayer.js";
-import { createApp } from "./api.js";
+import { initRelayer } from "./relayer";
+import { createApp } from "./api";
 
 const logger = pino({
   name: "proof-relay",
