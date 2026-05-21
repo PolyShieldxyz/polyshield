@@ -1,9 +1,0 @@
-{
-  "/api/dev/status/route": "app/api/dev/status/route.js",
-  "/page": "app/page.js",
-  "/app/markets/page": "app/app/markets/page.js",
-  "/app/vault/page": "app/app/vault/page.js",
-  "/app/deposit/page": "app/app/deposit/page.js",
-  "/app/proofs/page": "app/app/proofs/page.js",
-  "/app/bet/page": "app/app/bet/page.js"
-}
