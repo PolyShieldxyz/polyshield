@@ -57,7 +57,7 @@ function parseAddresses(output: string): DeployedAddresses {
   const result: Record<string, string> = {};
 
   // Matches lines like:   VAULT_ADDRESS=0x5FbDB2315678afecb367f032d93F642f64180aa3
-  const pattern = /^\s*([A-Z_]+)=(0x[0-9a-fA-F]+)\s*$/gm;
+  const pattern = /^\s*([A-Z0-9_]+)=(0x[0-9a-fA-F]+)\s*$/gm;
   let match: RegExpExecArray | null;
 
   while ((match = pattern.exec(output)) !== null) {

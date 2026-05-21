@@ -1,6 +1,6 @@
 import { ethers } from "ethers";
 import pino from "pino";
-import { upsertSettlement } from "./database.js";
+import { upsertSettlement } from "./database";
 
 const logger = pino({ name: "ctf-listener" });
 

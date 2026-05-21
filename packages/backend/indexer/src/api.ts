@@ -1,6 +1,6 @@
 import express from "express";
 import pino from "pino";
-import { getSettlement } from "./database.js";
+import { getSettlement } from "./database";
 
 const logger = pino({ name: "indexer-api" });
 

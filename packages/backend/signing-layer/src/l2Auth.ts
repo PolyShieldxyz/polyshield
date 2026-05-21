@@ -1,4 +1,4 @@
-import { config } from "./config.js";
+import { config } from "./config";
 
 // L2 HMAC credentials for Polymarket CLOB API.
 // The API key, secret, and passphrase come from the environment only.

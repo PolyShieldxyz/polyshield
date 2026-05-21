@@ -1,7 +1,7 @@
 import { ethers } from "ethers";
 import pino from "pino";
-import { submitFOKOrder } from "./orderBuilder.js";
-import { config } from "./config.js";
+import { submitFOKOrder } from "./orderBuilder";
+import { config } from "./config";
 
 const logger = pino({ name: "event-listener" });
 
