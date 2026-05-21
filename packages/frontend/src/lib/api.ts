@@ -61,6 +61,13 @@ export interface SettlementRecord {
   outcome: number
 }
 
+export interface MerkleProof {
+  path: string[]
+  pathIndices: number[]
+  root: string
+  leafIndex: number
+}
+
 async function post(path: string, body: unknown): Promise<unknown> {
   console.log(`[polyshield:api] POST ${path}`, body)
   const res = await fetch(path, {
@@ -142,10 +149,42 @@ export async function fetchDevStatus(): Promise<DevStatus> {
   }
 }
 
-// Dev-mode mock proof: 64 zero bytes.
-// The Anvil MockVerifier accepts any proof, so this lets flows complete without WASM.
-export const MOCK_PROOF = `0x${'00'.repeat(64)}` as `0x${string}`
+// Fetch the Merkle inclusion proof for a commitment leaf.
+// The proof-relay backend reconstructs the tree from on-chain LeafInserted events.
+export async function fetchMerklePath(commitment: `0x${string}`): Promise<MerkleProof> {
+  console.log('[polyshield:api] fetching merkle path for', commitment)
+  return get(`/api/merkle-path/${commitment}`) as Promise<MerkleProof>
+}
 
-// Dev-mode merkle root: zero bytes32.
-// The Anvil CommitmentMerkleTree starts with a known root; for mock proofs use bytes32(0).
-export const MOCK_ROOT = `0x${'00'.repeat(32)}` as `0x${string}`
+// Fetch the current Merkle root from the live CommitmentMerkleTree.
+// Vault.tree() → tree address → tree.currentRootIndex() → tree.recentRoots(index) → root.
+// This must be called fresh before every bet because other deposits shift the root.
+export async function fetchCurrentMerkleRoot(
+  vaultAddress: string,
+  rpcUrl = process.env.NEXT_PUBLIC_CHAIN_RPC ?? 'http://127.0.0.1:8545',
+): Promise<`0x${string}`> {
+  const call = async (to: string, data: string): Promise<string> => {
+    const res = await fetch(rpcUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'eth_call', params: [{ to, data }, 'latest'] }),
+    })
+    const json = await res.json() as { result: string }
+    return json.result
+  }
+
+  // 1. vault.tree() → address (last 20 bytes of 32-byte return)
+  const treeRaw = await call(vaultAddress, '0xfd54b228')
+  const treeAddress = '0x' + treeRaw.slice(-40)
+
+  // 2. tree.currentRootIndex() → uint32
+  const indexRaw = await call(treeAddress, '0x90eeb02b')
+  const index = parseInt(indexRaw, 16) % 30   // rolling window size = 30
+
+  // 3. tree.recentRoots(uint256 index) → bytes32
+  const indexHex = index.toString(16).padStart(64, '0')
+  const root = await call(treeAddress, `0xd539857a${indexHex}`) as `0x${string}`
+
+  console.log('[polyshield:api] fetchCurrentMerkleRoot →', root)
+  return root
+}

@@ -20,6 +20,7 @@
 import { spawn, ChildProcess } from "child_process";
 import * as fs from "fs";
 import * as path from "path";
+import * as os from "os";
 import { startAnvil, stopAnvil } from "./anvil";
 import { deployContracts, DeployedAddresses } from "./deploy";
 
@@ -35,6 +36,39 @@ const SIGNING_ENTRY     = path.resolve(__dirname, "../../signing-layer/src/index
 
 const ENV_OUT           = path.resolve(__dirname, "../../../.env.test");
 const FRONTEND_ENV_OUT  = path.resolve(__dirname, "../../../../packages/frontend/.env.local");
+
+// ── Session log file ──────────────────────────────────────────────────────────
+// All service stdout is mirrored here in addition to the terminal.
+// One file per dev:mock session, timestamped.
+const REPO_ROOT = path.resolve(__dirname, "../../../..");
+const LOGS_DIR  = path.join(REPO_ROOT, "logs");
+const SESSION_TS = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
+const SESSION_LOG = path.join(LOGS_DIR, `session-${SESSION_TS}.jsonl`);
+
+let sessionLog: fs.WriteStream | null = null;
+
+function initSessionLog(): void {
+  try {
+    fs.mkdirSync(LOGS_DIR, { recursive: true });
+    sessionLog = fs.createWriteStream(SESSION_LOG, { flags: "a" });
+    console.log(`[mock-env] session log → ${SESSION_LOG}`);
+  } catch (e) {
+    console.warn("[mock-env] could not open session log file:", e);
+  }
+}
+
+function writeSessionLog(service: string, line: string): void {
+  if (!sessionLog) return;
+  // Attempt to parse pino JSON lines; if not JSON, wrap as plain text
+  let entry: Record<string, unknown>;
+  try {
+    entry = JSON.parse(line) as Record<string, unknown>;
+    entry["_service"] = service;
+  } catch {
+    entry = { ts: new Date().toISOString(), _service: service, msg: line };
+  }
+  sessionLog.write(JSON.stringify(entry) + "\n");
+}
 
 // Anvil deterministic account private keys (same as Hardhat/Foundry defaults)
 const ACCOUNTS = {
@@ -60,7 +94,11 @@ function cleanup(): void {
   console.log("\n[mock-env] shutting down...");
   stopAnvil();
   for (const c of children) c.kill("SIGTERM");
-  process.exit(0);
+  if (sessionLog) {
+    sessionLog.end(() => process.exit(0));
+  } else {
+    process.exit(0);
+  }
 }
 
 process.on("SIGINT", cleanup);
@@ -94,12 +132,16 @@ function spawnService(
   });
 
   proc.stdout?.on("data", (d: Buffer) => {
-    for (const line of d.toString().split("\n").filter(Boolean))
+    for (const line of d.toString().split("\n").filter(Boolean)) {
       process.stdout.write(`[${label}] ${line}\n`);
+      writeSessionLog(label, line);
+    }
   });
   proc.stderr?.on("data", (d: Buffer) => {
-    for (const line of d.toString().split("\n").filter(Boolean))
+    for (const line of d.toString().split("\n").filter(Boolean)) {
       process.stderr.write(`[${label}:err] ${line}\n`);
+      writeSessionLog(`${label}:err`, line);
+    }
   });
   proc.on("exit", (code) => {
     if (code !== 0 && exitIsFatal) {
@@ -201,6 +243,8 @@ function buildSharedEnv(addrs: DeployedAddresses): Record<string, string> {
     POLYGON_RPC_URL:                   "http://127.0.0.1:8545",
     VAULT_CONTRACT_ADDRESS:            addrs.VAULT_ADDRESS,
     CTF_ADDRESS:                       addrs.CTF_ADDRESS,
+    TREE_ADDRESS:                      addrs.TREE_ADDRESS,
+    DEPLOYER_PRIVATE_KEY:              ACCOUNTS.OWNER_PRIVATE_KEY,  // mock-clob settle endpoint
     VAULT_EOA_PRIVATE_KEY:             ACCOUNTS.OPERATOR_PRIVATE_KEY,
     RELAYER_PRIVATE_KEY:               ACCOUNTS.RELAYER_PRIVATE_KEY,
     SIGNING_LAYER_OPERATOR_ADDRESS:    ACCOUNTS.OPERATOR_ADDRESS,
@@ -221,6 +265,7 @@ function printBanner(addrs: DeployedAddresses): void {
   console.log(`  Anvil RPC:          http://127.0.0.1:8545  (chain 31337)`);
   console.log(`  Mock CLOB API:      http://127.0.0.1:${CLOB_PORT}`);
   console.log(`  CLOB admin:         http://127.0.0.1:${CLOB_PORT}/admin/set-behavior`);
+  console.log(`  Settle market:      POST http://127.0.0.1:${CLOB_PORT}/admin/settle-market`);
   console.log(`  Proof relay:        http://127.0.0.1:${RELAY_PORT}`);
   console.log(`  Indexer API:        http://127.0.0.1:${INDEXER_PORT}`);
   console.log(`  Frontend:           http://localhost:3000  (pnpm dev in packages/frontend)`);
@@ -256,12 +301,16 @@ async function main(): Promise<void> {
 
   const sharedEnv = buildSharedEnv(addrs);
 
-  console.log("[mock-env] ── Step 3: Writing env files ───────────────────────");
+  console.log("[mock-env] ── Step 3: Writing env files + opening session log ──");
   writeEnvTest(addrs);
   writeFrontendEnv(addrs);
+  initSessionLog();
 
   console.log("[mock-env] ── Step 4: Starting mock CLOB server ───────────────");
-  spawnService("mock-clob", MOCK_CLOB_ENTRY, { PORT: String(CLOB_PORT) });
+  spawnService("mock-clob", MOCK_CLOB_ENTRY, {
+    ...sharedEnv,
+    PORT: String(CLOB_PORT),
+  });
 
   console.log("[mock-env] ── Step 5: Starting proof relay ────────────────────");
   spawnService("proof-relay", PROOF_RELAY_ENTRY, sharedEnv);

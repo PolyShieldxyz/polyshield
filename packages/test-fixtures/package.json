@@ -1,0 +1,27 @@
+{
+  "name": "@polyshield/test-fixtures",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Battle-test fixtures: adversarial users, realistic markets, adversarial action sequences",
+  "main": "src/index.ts",
+  "scripts": {
+    "generate": "ts-node src/generate.ts",
+    "test": "jest --passWithNoTests"
+  },
+  "devDependencies": {
+    "@types/jest": "^29.5.0",
+    "@types/node": "^20.14.0",
+    "jest": "^29.7.0",
+    "ts-jest": "^29.1.5",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.4.0"
+  },
+  "jest": {
+    "testEnvironment": "node",
+    "transform": {
+      "^.+\\.tsx?$": ["ts-jest", {
+        "tsconfig": { "module": "CommonJS", "moduleResolution": "Node", "isolatedModules": true }
+      }]
+    }
+  }
+}

@@ -1,19 +1,43 @@
 'use client'
+import { useEffect, useRef } from 'react'
 import { ConnectKitButton } from 'connectkit'
+import { useAccount } from 'wagmi'
+import { log } from '@/lib/logger'
 
 // Used in two places:
 // 1. Gate panel (app/layout.tsx) — shows "Connect Wallet" when not connected
 // 2. AppSidebar bottom — shows address when connected; clicking opens modal with disconnect option
 export function WalletConnect({ variant = 'gate' }: { variant?: 'gate' | 'sidebar' }) {
+  const { isConnected, address } = useAccount()
+  const prevConnected = useRef<boolean | null>(null)
+  const prevAddress = useRef<string | undefined>(undefined)
+
+  useEffect(() => {
+    if (prevConnected.current === null) {
+      prevConnected.current = isConnected
+      prevAddress.current = address
+      return
+    }
+    if (!prevConnected.current && isConnected && address) {
+      log('wallet_connected', { address, ens: null })
+    } else if (prevConnected.current && !isConnected) {
+      log('wallet_disconnected', { prevAddress: prevAddress.current })
+    } else if (isConnected && address && address !== prevAddress.current) {
+      log('wallet_address_changed', { from: prevAddress.current, to: address })
+    }
+    prevConnected.current = isConnected
+    prevAddress.current = address
+  }, [isConnected, address])
+
   return (
     <ConnectKitButton.Custom>
-      {({ isConnected, isConnecting, show, address, ensName }) => {
-        const label = ensName ?? (address ? `${address.slice(0, 6)}…${address.slice(-4)}` : '')
+      {({ isConnected: ckConnected, isConnecting, show, address: ckAddress, ensName }) => {
+        const label = ensName ?? (ckAddress ? `${ckAddress.slice(0, 6)}…${ckAddress.slice(-4)}` : '')
 
         if (variant === 'sidebar') {
           return (
             <button
-              onClick={show}
+              onClick={() => { log('wallet_modal_open', { variant, isConnected: ckConnected, address: ckAddress ?? null }); show?.() }}
               style={{
                 display: 'flex',
                 alignItems: 'center',
@@ -30,15 +54,15 @@ export function WalletConnect({ variant = 'gate' }: { variant?: 'gate' | 'sideba
               <span
                 className="dot"
                 style={{
-                  background: isConnected ? 'var(--green)' : 'var(--text-3)',
-                  boxShadow: isConnected ? '0 0 6px var(--green)' : 'none',
+                  background: ckConnected ? 'var(--green)' : 'var(--text-3)',
+                  boxShadow: ckConnected ? '0 0 6px var(--green)' : 'none',
                   flexShrink: 0,
                 }}
               />
               <span style={{ fontSize: 12, color: 'var(--text-1)', fontFamily: 'var(--font-mono)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flex: 1 }}>
-                {isConnected ? label : isConnecting ? 'Connecting…' : 'Connect wallet'}
+                {ckConnected ? label : isConnecting ? 'Connecting…' : 'Connect wallet'}
               </span>
-              {isConnected && (
+              {ckConnected && (
                 <span style={{ fontSize: 10, color: 'var(--text-3)', flexShrink: 0 }}>
                   ···
                 </span>
@@ -49,8 +73,8 @@ export function WalletConnect({ variant = 'gate' }: { variant?: 'gate' | 'sideba
 
         // Gate variant — large centered button for the "not connected" wall
         return (
-          <button className="btn btn-sm btn-primary" onClick={show}>
-            {isConnected ? label : isConnecting ? 'Connecting…' : 'Connect Wallet'}
+          <button className="btn btn-sm btn-primary" onClick={() => { log('wallet_modal_open', { variant, isConnected: ckConnected, address: ckAddress ?? null }); show?.() }}>
+            {ckConnected ? label : isConnecting ? 'Connecting…' : 'Connect Wallet'}
           </button>
         )
       }}

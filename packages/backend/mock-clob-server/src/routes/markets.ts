@@ -1,63 +1,114 @@
 /**
  * GET /markets/:condition_id
  * Returns market data in real Polymarket CLOB API format.
- * Serves from our fixture database when the condition_id matches,
- * falls back to a generic active market for unknown IDs.
+ *
+ * Priority order:
+ *  1. Live settlements triggered via POST /admin/settle-market (in server state)
+ *  2. Static fixture markets that match MockDeploy.s.sol pre-seeded CTF state
+ *  3. Generic active market for any unknown condition_id
  */
 
 import { Router, Request, Response } from "express";
+import { state } from "../state";
 
 export const marketsRouter = Router();
 
-// Inline a small set of well-known mock market condition IDs
-// (these match what MockDeploy.s.sol sets up in MockCTF)
-const KNOWN_MARKETS: Record<string, object> = {
-  // keccak256("market_resolved_yes") — matches MockCTF setup
-  "0xd37af6c9f14de8a5e27fc4e855e74b37b25ef8d8b8b52d32b11e80c2a32c0dc5": {
-    condition_id: "0xd37af6c9f14de8a5e27fc4e855e74b37b25ef8d8b8b52d32b11e80c2a32c0dc5",
-    question: "Mock: Resolved YES market",
+function resolvedMarket(
+  conditionId: string,
+  question: string,
+  payoutNumerators: number[],
+  payoutDenominator: number,
+  yesTokenId: string,
+  noTokenId: string,
+): object {
+  const yesWon = payoutNumerators[0] > 0;
+  const noWon = (payoutNumerators[1] ?? 0) > 0;
+  return {
+    condition_id: conditionId,
+    question_id: conditionId,
+    question,
+    description: "",
+    market_slug: `mock-market-${conditionId.slice(2, 10)}`,
     active: false,
     closed: true,
+    archived: false,
     accepting_orders: false,
+    accepting_order_timestamp: null,
+    minimum_order_size: 5,
+    minimum_tick_size: 0.01,
+    maker_base_fee: 0,
+    taker_base_fee: 0,
+    collateral_token: "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174",
     tokens: [
-      { token_id: "1001", outcome: "Yes", price: 1.0, winner: true },
-      { token_id: "1002", outcome: "No", price: 0.0, winner: false },
+      {
+        token_id: yesTokenId,
+        outcome: "Yes",
+        price: yesWon ? 1.0 : 0.0,
+        winner: yesWon,
+      },
+      {
+        token_id: noTokenId,
+        outcome: "No",
+        price: noWon ? 1.0 : 0.0,
+        winner: noWon,
+      },
     ],
-    payout_numerators: [1_000_000, 0],
-    payout_denominator: 1_000_000,
-  },
-  // keccak256("market_resolved_na")
-  "0x4f7d39b51d63d8c1b1e2a4b6e3c8d2f9a5b7e1c4d6f8a2b3e5c7d9f1a3b5e7c": {
-    condition_id: "0x4f7d39b51d63d8c1b1e2a4b6e3c8d2f9a5b7e1c4d6f8a2b3e5c7d9f1a3b5e7c",
-    question: "Mock: Resolved N/A market",
-    active: false,
-    closed: true,
-    accepting_orders: false,
-    tokens: [
-      { token_id: "2001", outcome: "Yes", price: 0.0, winner: false },
-      { token_id: "2002", outcome: "No", price: 0.0, winner: false },
-    ],
-    payout_numerators: [0, 0],
-    payout_denominator: 1_000_000,
-  },
-};
+    payout_numerators: payoutNumerators,
+    payout_denominator: payoutDenominator,
+    volume: 100_000,
+    volume_24hr: 0,
+    liquidity: 0,
+    end_date_iso: new Date().toISOString(),
+  };
+}
 
 marketsRouter.get("/:condition_id", (req: Request, res: Response) => {
   const { condition_id } = req.params;
-  console.log(`[clob] GET /markets/${condition_id}`);
+  const key = condition_id.toLowerCase();
+  console.log(`[clob] GET /markets/${condition_id.slice(0, 12)}...`);
 
-  const known = KNOWN_MARKETS[condition_id.toLowerCase()];
-  if (known) {
-    res.json(known);
+  // 1. Live admin-triggered settlement takes highest priority
+  const live = state.settledMarkets[key];
+  if (live) {
+    res.json(
+      resolvedMarket(
+        condition_id,
+        `Mock settled market (${live.outcome})`,
+        live.payoutNumerators,
+        live.payoutDenominator,
+        "9001",
+        "9002",
+      ),
+    );
     return;
   }
 
-  // Generic active market for any unknown condition_id
+  // 2. Static fixtures matching MockDeploy.s.sol pre-seeded markets
+  //    keccak256("market_resolved_yes")
+  if (key === "0xd37af6c9f14de8a5e27fc4e855e74b37b25ef8d8b8b52d32b11e80c2a32c0dc5") {
+    res.json(
+      resolvedMarket(condition_id, "Mock: Resolved YES market", [1_000_000, 0], 1_000_000, "1001", "1002"),
+    );
+    return;
+  }
+  //    keccak256("market_resolved_na")
+  if (key === "0x4f7d39b51d63d8c1b1e2a4b6e3c8d2f9a5b7e1c4d6f8a2b3e5c7d9f1a3b5e7c") {
+    res.json(
+      resolvedMarket(condition_id, "Mock: Resolved N/A market", [0, 0], 1_000_000, "2001", "2002"),
+    );
+    return;
+  }
+
+  // 3. Generic active market for any unknown condition_id
   res.json({
     condition_id,
+    question_id: condition_id,
     question: `Mock market for ${condition_id.slice(0, 10)}...`,
+    description: "",
+    market_slug: `mock-market-${condition_id.slice(2, 10)}`,
     active: true,
     closed: false,
+    archived: false,
     accepting_orders: true,
     accepting_order_timestamp: new Date().toISOString(),
     minimum_order_size: 5,

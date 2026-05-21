@@ -1,11 +1,28 @@
 'use client'
+import { useEffect } from 'react'
 import { useAccount } from 'wagmi'
 import { AppSidebar } from '@/components/app/AppSidebar'
 import { WalletConnect } from '@/components/ui/WalletConnect'
 import { Logo } from '@/components/ui/Logo'
+import { warmUpProver } from '@/lib/prover'
 
 export default function AppLayout({ children }: { children: React.ReactNode }) {
-  const { isConnected } = useAccount()
+  const { isConnected, status } = useAccount()
+
+  // Kick off WASM download + backend init 2 s after the layout mounts.
+  // This way the 63 MB bb.js bundle is cached by the time the user reaches
+  // the bet/withdraw/settle proof step.
+  useEffect(() => {
+    const t = setTimeout(warmUpProver, 2000)
+    return () => clearTimeout(t)
+  }, [])
+
+  // During initial hydration wagmi status is 'reconnecting' while it restores
+  // the previous session from storage. Rendering the gate during this window
+  // causes it to flash on every page load even when already connected.
+  if (status === 'reconnecting' || status === 'connecting') {
+    return null
+  }
 
   if (!isConnected) {
     return (

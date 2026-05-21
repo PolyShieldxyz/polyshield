@@ -6,7 +6,8 @@ import { Icon, ICONS } from '@/components/ui/Icon'
 import { Hash } from '@/components/ui/Hash'
 import { Sparkline } from '@/components/ui/Sparkline'
 import { WalletConnect } from '@/components/ui/WalletConnect'
-import { ReactNode } from 'react'
+import { ReactNode, useEffect, useRef } from 'react'
+import { log } from '@/lib/logger'
 
 interface SidebarGroup {
   title: string
@@ -43,6 +44,23 @@ const GROUPS: SidebarGroup[] = [
 
 export function AppSidebar() {
   const pathname = usePathname()
+  const prevPathname = useRef<string | null>(null)
+  const navTimestamp = useRef<number>(performance.now())
+
+  useEffect(() => {
+    if (prevPathname.current === null) {
+      prevPathname.current = pathname
+      navTimestamp.current = performance.now()
+      log('page_view', { route: pathname })
+      return
+    }
+    if (prevPathname.current !== pathname) {
+      const navMs = Math.round(performance.now() - navTimestamp.current)
+      log('page_navigate', { from: prevPathname.current, to: pathname, nav_duration_ms: navMs })
+      prevPathname.current = pathname
+      navTimestamp.current = performance.now()
+    }
+  }, [pathname])
 
   return (
     <aside className="sidebar">
@@ -77,6 +95,7 @@ export function AppSidebar() {
                 href={href}
                 className={`sb-item ${isActive ? 'active' : ''}`}
                 style={{ textDecoration: 'none' }}
+                onClick={() => !isActive && log('nav_click', { label, href, from: pathname })}
               >
                 <Icon d={ic} className="icon" />
                 <span>{label}</span>

@@ -52,6 +52,43 @@ fn test_settlement_credit_valid() {
     let _ = total_credit;
 }
 
+// Print witness values for Prover.toml generation
+#[test]
+fn test_print_bench_inputs() {
+    let secret: Field = 77;
+    let balance_before_credit: u64 = 900_000_000;
+    let nonce: u64 = 1;
+    let shares_held: u64 = 1_000;
+    let payout_per_share: u64 = 500_000;
+    let total_credit: u64 = 500_000_000;
+    let nullifier_of_bet: Field = 1; // arbitrary for bench
+    let market_id: Field = 1;
+
+    let old_commitment = bn254::hash_3([secret, balance_before_credit as Field, nonce as Field]);
+    let merkle_path = build_zero_path();
+    let merkle_root = single_leaf_root(old_commitment);
+    let nullifier = bn254::hash_2([secret, nonce as Field]);
+    let new_balance = balance_before_credit + total_credit;
+    let new_commitment = bn254::hash_3([secret, new_balance as Field, (nonce + 1) as Field]);
+
+    println(f"BENCH secret {secret}");
+    println(f"BENCH balance_before_credit {balance_before_credit}");
+    println(f"BENCH nonce {nonce}");
+    println(f"BENCH shares_held {shares_held}");
+    println(f"BENCH payout_per_share {payout_per_share}");
+    println(f"BENCH total_credit {total_credit}");
+    println(f"BENCH nullifier_of_bet {nullifier_of_bet}");
+    println(f"BENCH market_id {market_id}");
+    println(f"BENCH merkle_root {merkle_root}");
+    println(f"BENCH nullifier {nullifier}");
+    println(f"BENCH new_commitment {new_commitment}");
+    println("BENCH path_start");
+    for i in 0..32 {
+        println(merkle_path[i]);
+    }
+    println("BENCH path_end");
+}
+
 // Wrong Merkle root
 #[test(should_fail_with = "Invalid Merkle proof")]
 fn test_settlement_wrong_root() {

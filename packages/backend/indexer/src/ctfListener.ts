@@ -24,10 +24,11 @@ export async function startCTFListener(provider: ethers.JsonRpcProvider): Promis
       _questionId: string,
       _outcomeSlotCount: bigint,
       payoutNumerators: bigint[],
-      event: ethers.EventLog
+      event: ethers.ContractEventPayload
     ) => {
       try {
-        const blockNumber = event.blockNumber;
+        // ethers.js v6: last arg is ContractEventPayload; blockNumber is on .log
+        const blockNumber = event.log.blockNumber;
         const denominator: bigint = await ctf.payoutDenominator(conditionId);
 
         // Determine outcome: if all numerators are 0 it's N/A

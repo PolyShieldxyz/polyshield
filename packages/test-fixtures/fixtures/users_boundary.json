@@ -1,0 +1,35 @@
+[
+  {
+    "id": "user_atcap_01",
+    "address": "0x0000000000000000000000000000000000004001",
+    "usdcBalance": "50000000000",
+    "depositedAmount": "50000000000",
+    "secret": "188313052061600422915073682696229992483070663333921035386850",
+    "noteBalance": "50000000000",
+    "noteNonce": "0",
+    "category": "boundary_cap",
+    "description": "Exactly $50k deposited — at cap limit, no further deposits allowed"
+  },
+  {
+    "id": "user_atcap_02",
+    "address": "0x0000000000000000000000000000000000004002",
+    "usdcBalance": "100000000000",
+    "depositedAmount": "50000000000",
+    "secret": "194590153796987103678909472119437658899173018778385069899745",
+    "noteBalance": "40000000000",
+    "noteNonce": "5",
+    "category": "boundary_cap",
+    "description": "Has $100k but only $50k deposited; next deposit should revert"
+  },
+  {
+    "id": "user_overcap_01",
+    "address": "0x0000000000000000000000000000000000004003",
+    "usdcBalance": "50000000001",
+    "depositedAmount": "50000000000",
+    "secret": "200867255532373784442745261542645325315275374222849104412640",
+    "noteBalance": "49000000000",
+    "noteNonce": "3",
+    "category": "over_cap",
+    "description": "Cumulative at cap; any additional deposit of even 1 wei must revert"
+  }
+]

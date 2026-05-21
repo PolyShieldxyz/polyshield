@@ -1,23 +1,19 @@
 'use client'
 import { Suspense, useState, useEffect, useRef } from 'react'
 import { useRouter, useSearchParams } from 'next/navigation'
-import { keccak256, toBytes, toHex, parseUnits } from 'viem'
+import { parseUnits } from 'viem'
 import { FlowShell, CircuitTrace } from '@/components/app/FlowShell'
 import { KV } from '@/components/app/KV'
 import { Icon, ICONS } from '@/components/ui/Icon'
-import { getNotes, computeCommitment, computeNullifier, markNoteSpent, addNote, formatUsdc, type Note } from '@/lib/notes'
-import { relayBet, MOCK_PROOF, MOCK_ROOT } from '@/lib/api'
-
-const IS_DEV = process.env.NEXT_PUBLIC_DEV_MODE === 'true'
+import {
+  getNotes, computeCommitment, computeNullifier,
+  marketToField, positionToField, markNoteSpent, addNote, formatUsdc, type Note,
+} from '@/lib/notes'
+import { relayBet, fetchCurrentMerkleRoot, fetchMerklePath } from '@/lib/api'
+import { generateBetAuthProof, type ProofResult } from '@/lib/prover'
+import { log, timer, proofSummary } from '@/lib/logger'
 
 function short(hex: string) { return hex.slice(0, 8) + '…' + hex.slice(-6) }
-
-function marketToBytes32(name: string): `0x${string}` {
-  return keccak256(toBytes(name))
-}
-function positionToBytes32(marketId: string, side: string): `0x${string}` {
-  return keccak256(toBytes(marketId + side))
-}
 
 // ── Step 0: compose bet ──────────────────────────────────────────────────────
 
@@ -103,11 +99,10 @@ function Step0({
           <KV l="Expected shares" v={shares.toLocaleString()} />
           <KV l="Proof circuit" v="BET_AUTH" />
           <KV l="Submission" v="via Proof Relay" />
-          {IS_DEV && <KV l="Mode" v="DEV — mock proof (instant)" />}
           <button
             className="btn btn-primary mt-4"
             style={{ width: '100%', justifyContent: 'center', padding: '14px 0', fontSize: 13, opacity: canNext ? 1 : 0.4 }}
-            onClick={canNext ? onNext : undefined}
+            onClick={canNext ? () => { log('bet_generate_proof_click', { market, side, stake, price, noteId: selectedNote?.id, noteBalance: selectedNote?.balance?.toString() }); onNext() } : undefined}
           >
             Generate bet proof <Icon d={ICONS.arrow} size={12} />
           </button>
@@ -120,39 +115,19 @@ function Step0({
   )
 }
 
-// ── Step 1: "proving" (dev mode = instant mock, prod = WASM) ─────────────────
+// ── Step 1: WASM proving ──────────────────────────────────────────────────────
 
-function Step1({ onNext }: { onNext: () => void }) {
-  const [pct, setPct] = useState(0)
-  const done = useRef(false)
-
-  useEffect(() => {
-    if (IS_DEV) {
-      // Dev mode: mock proof is instant — animate briefly for UX clarity
-      const t = setInterval(() => {
-        setPct((p) => {
-          const next = Math.min(p + 8, 100)
-          if (next === 100 && !done.current) { done.current = true; clearInterval(t); setTimeout(onNext, 400) }
-          return next
-        })
-      }, 80)
-      return () => clearInterval(t)
-    } else {
-      // Production: WASM prover runs here (not yet implemented)
-      setPct(0)
-    }
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [])
-
+function Step1({ pct, error }: { pct: number; error: string | null }) {
   return (
     <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 32 }}>
       <div>
-        <div className="micro">PROVING · {IS_DEV ? 'DEV MODE (MOCK)' : 'LOCAL · WASM'}</div>
+        <div className="micro">PROVING · LOCAL · WASM</div>
         <h3 className="h3 mt-3" style={{ margin: 0 }}>Generating bet authorization proof.</h3>
         <p className="body mt-3">BET_AUTH proves your note&apos;s balance covers the stake and nullifies it — without revealing which wallet deposited.</p>
-        {IS_DEV && (
-          <div className="panel mt-3" style={{ padding: 14, borderColor: 'oklch(0.82 0.13 210 / 0.3)', background: 'oklch(0.82 0.13 210 / 0.03)' }}>
-            <div className="small" style={{ fontSize: 11, color: 'var(--cyan)' }}>Dev mode: using mock proof (0x00…00). MockVerifier on Anvil accepts it.</div>
+        <p className="body mt-2" style={{ fontSize: 12, color: 'var(--text-2)' }}>Barretenberg WASM proof generation takes 1–3 minutes. Do not navigate away.</p>
+        {error && (
+          <div className="panel mt-3" style={{ padding: 14, borderColor: 'var(--red)', background: 'oklch(0.70 0.18 25 / 0.06)' }}>
+            <div className="small" style={{ color: 'var(--red)', fontSize: 12 }}>Proof error: {error}</div>
           </div>
         )}
         <div className="panel mt-4" style={{ padding: 20 }}>
@@ -161,9 +136,9 @@ function Step1({ onNext }: { onNext: () => void }) {
             <span className="mono" style={{ fontSize: 12 }}>{pct}%</span>
           </div>
           <div style={{ height: 4, background: 'rgba(255,255,255,0.06)', borderRadius: 2, marginTop: 8 }}>
-            <div style={{ height: 4, width: `${pct}%`, background: 'var(--cyan)', borderRadius: 2, transition: 'width .08s linear' }} />
+            <div style={{ height: 4, width: `${pct}%`, background: 'var(--cyan)', borderRadius: 2, transition: 'width 1.2s linear' }} />
           </div>
-          <pre className="mono mt-4" style={{ margin: 0, fontSize: 10, color: 'var(--text-2)', lineHeight: 1.6 }}>{`> circuit BET_AUTH\n> witnesses: balance ≥ stake ✓\n> nullifier = keccak(secret, nonce)\n> new_commitment = keccak(secret, bal', nonce')\n> shares arithmetic: u128 safe ✓\n> π = ${IS_DEV ? '64 bytes (mock)' : '384 bytes (UltraPLONK)'}`}</pre>
+          <pre className="mono mt-4" style={{ margin: 0, fontSize: 10, color: 'var(--text-2)', lineHeight: 1.6 }}>{`> circuit BET_AUTH\n> witnesses: balance ≥ stake ✓\n> nullifier = Poseidon(secret, nonce)\n> new_commitment = Poseidon(secret, bal', nonce')\n> shares arithmetic verified ✓\n> π = UltraPLONK proof`}</pre>
         </div>
       </div>
       <div>
@@ -294,7 +269,11 @@ function BetPageInner() {
   const [notes] = useState<Note[]>(() => getNotes().filter((n) => !n.spent))
   const [selectedNote, setSelectedNote] = useState<Note | null>(notes[0] ?? null)
 
-  // Relay state
+  // Proof generation state (step 1)
+  const [provePct, setProvePct] = useState(0)
+  const [proveError, setProveError] = useState<string | null>(null)
+
+  // Relay state (step 2)
   const [relaying, setRelaying] = useState(false)
   const [relayTxHash, setRelayTxHash] = useState('')
   const [relayError, setRelayError] = useState<string | null>(null)
@@ -308,66 +287,151 @@ function BetPageInner() {
     ['04', 'Done',    'Position authorized and awaiting fill.'],
   ]
 
-  async function handleRelay() {
+  useEffect(() => {
+    log('page_view', { route: '/app/bet', market, side, price })
+  }, []) // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Called by Step0 "Generate bet proof" button
+  async function handleStartProve() {
     if (!selectedNote) return
+    setStep(1)
+    setProvePct(5)
+    setProveError(null)
+
+    const proveTimer = timer('bet_proof_generate')
+
+    // Pulse progress bar during long WASM computation
+    const pulse = setInterval(() => {
+      setProvePct((p) => (p < 88 ? p + 1 : p))
+    }, 1500)
+
+    try {
+      const stakeMicro = parseUnits(String(stake), 6)
+      const newBalance = selectedNote.balance - stakeMicro
+      const newNonce = selectedNote.nonce + 1n
+      const newCommitment = computeCommitment(selectedNote.secret, newBalance, newNonce)
+      const nullifierHex = computeNullifier(selectedNote.secret, selectedNote.nonce)
+      setNullifier(nullifierHex)
+
+      const marketId = marketToField(market)
+      const positionId = positionToField(market, side)
+      const expectedShares = (stakeMicro * 100_000_000n) / BigInt(price)
+      const shareRemainder = (stakeMicro * 100_000_000n) % BigInt(price)
+
+      const vaultAddr = process.env.NEXT_PUBLIC_VAULT_ADDRESS ?? ''
+      const [merkleProof] = await Promise.all([
+        fetchMerklePath(selectedNote.commitment),
+      ])
+      const merkleRoot = merkleProof.root as `0x${string}`
+
+      log('bet_proof_start', { circuit: 'BET_AUTH', nullifier: nullifierHex })
+
+      const proofResult = await generateBetAuthProof({
+        secret:              selectedNote.secret,
+        current_balance:     selectedNote.balance,
+        nonce:               selectedNote.nonce,
+        merkle_path:         merkleProof.path,
+        merkle_path_indices: merkleProof.pathIndices,
+        share_remainder:     shareRemainder,
+        merkle_root:         merkleRoot,
+        nullifier:           nullifierHex,
+        new_commitment:      newCommitment,
+        bet_amount:          stakeMicro,
+        price:               BigInt(price),
+        expected_shares:     expectedShares,
+        market_id:           marketId,
+        outcome_side:        side === 'YES' ? 1 : 0,
+        position_id:         positionId,
+      })
+
+      clearInterval(pulse)
+      setProvePct(100)
+      proveTimer({ circuit: 'BET_AUTH', outcome: 'success', ...proofSummary(proofResult.proof) })
+      log('bet_proof_done', { nullifier: nullifierHex, proof_bytes: proofResult.proof.length })
+
+      // Brief pause so user sees 100%, then relay
+      await new Promise((r) => setTimeout(r, 600))
+      await handleRelay(proofResult, {
+        nullifierHex, newCommitment, newBalance, newNonce,
+        stakeMicro, expectedShares, marketId, positionId, merkleRoot,
+      })
+    } catch (err) {
+      clearInterval(pulse)
+      const msg = err instanceof Error ? err.message : String(err)
+      setProveError(msg)
+      log('bet_proof_error', { error: msg })
+    }
+  }
+
+  async function handleRelay(
+    proofResult: ProofResult,
+    inputs: {
+      nullifierHex: `0x${string}`
+      newCommitment: `0x${string}`
+      newBalance: bigint
+      newNonce: bigint
+      stakeMicro: bigint
+      expectedShares: bigint
+      marketId: string
+      positionId: string
+      merkleRoot: `0x${string}`
+    },
+  ) {
     setStep(2)
     setRelaying(true)
     setRelayPct(20)
     setRelayError(null)
 
-    const stakeMicro = parseUnits(String(stake), 6)
-    const newBalance = selectedNote.balance - stakeMicro
-    const newNonce = selectedNote.nonce + 1n
-    const newCommitment = computeCommitment(selectedNote.secret, newBalance, newNonce)
-    const nullifierHex = computeNullifier(selectedNote.secret, selectedNote.nonce)
-    setNullifier(nullifierHex)
+    const relayTimer = timer('bet_relay')
 
-    const marketId = marketToBytes32(market)
-    const positionId = positionToBytes32(market, side)
-
-    const expectedShares = (stakeMicro * 100_000_000n) / BigInt(price)
-
-    const inputs = {
-      merkle_root:    MOCK_ROOT,
-      nullifier:      nullifierHex,
-      new_commitment: newCommitment,
-      bet_amount:     stakeMicro.toString(),
-      price:          String(price),
-      expected_shares: expectedShares.toString(),
-      market_id:      marketId,
-      outcome_side:   side === 'YES' ? 1 : 0,
-      position_id:    positionId,
+    const relayInputs = {
+      merkle_root:     inputs.merkleRoot,
+      nullifier:       inputs.nullifierHex,
+      new_commitment:  inputs.newCommitment,
+      bet_amount:      inputs.stakeMicro.toString(),
+      price:           String(price),
+      expected_shares: inputs.expectedShares.toString(),
+      market_id:       inputs.marketId,
+      outcome_side:    side === 'YES' ? 1 : 0,
+      position_id:     inputs.positionId,
     }
 
-    console.log('[bet] submitting to relay:', inputs)
+    log('bet_relay_start', {
+      ...proofSummary(proofResult.proof),
+      inputs: { ...relayInputs },
+      market, side, stake_usdc: stake,
+    })
 
     try {
       setRelayPct(50)
-      const { txHash } = await relayBet(MOCK_PROOF, inputs)
+      const { txHash } = await relayBet(proofResult.proof, relayInputs)
       setRelayPct(100)
       setRelayTxHash(txHash)
-      console.log('[bet] relay success, txHash:', txHash)
+      relayTimer({ outcome: 'success', txHash, market, side, stake_usdc: stake })
+      log('bet_relay_success', { txHash, market, side, stake_usdc: stake, nullifier: inputs.nullifierHex })
 
-      // Spend old note, save new output note
-      markNoteSpent(selectedNote.commitment)
+      markNoteSpent(selectedNote!.commitment)
       addNote({
-        id: newCommitment,
+        id: inputs.newCommitment,
         kind: 'BET_OUTPUT',
-        secret: selectedNote.secret,
-        balance: newBalance,
-        nonce: newNonce,
-        commitment: newCommitment,
-        nullifier: computeNullifier(selectedNote.secret, newNonce),
+        secret: selectedNote!.secret,
+        balance: inputs.newBalance,
+        nonce: inputs.newNonce,
+        commitment: inputs.newCommitment,
+        nullifier: computeNullifier(selectedNote!.secret, inputs.newNonce),
         spent: false,
         createdAt: Date.now(),
         txHash,
         marketId: market,
+        expectedShares: inputs.expectedShares,
       })
+      log('note_created', { kind: 'BET_OUTPUT', commitment: inputs.newCommitment, balance: inputs.newBalance.toString() })
 
       setTimeout(() => setStep(3), 600)
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err)
-      console.error('[bet] relay failed:', msg)
+      relayTimer({ outcome: 'error', error: msg })
+      log('bet_relay_error', { error: msg, market, side, stake_usdc: stake })
       setRelayError(msg)
       setRelayPct(0)
     } finally {
@@ -389,10 +453,10 @@ function BetPageInner() {
           market={market} side={side} price={price}
           stake={stake} setStake={setStake}
           notes={notes} selectedNote={selectedNote} setSelectedNote={setSelectedNote}
-          onNext={() => setStep(1)}
+          onNext={handleStartProve}
         />
       )}
-      {step === 1 && <Step1 onNext={handleRelay} />}
+      {step === 1 && <Step1 pct={provePct} error={proveError} />}
       {step === 2 && (
         <Step2 relaying={relaying} txHash={relayTxHash} error={relayError} pct={relayPct} />
       )}
