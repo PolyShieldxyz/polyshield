@@ -4,8 +4,8 @@ import { upsertSettlement } from "./database.js";
 
 const logger = pino({ name: "ctf-listener" });
 
-// Gnosis CTF on Polygon
-const CTF_ADDRESS = "0x4D97DCd97eC945f40cF65F87097ACe5EA0476045";
+// Production: Gnosis CTF on Polygon. Override with CTF_ADDRESS env var for local dev (MockCTF).
+const CTF_ADDRESS = process.env.CTF_ADDRESS ?? "0x4D97DCd97eC945f40cF65F87097ACe5EA0476045";
 
 const CTF_ABI = [
   "event ConditionResolution(bytes32 indexed conditionId, address indexed oracle, bytes32 indexed questionId, uint256 outcomeSlotCount, uint256[] payoutNumerators)",

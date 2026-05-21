@@ -47,9 +47,13 @@ export async function submitFOKOrder(
       // so orders appear as signed by the vault EOA via ERC-1271.
       // Dynamic import allows the clob-client to be optional at dev time.
       const { ClobClient } = await import("@polymarket/clob-client-v2");
+      // POLY_API_URL defaults to mainnet; overridden by mock-env for local dev
+      const clobHost = process.env.POLY_API_URL ?? "https://clob.polymarket.com";
+      const chainId = process.env.CHAIN_ID ? Number(process.env.CHAIN_ID) : 137;
+      logger.info({ clobHost, chainId }, "connecting to CLOB");
       const client = new ClobClient(
-        "https://clob.polymarket.com",
-        137, // Polygon mainnet chainId
+        clobHost,
+        chainId,
         wallet,
         {
           key: config.polyApiKey,
