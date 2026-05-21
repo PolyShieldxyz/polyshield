@@ -1,0 +1,52 @@
+{
+  "name": "@polyshield/groth16",
+  "version": "0.1.0",
+  "private": true,
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc",
+    "test": "jest --passWithNoTests",
+    "compile:circuits": "ts-node src/cli/compile.ts",
+    "setup:ptau": "ts-node src/cli/setupPtau.ts",
+    "setup:circuits": "ts-node src/cli/setupCircuits.ts",
+    "generate:verifiers": "ts-node src/cli/generateVerifiers.ts",
+    "generate:all": "ts-node src/cli/generateAll.ts",
+    "generate:test-proofs": "ts-node src/cli/generateTestProofs.ts",
+    "bench:prover": "ts-node src/cli/benchProver.ts"
+  },
+  "dependencies": {
+    "circomlib": "^2.0.5",
+    "ethers": "^6.13.0",
+    "snarkjs": "^0.7.5"
+  },
+  "devDependencies": {
+    "@types/jest": "^29.5.0",
+    "@types/node": "^20.14.0",
+    "jest": "^29.7.0",
+    "poseidon-lite": "^0.3.0",
+    "ts-jest": "^29.1.5",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.4.0"
+  },
+  "jest": {
+    "testEnvironment": "node",
+    "testPathIgnorePatterns": [
+      "/dist/"
+    ],
+    "transform": {
+      "^.+\\.tsx?$": [
+        "ts-jest",
+        {
+          "tsconfig": {
+            "module": "CommonJS",
+            "moduleResolution": "Node",
+            "isolatedModules": true
+          }
+        }
+      ]
+    },
+    "moduleNameMapper": {
+      "^(\\.{1,2}/.*)\\.js$": "$1"
+    }
+  }
+}

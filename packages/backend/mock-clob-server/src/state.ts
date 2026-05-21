@@ -20,14 +20,25 @@ export interface ReceivedOrder {
   body: Record<string, unknown>;
 }
 
+export interface SettledMarket {
+  conditionId: string;
+  payoutNumerators: number[];
+  payoutDenominator: number;
+  settledAt: string;
+  /** YES won when numerators[0] > 0; NO won when numerators[1] > 0; N/A when all zero */
+  outcome: "YES" | "NO" | "NA";
+}
+
 export interface ServerState {
   fillBehavior: FillBehavior;
   heartbeatCount: number;
   heartbeatId: string;
   ordersReceived: ReceivedOrder[];
   authCallCount: number;
-  responseDelayMs: number;  // 0 = no delay; used for timeout simulation
+  responseDelayMs: number;
   nextOrderId: number;
+  /** Live settlement records, keyed by conditionId (lowercase hex) */
+  settledMarkets: Record<string, SettledMarket>;
 }
 
 export const state: ServerState = {
@@ -38,6 +49,7 @@ export const state: ServerState = {
   authCallCount: 0,
   responseDelayMs: 0,
   nextOrderId: 1,
+  settledMarkets: {},
 };
 
 export function resetState(): void {
@@ -48,4 +60,5 @@ export function resetState(): void {
   state.authCallCount = 0;
   state.responseDelayMs = 0;
   state.nextOrderId = 1;
+  state.settledMarkets = {};
 }

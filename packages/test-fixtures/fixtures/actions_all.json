@@ -1,0 +1,843 @@
+[
+  {
+    "id": "hp_deposit_small",
+    "type": "deposit",
+    "actorId": "user_dust_01",
+    "outcome": "success",
+    "attackVector": "none",
+    "description": "Minimum $0.10 deposit — must succeed and insert commitment into tree",
+    "params": {
+      "amount": "100000",
+      "commitmentHex": "0x0101010101010101010101010101010101010101010101010101010101010101"
+    }
+  },
+  {
+    "id": "hp_deposit_medium",
+    "type": "deposit",
+    "actorId": "user_med_01",
+    "outcome": "success",
+    "attackVector": "none",
+    "description": "$2,500 deposit from medium user",
+    "params": {
+      "amount": "2500000000",
+      "commitmentHex": "0x0202020202020202020202020202020202020202020202020202020202020202"
+    }
+  },
+  {
+    "id": "hp_deposit_large",
+    "type": "deposit",
+    "actorId": "user_large_03",
+    "outcome": "success",
+    "attackVector": "none",
+    "description": "$49,999 deposit — just under cap",
+    "params": {
+      "amount": "49999000000",
+      "commitmentHex": "0x0303030303030303030303030303030303030303030303030303030303030303"
+    }
+  },
+  {
+    "id": "hp_authorize_bet_balanced",
+    "type": "authorize_bet",
+    "actorId": "user_med_01",
+    "marketId": "0x0101010101010101010101010101010101010101010101010101010101010101",
+    "outcome": "success",
+    "attackVector": "none",
+    "description": "Bet $500 at 0.52 on balanced market — valid proof, valid root, new nullifier",
+    "params": {
+      "betAmount": "500000000",
+      "price": "52000000",
+      "expectedShares": "961538461",
+      "merkleRootIndex": 0
+    }
+  },
+  {
+    "id": "hp_authorize_bet_skewed",
+    "type": "authorize_bet",
+    "actorId": "user_large_01",
+    "marketId": "0x0202020202020202020202020202020202020202020202020202020202020202",
+    "outcome": "success",
+    "attackVector": "none",
+    "description": "Bet $100 at 0.05 (5% Yes) — extreme price; shares = 100e6*1e8/5e6 = 2000000000",
+    "params": {
+      "betAmount": "100000000",
+      "price": "5000000",
+      "expectedShares": "2000000000",
+      "merkleRootIndex": 0
+    }
+  },
+  {
+    "id": "hp_credit_settlement_yes",
+    "type": "credit_settlement",
+    "actorId": "user_med_01",
+    "marketId": "0x6464646464646464646464646464646464646464646464646464646464646464",
+    "outcome": "success",
+    "attackVector": "none",
+    "description": "Settle resolved YES market — payout_per_share = 1e6",
+    "params": {
+      "nullifierOfBet": "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "payoutPerShare": "1000000",
+      "sharesHeld": "961538461",
+      "totalCredit": "961538461"
+    }
+  },
+  {
+    "id": "hp_withdraw_partial",
+    "type": "withdraw",
+    "actorId": "user_med_01",
+    "outcome": "success",
+    "attackVector": "none",
+    "description": "Withdraw $1,000 from $2,100 remaining balance",
+    "params": {
+      "withdrawalAmount": "1000000000",
+      "recipientAddressHex": "0xbeef000000000000000000000000000000000000",
+      "recipientHashHex": "0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+    }
+  },
+  {
+    "id": "hp_fok_failure",
+    "type": "report_fok_failure",
+    "actorId": "user_med_02",
+    "outcome": "success",
+    "attackVector": "none",
+    "description": "Signing layer operator reports FOK fill failure on illiquid market",
+    "params": {
+      "nullifierOfBet": "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "callerIsOperator": true
+    }
+  },
+  {
+    "id": "hp_bet_cancel_credit",
+    "type": "bet_cancellation_credit",
+    "actorId": "user_med_02",
+    "outcome": "success",
+    "attackVector": "none",
+    "description": "Cancellation credit after FOK failure — restores balance",
+    "params": {
+      "nullifierOfBet": "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "betAmount": "500000000",
+      "currentBalance": "4500000000",
+      "newBalance": "5000000000"
+    }
+  },
+  {
+    "id": "hp_na_cancel_credit",
+    "type": "na_cancellation_credit",
+    "actorId": "user_large_02",
+    "marketId": "0x6868686868686868686868686868686868686868686868686868686868686868",
+    "outcome": "success",
+    "attackVector": "none",
+    "description": "N/A cancellation credit — market resolved with all-zero numerators",
+    "params": {
+      "nullifierOfBet": "0xcccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "betAmount": "1000000000",
+      "marketConditionId": "0x6868686868686868686868686868686868686868686868686868686868686868",
+      "allZeroNumerators": true
+    }
+  },
+  {
+    "id": "atk_bet_nullifier_replay",
+    "type": "authorize_bet",
+    "actorId": "adv_zk_replay_nullifier",
+    "marketId": "0x0101010101010101010101010101010101010101010101010101010101010101",
+    "outcome": "revert_with",
+    "revertReason": "NullifierSpent",
+    "attackVector": "nullifier_replay",
+    "description": "Replay same bet proof twice — second must revert NullifierSpent",
+    "params": {
+      "nullifier": "0xdeaddeaddeaddeaddeaddeaddeaddeaddeaddeaddeaddeaddeaddeaddeaddead",
+      "betAmount": "100000000",
+      "price": "50000000",
+      "expectedShares": "200000000",
+      "attempt": 2
+    }
+  },
+  {
+    "id": "atk_withdrawal_nullifier_replay",
+    "type": "withdraw",
+    "actorId": "adv_zk_replay_nullifier",
+    "outcome": "revert_with",
+    "revertReason": "NullifierSpent",
+    "attackVector": "nullifier_replay",
+    "description": "Replay same withdrawal proof twice",
+    "params": {
+      "nullifier": "0xcafecafecafecafecafecafecafecafecafecafecafecafecafecafecafecafe",
+      "withdrawalAmount": "500000000",
+      "attempt": 2
+    }
+  },
+  {
+    "id": "atk_settlement_nullifier_replay",
+    "type": "credit_settlement",
+    "actorId": "adv_zk_replay_nullifier",
+    "marketId": "0x6464646464646464646464646464646464646464646464646464646464646464",
+    "outcome": "revert_with",
+    "revertReason": "NullifierSpent",
+    "attackVector": "nullifier_replay",
+    "description": "Replay same settlement credit proof twice",
+    "params": {
+      "nullifier": "0xbabebabebabebabebabebabebabebabebabebabebabebabebabebabebabebabe",
+      "nullifierOfBet": "0xfacefacefacefacefacefacefacefacefacefacefacefacefacefacefaceface",
+      "attempt": 2
+    }
+  },
+  {
+    "id": "atk_cancel_nullifier_replay",
+    "type": "bet_cancellation_credit",
+    "actorId": "adv_zk_replay_nullifier",
+    "outcome": "revert_with",
+    "revertReason": "NullifierSpent",
+    "attackVector": "nullifier_replay",
+    "description": "Replay same bet cancellation credit twice",
+    "params": {
+      "nullifier": "0xbeefbeefbeefbeefbeefbeefbeefbeefbeefbeefbeefbeefbeefbeefbeefbeef",
+      "nullifierOfBet": "0xd00dd00dd00dd00dd00dd00dd00dd00d",
+      "attempt": 2
+    }
+  },
+  {
+    "id": "atk_na_nullifier_replay",
+    "type": "na_cancellation_credit",
+    "actorId": "adv_zk_replay_nullifier",
+    "marketId": "0x6868686868686868686868686868686868686868686868686868686868686868",
+    "outcome": "revert_with",
+    "revertReason": "NullifierSpent",
+    "attackVector": "nullifier_replay",
+    "description": "Replay N/A cancellation credit twice",
+    "params": {
+      "nullifier": "0xfeedfeedfeedfeedfeedfeedfeedfeedfeedfeedfeedfeedfeedfeedfeedfeed",
+      "nullifierOfBet": "0xc0dec0dec0dec0dec0dec0dec0dec0de",
+      "attempt": 2
+    }
+  },
+  {
+    "id": "atk_stale_root_outside_window",
+    "type": "authorize_bet",
+    "actorId": "adv_zk_stale_root",
+    "marketId": "0x0101010101010101010101010101010101010101010101010101010101010101",
+    "outcome": "revert_with",
+    "revertReason": "UnknownRoot",
+    "attackVector": "stale_merkle_root",
+    "description": "Uses Merkle root from 31 inserts ago (outside 30-root window)",
+    "params": {
+      "merkleRootIndex": 31,
+      "betAmount": "500000000",
+      "price": "50000000",
+      "expectedShares": "1000000000"
+    }
+  },
+  {
+    "id": "atk_stale_root_exactly_30",
+    "type": "authorize_bet",
+    "actorId": "user_small_01",
+    "marketId": "0x0101010101010101010101010101010101010101010101010101010101010101",
+    "outcome": "success",
+    "attackVector": "none",
+    "description": "Uses root exactly 30 inserts ago — MUST succeed (boundary of 30-root window)",
+    "params": {
+      "merkleRootIndex": 30,
+      "betAmount": "10000000",
+      "price": "50000000",
+      "expectedShares": "20000000"
+    }
+  },
+  {
+    "id": "atk_stale_root_31",
+    "type": "authorize_bet",
+    "actorId": "adv_zk_stale_root",
+    "marketId": "0x0101010101010101010101010101010101010101010101010101010101010101",
+    "outcome": "revert_with",
+    "revertReason": "UnknownRoot",
+    "attackVector": "stale_merkle_root",
+    "description": "Root from exactly 31 inserts ago — one beyond window",
+    "params": {
+      "merkleRootIndex": 31,
+      "betAmount": "10000000",
+      "price": "50000000",
+      "expectedShares": "20000000"
+    }
+  },
+  {
+    "id": "atk_stale_root_zero",
+    "type": "authorize_bet",
+    "actorId": "adv_zk_stale_root",
+    "outcome": "revert_with",
+    "revertReason": "UnknownRoot",
+    "attackVector": "stale_merkle_root",
+    "description": "Uses the initial empty Merkle root (before any deposits)",
+    "params": {
+      "merkleRoot": "0x0000000000000000000000000000000000000000000000000000000000000000",
+      "betAmount": "100000000"
+    }
+  },
+  {
+    "id": "atk_wrong_new_commitment",
+    "type": "authorize_bet",
+    "actorId": "adv_zk_wrong_commitment",
+    "marketId": "0x0101010101010101010101010101010101010101010101010101010101010101",
+    "outcome": "revert_with",
+    "revertReason": "ProofVerificationFailed",
+    "attackVector": "wrong_commitment",
+    "description": "Proof has wrong new_commitment (balance differs from claimed new balance)",
+    "params": {
+      "newCommitmentManipulated": true,
+      "betAmount": "100000000",
+      "price": "50000000"
+    }
+  },
+  {
+    "id": "atk_commitment_not_in_tree",
+    "type": "authorize_bet",
+    "actorId": "adv_zk_wrong_commitment",
+    "marketId": "0x0101010101010101010101010101010101010101010101010101010101010101",
+    "outcome": "revert_with",
+    "revertReason": "ProofVerificationFailed",
+    "attackVector": "wrong_commitment",
+    "description": "old_commitment exists in proof but was never inserted into tree",
+    "params": {
+      "fabricatedCommitment": "0x1111111111111111111111111111111111111111111111111111111111111111",
+      "merklePathForged": true
+    }
+  },
+  {
+    "id": "atk_wrong_settlement_commitment",
+    "type": "credit_settlement",
+    "actorId": "adv_zk_wrong_commitment",
+    "marketId": "0x6464646464646464646464646464646464646464646464646464646464646464",
+    "outcome": "revert_with",
+    "revertReason": "ProofVerificationFailed",
+    "attackVector": "wrong_commitment",
+    "description": "Settlement proof uses wrong total_credit (balance overclaimed)",
+    "params": {
+      "claimedTotalCredit": "999999999999",
+      "sharesHeld": "1000000",
+      "payoutPerShare": "1000000"
+    }
+  },
+  {
+    "id": "atk_deposit_exactly_at_cap",
+    "type": "deposit",
+    "actorId": "user_atcap_01",
+    "outcome": "success",
+    "attackVector": "none",
+    "description": "Deposit that brings cumulative to exactly $50k — must succeed",
+    "params": {
+      "amount": "50000000000",
+      "commitmentHex": "0x0404040404040404040404040404040404040404040404040404040404040404"
+    }
+  },
+  {
+    "id": "atk_deposit_one_over_cap",
+    "type": "deposit",
+    "actorId": "user_atcap_01",
+    "outcome": "revert_with",
+    "revertReason": "DepositCapExceeded",
+    "attackVector": "over_cap_deposit",
+    "description": "Second deposit of $1 after reaching $50k cap — must revert",
+    "params": {
+      "amount": "1000000",
+      "commitmentHex": "0x0505050505050505050505050505050505050505050505050505050505050505"
+    }
+  },
+  {
+    "id": "atk_deposit_large_over_cap",
+    "type": "deposit",
+    "actorId": "user_atcap_02",
+    "outcome": "revert_with",
+    "revertReason": "DepositCapExceeded",
+    "attackVector": "over_cap_deposit",
+    "description": "Deposit of $50k when $50k already deposited ($100k total) — must revert",
+    "params": {
+      "amount": "50000000000",
+      "commitmentHex": "0x0606060606060606060606060606060606060606060606060606060606060606"
+    }
+  },
+  {
+    "id": "atk_deposit_zero",
+    "type": "deposit",
+    "actorId": "adv_zero_deposit",
+    "outcome": "revert_with",
+    "revertReason": "InvalidAmount",
+    "attackVector": "zero_amount",
+    "description": "$0 deposit — should revert (ERC-20 transferFrom 0 or explicit amount check)",
+    "params": {
+      "amount": "0",
+      "commitmentHex": "0x0707070707070707070707070707070707070707070707070707070707070707"
+    }
+  },
+  {
+    "id": "atk_deposit_max_u64",
+    "type": "deposit",
+    "actorId": "adv_max_u64_amount",
+    "outcome": "revert_with",
+    "revertReason": "DepositCapExceeded",
+    "attackVector": "max_amount_overflow",
+    "description": "Deposit of max uint64 — will overflow cap check or ERC-20 transferFrom",
+    "params": {
+      "amount": "18446744073709551615",
+      "commitmentHex": "0x0808080808080808080808080808080808080808080808080808080808080808"
+    }
+  },
+  {
+    "id": "atk_overbetting",
+    "type": "authorize_bet",
+    "actorId": "adv_zk_overbetting",
+    "marketId": "0x0101010101010101010101010101010101010101010101010101010101010101",
+    "outcome": "revert_with",
+    "revertReason": "ProofVerificationFailed",
+    "attackVector": "insufficient_balance",
+    "description": "Bets $2,000 from a $1,000 note — balance check in circuit fails",
+    "params": {
+      "noteBalance": "1000000000",
+      "betAmount": "2000000000",
+      "price": "50000000"
+    }
+  },
+  {
+    "id": "atk_wrong_shares_too_high",
+    "type": "authorize_bet",
+    "actorId": "adv_zk_wrong_shares",
+    "marketId": "0x0101010101010101010101010101010101010101010101010101010101010101",
+    "outcome": "revert_with",
+    "revertReason": "ProofVerificationFailed",
+    "attackVector": "wrong_shares",
+    "description": "Claims more shares than formula gives (expected_shares inflated)",
+    "params": {
+      "betAmount": "100000000",
+      "price": "50000000",
+      "expectedShares": "999999999999"
+    }
+  },
+  {
+    "id": "atk_wrong_shares_too_low",
+    "type": "authorize_bet",
+    "actorId": "adv_zk_wrong_shares",
+    "marketId": "0x0101010101010101010101010101010101010101010101010101010101010101",
+    "outcome": "revert_with",
+    "revertReason": "ProofVerificationFailed",
+    "attackVector": "wrong_shares",
+    "description": "Claims fewer shares than formula gives (potential front-run protection bypass)",
+    "params": {
+      "betAmount": "100000000",
+      "price": "50000000",
+      "expectedShares": "1"
+    }
+  },
+  {
+    "id": "atk_max_shares_overflow",
+    "type": "authorize_bet",
+    "actorId": "adv_max_u64_shares",
+    "marketId": "0x0101010101010101010101010101010101010101010101010101010101010101",
+    "outcome": "revert_with",
+    "revertReason": "ProofVerificationFailed",
+    "attackVector": "max_amount_overflow",
+    "description": "Claims max u64 shares — shares * payout_per_share would overflow u128",
+    "params": {
+      "betAmount": "50000000000",
+      "price": "1000",
+      "expectedShares": "18446744073709551615"
+    }
+  },
+  {
+    "id": "atk_zero_bet",
+    "type": "authorize_bet",
+    "actorId": "adv_zero_bet",
+    "marketId": "0x0101010101010101010101010101010101010101010101010101010101010101",
+    "outcome": "revert_with",
+    "revertReason": "InvalidAmount",
+    "attackVector": "zero_amount",
+    "description": "Bets $0 — produces 0 shares; Vault or circuit should reject",
+    "params": {
+      "betAmount": "0",
+      "price": "50000000",
+      "expectedShares": "0"
+    }
+  },
+  {
+    "id": "atk_wrong_recipient_hash",
+    "type": "withdraw",
+    "actorId": "adv_zk_wrong_recipient",
+    "outcome": "revert_with",
+    "revertReason": "InvalidRecipient",
+    "attackVector": "wrong_recipient_hash",
+    "description": "Proof commits to recipient_hash for address A, but calldata passes address B",
+    "params": {
+      "proofRecipientAddress": "0xAAAA000000000000000000000000000000000000",
+      "calldataRecipientAddress": "0xBBBB000000000000000000000000000000000000",
+      "withdrawalAmount": "1000000000"
+    }
+  },
+  {
+    "id": "atk_withdrawal_over_balance",
+    "type": "withdraw",
+    "actorId": "user_small_01",
+    "outcome": "revert_with",
+    "revertReason": "ProofVerificationFailed",
+    "attackVector": "insufficient_balance",
+    "description": "Withdrawal amount exceeds note balance — circuit constraint fails",
+    "params": {
+      "noteBalance": "47500000",
+      "withdrawalAmount": "50000000000"
+    }
+  },
+  {
+    "id": "atk_withdrawal_zero",
+    "type": "withdraw",
+    "actorId": "adv_zero_withdrawal",
+    "outcome": "revert_with",
+    "revertReason": "InvalidAmount",
+    "attackVector": "zero_amount",
+    "description": "Withdrawal of $0 — circuit constraint withdrawal_amount <= balance passes trivially but amount check should reject",
+    "params": {
+      "withdrawalAmount": "0",
+      "recipientAddress": "0xBEEF000000000000000000000000000000000000"
+    }
+  },
+  {
+    "id": "atk_withdrawal_reentrancy",
+    "type": "withdraw",
+    "actorId": "adv_addr_contract",
+    "outcome": "revert_with",
+    "revertReason": "ReentrancyGuardReentrantCall",
+    "attackVector": "reentrancy",
+    "description": "Malicious recipient contract re-enters withdraw() during USDC transfer — ReentrancyGuard must block",
+    "params": {
+      "recipientIsReentrant": true,
+      "withdrawalAmount": "1000000000"
+    }
+  },
+  {
+    "id": "atk_credit_active_bet",
+    "type": "credit_settlement",
+    "actorId": "adv_zk_status_skip",
+    "marketId": "0x6464646464646464646464646464646464646464646464646464646464646464",
+    "outcome": "revert_with",
+    "revertReason": "InvalidBetStatus",
+    "attackVector": "status_violation",
+    "description": "Tries to credit settlement on ACTIVE bet (status != FILLED)",
+    "params": {
+      "betStatus": "ACTIVE",
+      "nullifierOfBet": "0xa1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
+    }
+  },
+  {
+    "id": "atk_cancel_active_bet",
+    "type": "bet_cancellation_credit",
+    "actorId": "adv_zk_status_skip",
+    "outcome": "revert_with",
+    "revertReason": "InvalidBetStatus",
+    "attackVector": "status_violation",
+    "description": "Tries to cancel-credit an ACTIVE bet (status != FAILED)",
+    "params": {
+      "betStatus": "ACTIVE",
+      "nullifierOfBet": "0xa2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2"
+    }
+  },
+  {
+    "id": "atk_double_credit_after_credited",
+    "type": "credit_settlement",
+    "actorId": "adv_zk_double_credit",
+    "marketId": "0x6464646464646464646464646464646464646464646464646464646464646464",
+    "outcome": "revert_with",
+    "revertReason": "InvalidBetStatus",
+    "attackVector": "double_credit",
+    "description": "Settlement credit on already-CREDITED bet",
+    "params": {
+      "betStatus": "CREDITED",
+      "nullifierOfBet": "0xa3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3"
+    }
+  },
+  {
+    "id": "atk_cancel_after_credited",
+    "type": "bet_cancellation_credit",
+    "actorId": "adv_zk_status_skip",
+    "outcome": "revert_with",
+    "revertReason": "InvalidBetStatus",
+    "attackVector": "status_violation",
+    "description": "Tries betCancellationCredit on CREDITED bet",
+    "params": {
+      "betStatus": "CREDITED",
+      "nullifierOfBet": "0xa4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4"
+    }
+  },
+  {
+    "id": "atk_na_cancel_on_resolved_yes",
+    "type": "na_cancellation_credit",
+    "actorId": "adv_zk_na_abuse",
+    "marketId": "0xc8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8",
+    "outcome": "revert_with",
+    "revertReason": "NotNAMarket",
+    "attackVector": "na_abuse",
+    "description": "Tries N/A credit on a YES-resolved market (non-zero numerators)",
+    "params": {
+      "nullifierOfBet": "0xa5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5",
+      "marketPayoutNumerators": [
+        1000000,
+        0
+      ]
+    }
+  },
+  {
+    "id": "atk_na_cancel_on_no_resolved",
+    "type": "na_cancellation_credit",
+    "actorId": "adv_zk_na_abuse",
+    "marketId": "0xc9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9",
+    "outcome": "revert_with",
+    "revertReason": "NotNAMarket",
+    "attackVector": "na_abuse",
+    "description": "Tries N/A credit on NO-resolved market",
+    "params": {
+      "nullifierOfBet": "0xa6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6",
+      "marketPayoutNumerators": [
+        0,
+        1000000
+      ]
+    }
+  },
+  {
+    "id": "atk_fok_failure_wrong_status",
+    "type": "report_fok_failure",
+    "actorId": "user_med_02",
+    "outcome": "revert_with",
+    "revertReason": "InvalidBetStatus",
+    "attackVector": "status_violation",
+    "description": "reportFOKFailure called on a bet that's already FAILED",
+    "params": {
+      "nullifierOfBet": "0xa7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7",
+      "currentStatus": "FAILED"
+    }
+  },
+  {
+    "id": "atk_operator_impersonation_fok",
+    "type": "report_fok_failure",
+    "actorId": "adv_addr_operator_impersonator",
+    "outcome": "revert_with",
+    "revertReason": "Unauthorized",
+    "attackVector": "operator_impersonation",
+    "description": "Non-operator address calls reportFOKFailure — must revert Unauthorized",
+    "params": {
+      "callerIsOperator": false,
+      "nullifierOfBet": "0xb1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1"
+    }
+  },
+  {
+    "id": "atk_operator_impersonation_deposit_wallet",
+    "type": "report_fok_failure",
+    "actorId": "adv_addr_operator_impersonator",
+    "outcome": "revert_with",
+    "revertReason": "Unauthorized",
+    "attackVector": "operator_impersonation",
+    "description": "Deposit wallet address tries to call reportFOKFailure (it's also not the operator)",
+    "params": {
+      "callerIsDepositWallet": true,
+      "callerIsOperator": false,
+      "nullifierOfBet": "0xb2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2"
+    }
+  },
+  {
+    "id": "atk_cross_market_settlement",
+    "type": "credit_settlement",
+    "actorId": "user_large_01",
+    "marketId": "0x0303030303030303030303030303030303030303030303030303030303030303",
+    "outcome": "revert_with",
+    "revertReason": "MarketIdMismatch",
+    "attackVector": "cross_market_abuse",
+    "description": "Bet placed on market A (condition 0x01), settlement proof claims market B (condition 0x03)",
+    "params": {
+      "betMarketId": "0x0101010101010101010101010101010101010101010101010101010101010101",
+      "settlementMarketId": "0x0303030303030303030303030303030303030303030303030303030303030303",
+      "nullifierOfBet": "0xd1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1"
+    }
+  },
+  {
+    "id": "atk_ghost_market_bet",
+    "type": "authorize_bet",
+    "actorId": "user_small_01",
+    "marketId": "0xdeaddeaddeaddeaddeaddeaddeaddeaddeaddeaddeaddeaddeaddeaddeaddead",
+    "outcome": "revert_with",
+    "revertReason": "ProofVerificationFailed",
+    "attackVector": "ghost_market",
+    "description": "Bet references a non-existent market (condition_id not in CTF) — Vault can't verify settlement",
+    "params": {
+      "marketId": "0xdeaddeaddeaddeaddeaddeaddeaddeaddeaddeaddeaddeaddeaddeaddeaddead",
+      "betAmount": "100000000"
+    }
+  },
+  {
+    "id": "atk_ghost_market_na_cancel",
+    "type": "na_cancellation_credit",
+    "actorId": "user_small_01",
+    "marketId": "0xdeaddeaddeaddeaddeaddeaddeaddeaddeaddeaddeaddeaddeaddeaddeaddead",
+    "outcome": "revert_with",
+    "revertReason": "NotNAMarket",
+    "attackVector": "ghost_market",
+    "description": "N/A cancel on ghost market — CTF lookup returns 0 (empty condition), not [0,0] numerators",
+    "params": {
+      "nullifierOfBet": "0xe1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1",
+      "marketId": "0xdeaddeaddeaddeaddeaddeaddeaddeaddeaddeaddeaddeaddeaddeaddeaddead"
+    }
+  },
+  {
+    "id": "atk_empty_proof",
+    "type": "authorize_bet",
+    "actorId": "adv_zk_wrong_commitment",
+    "marketId": "0x0101010101010101010101010101010101010101010101010101010101010101",
+    "outcome": "revert_with",
+    "revertReason": "ProofVerificationFailed",
+    "attackVector": "proof_tampering",
+    "description": "Empty proof bytes — verifier must reject",
+    "params": {
+      "proofBytes": "0x",
+      "betAmount": "100000000"
+    }
+  },
+  {
+    "id": "atk_truncated_proof",
+    "type": "authorize_bet",
+    "actorId": "adv_zk_wrong_commitment",
+    "marketId": "0x0101010101010101010101010101010101010101010101010101010101010101",
+    "outcome": "revert_with",
+    "revertReason": "ProofVerificationFailed",
+    "attackVector": "proof_tampering",
+    "description": "Truncated proof (first 32 bytes only) — verifier must reject",
+    "params": {
+      "proofBytes": "0x0101010101010101010101010101010101010101010101010101010101010101",
+      "betAmount": "100000000"
+    }
+  },
+  {
+    "id": "atk_all_zeros_proof",
+    "type": "authorize_bet",
+    "actorId": "adv_zk_wrong_commitment",
+    "marketId": "0x0101010101010101010101010101010101010101010101010101010101010101",
+    "outcome": "revert_with",
+    "revertReason": "ProofVerificationFailed",
+    "attackVector": "proof_tampering",
+    "description": "All-zero proof bytes — should fail verification",
+    "params": {
+      "proofBytes": "0x0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+      "betAmount": "100000000"
+    }
+  },
+  {
+    "id": "atk_modified_public_input",
+    "type": "authorize_bet",
+    "actorId": "adv_zk_wrong_commitment",
+    "marketId": "0x0101010101010101010101010101010101010101010101010101010101010101",
+    "outcome": "revert_with",
+    "revertReason": "ProofVerificationFailed",
+    "attackVector": "proof_tampering",
+    "description": "Valid proof but calldata has tampered public input (nullifier changed by 1 bit)",
+    "params": {
+      "proofIsValid": true,
+      "publicInputTampered": true,
+      "tamperedField": "nullifier"
+    }
+  },
+  {
+    "id": "atk_swapped_verifier_inputs",
+    "type": "credit_settlement",
+    "actorId": "adv_zk_wrong_commitment",
+    "marketId": "0x6464646464646464646464646464646464646464646464646464646464646464",
+    "outcome": "revert_with",
+    "revertReason": "ProofVerificationFailed",
+    "attackVector": "proof_tampering",
+    "description": "Passes bet_auth proof to creditSettlement endpoint — wrong verifier contract",
+    "params": {
+      "proofType": "bet_auth",
+      "submittedTo": "creditSettlement"
+    }
+  },
+  {
+    "id": "atk_relay_no_ip_in_logs",
+    "type": "relay_bet",
+    "actorId": "user_small_01",
+    "outcome": "success",
+    "attackVector": "none",
+    "description": "Relay submits bet — verify that no source IP appears in any log line",
+    "params": {
+      "checkLogFields": [
+        "x-forwarded-for",
+        "remoteAddress",
+        "ip",
+        "sourceIp"
+      ],
+      "expectAbsent": true
+    }
+  },
+  {
+    "id": "atk_relay_bet_without_chain_confirm",
+    "type": "relay_bet",
+    "actorId": "user_small_01",
+    "outcome": "revert",
+    "attackVector": "none",
+    "description": "Relay submits to CLOB before on-chain proof is confirmed (< 1 block) — signing layer must wait",
+    "params": {
+      "blockConfirmations": 0,
+      "expectSigningLayerHolds": true
+    }
+  },
+  {
+    "id": "atk_relay_wrong_vault_function",
+    "type": "relay_withdrawal",
+    "actorId": "user_med_01",
+    "outcome": "revert_with",
+    "revertReason": "ProofVerificationFailed",
+    "attackVector": "proof_tampering",
+    "description": "Relay calls wrong Vault function (withdraw instead of authorizeBet)",
+    "params": {
+      "intendedFunction": "authorizeBet",
+      "calledFunction": "withdraw"
+    }
+  },
+  {
+    "id": "atk_indexer_market_not_found",
+    "type": "indexer_lookup",
+    "actorId": "user_small_01",
+    "outcome": "silent_fail",
+    "attackVector": "ghost_market",
+    "description": "Indexer lookup for market_id that hasn't settled yet — must return 404",
+    "params": {
+      "marketId": "0xf1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1",
+      "expectStatus": 404
+    }
+  },
+  {
+    "id": "atk_indexer_sql_injection",
+    "type": "indexer_lookup",
+    "actorId": "adv_addr_zero",
+    "outcome": "silent_fail",
+    "attackVector": "proof_tampering",
+    "description": "SQL injection attempt in market_id URL param — parameterized query must neutralize",
+    "params": {
+      "marketId": "' OR '1'='1",
+      "expectStatus": 400
+    }
+  },
+  {
+    "id": "atk_grief_tree_spam",
+    "type": "deposit",
+    "actorId": "adv_cap_split_01",
+    "outcome": "success",
+    "attackVector": "none",
+    "description": "Spams deposits of $0.10 to fill Merkle tree leaves (griefing tree capacity)",
+    "params": {
+      "amount": "100000",
+      "iterations": 1000,
+      "totalDeposited": "100000000",
+      "description": "Tree is depth-32 (4B leaves) so this is never a real DoS, but tests rate limiting"
+    }
+  },
+  {
+    "id": "atk_grief_event_spam",
+    "type": "authorize_bet",
+    "actorId": "adv_cap_split_01",
+    "outcome": "success",
+    "attackVector": "none",
+    "description": "Spam authorize_bet with minimum bets to flood BetAuthorized events and stress signing layer queue",
+    "params": {
+      "betAmount": "100000",
+      "iterations": 100,
+      "expectQueueBehavior": "rate_limited_by_bottleneck"
+    }
+  }
+]

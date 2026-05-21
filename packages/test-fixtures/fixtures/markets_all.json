@@ -1,0 +1,770 @@
+[
+  {
+    "condition_id": "0x0000000000000000000000000000000000000000000000000000000000000001",
+    "question_id": "0x0000000000000000000000000000000000000000000000000000000000001001",
+    "market_slug": "fed-rate-cut-q3-2026",
+    "question": "Will the Federal Reserve cut rates in Q3 2026?",
+    "active": true,
+    "closed": false,
+    "accepting_orders": true,
+    "accepting_order_timestamp": "2025-01-01T00:00:00Z",
+    "minimum_order_size": 5,
+    "minimum_tick_size": 0.01,
+    "maker_base_fee": 0,
+    "taker_base_fee": 0,
+    "collateral_token": "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174",
+    "tokens": [
+      {
+        "token_id": "244837814042626",
+        "outcome": "Yes",
+        "price": 0.52,
+        "winner": false
+      },
+      {
+        "token_id": "244837814042627",
+        "outcome": "No",
+        "price": 0.48,
+        "winner": false
+      }
+    ],
+    "end_date_iso": "2026-12-31T23:59:59Z",
+    "game_start_time": null,
+    "seconds_delay": 0,
+    "payout_numerators": null,
+    "payout_denominator": null,
+    "volume": 2500000,
+    "volume_24hr": 85000,
+    "liquidity": 350000,
+    "_category": "active_balanced",
+    "_description": "High-volume balanced market at 52/48"
+  },
+  {
+    "condition_id": "0x0000000000000000000000000000000000000000000000000000000000000002",
+    "question_id": "0x0000000000000000000000000000000000000000000000000000000000001002",
+    "market_slug": "btc-150k-2026",
+    "question": "Will Bitcoin exceed $150k by end of 2026?",
+    "active": true,
+    "closed": false,
+    "accepting_orders": true,
+    "accepting_order_timestamp": "2025-01-01T00:00:00Z",
+    "minimum_order_size": 5,
+    "minimum_tick_size": 0.01,
+    "maker_base_fee": 0,
+    "taker_base_fee": 0,
+    "collateral_token": "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174",
+    "tokens": [
+      {
+        "token_id": "244837814042628",
+        "outcome": "Yes",
+        "price": 0.49,
+        "winner": false
+      },
+      {
+        "token_id": "244837814042629",
+        "outcome": "No",
+        "price": 0.51,
+        "winner": false
+      }
+    ],
+    "end_date_iso": "2026-12-31T23:59:59Z",
+    "game_start_time": null,
+    "seconds_delay": 0,
+    "payout_numerators": null,
+    "payout_denominator": null,
+    "volume": 5000000,
+    "volume_24hr": 210000,
+    "liquidity": 800000,
+    "_category": "active_balanced",
+    "_description": "Very high volume, near 50/50 — prime for large bets"
+  },
+  {
+    "condition_id": "0x0000000000000000000000000000000000000000000000000000000000000003",
+    "question_id": "0x0000000000000000000000000000000000000000000000000000000000001003",
+    "market_slug": "senate-flip-2026",
+    "question": "Will the 2026 US midterms flip the Senate?",
+    "active": true,
+    "closed": false,
+    "accepting_orders": true,
+    "accepting_order_timestamp": "2025-01-01T00:00:00Z",
+    "minimum_order_size": 5,
+    "minimum_tick_size": 0.01,
+    "maker_base_fee": 0,
+    "taker_base_fee": 0,
+    "collateral_token": "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174",
+    "tokens": [
+      {
+        "token_id": "244837814042630",
+        "outcome": "Yes",
+        "price": 0.5,
+        "winner": false
+      },
+      {
+        "token_id": "244837814042631",
+        "outcome": "No",
+        "price": 0.5,
+        "winner": false
+      }
+    ],
+    "end_date_iso": "2026-12-31T23:59:59Z",
+    "game_start_time": null,
+    "seconds_delay": 0,
+    "payout_numerators": null,
+    "payout_denominator": null,
+    "volume": 1200000,
+    "volume_24hr": 30000,
+    "liquidity": 200000,
+    "_category": "active_balanced",
+    "_description": "Exactly 50/50 — edge case for price-based shares calculation"
+  },
+  {
+    "condition_id": "0x0000000000000000000000000000000000000000000000000000000000000004",
+    "question_id": "0x0000000000000000000000000000000000000000000000000000000000001004",
+    "market_slug": "eiffel-tower-2027",
+    "question": "Will the Eiffel Tower still be standing in 2027?",
+    "active": true,
+    "closed": false,
+    "accepting_orders": true,
+    "accepting_order_timestamp": "2025-01-01T00:00:00Z",
+    "minimum_order_size": 5,
+    "minimum_tick_size": 0.01,
+    "maker_base_fee": 0,
+    "taker_base_fee": 0,
+    "collateral_token": "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174",
+    "tokens": [
+      {
+        "token_id": "244837814042632",
+        "outcome": "Yes",
+        "price": 0.98,
+        "winner": false
+      },
+      {
+        "token_id": "244837814042633",
+        "outcome": "No",
+        "price": 0.02,
+        "winner": false
+      }
+    ],
+    "end_date_iso": "2026-12-31T23:59:59Z",
+    "game_start_time": null,
+    "seconds_delay": 0,
+    "payout_numerators": null,
+    "payout_denominator": null,
+    "volume": 50000,
+    "volume_24hr": 500,
+    "liquidity": 10000,
+    "_category": "active_skewed_yes",
+    "_description": "98% Yes — tiny No side, shares calculation uses extreme price"
+  },
+  {
+    "condition_id": "0x0000000000000000000000000000000000000000000000000000000000000005",
+    "question_id": "0x0000000000000000000000000000000000000000000000000000000000001005",
+    "market_slug": "g7-ai-legislation-2026",
+    "question": "Will any G7 country have AI-generated legislation by end of 2026?",
+    "active": true,
+    "closed": false,
+    "accepting_orders": true,
+    "accepting_order_timestamp": "2025-01-01T00:00:00Z",
+    "minimum_order_size": 5,
+    "minimum_tick_size": 0.01,
+    "maker_base_fee": 0,
+    "taker_base_fee": 0,
+    "collateral_token": "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174",
+    "tokens": [
+      {
+        "token_id": "244837814042634",
+        "outcome": "Yes",
+        "price": 0.82,
+        "winner": false
+      },
+      {
+        "token_id": "244837814042635",
+        "outcome": "No",
+        "price": 0.18,
+        "winner": false
+      }
+    ],
+    "end_date_iso": "2026-12-31T23:59:59Z",
+    "game_start_time": null,
+    "seconds_delay": 0,
+    "payout_numerators": null,
+    "payout_denominator": null,
+    "volume": 320000,
+    "volume_24hr": 12000,
+    "liquidity": 60000,
+    "_category": "active_skewed_yes",
+    "_description": "82% Yes — good test for shares arithmetic at non-round prices"
+  },
+  {
+    "condition_id": "0x0000000000000000000000000000000000000000000000000000000000000006",
+    "question_id": "0x0000000000000000000000000000000000000000000000000000000000001006",
+    "market_slug": "cold-fusion-2027",
+    "question": "Will cold fusion be commercially viable by 2027?",
+    "active": true,
+    "closed": false,
+    "accepting_orders": true,
+    "accepting_order_timestamp": "2025-01-01T00:00:00Z",
+    "minimum_order_size": 5,
+    "minimum_tick_size": 0.01,
+    "maker_base_fee": 0,
+    "taker_base_fee": 0,
+    "collateral_token": "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174",
+    "tokens": [
+      {
+        "token_id": "244837814042636",
+        "outcome": "Yes",
+        "price": 0.03,
+        "winner": false
+      },
+      {
+        "token_id": "244837814042637",
+        "outcome": "No",
+        "price": 0.97,
+        "winner": false
+      }
+    ],
+    "end_date_iso": "2026-12-31T23:59:59Z",
+    "game_start_time": null,
+    "seconds_delay": 0,
+    "payout_numerators": null,
+    "payout_denominator": null,
+    "volume": 25000,
+    "volume_24hr": 100,
+    "liquidity": 5000,
+    "_category": "active_skewed_no",
+    "_description": "3% Yes — buying Yes gives 33x leverage on a tiny price"
+  },
+  {
+    "condition_id": "0x0000000000000000000000000000000000000000000000000000000000000007",
+    "question_id": "0x0000000000000000000000000000000000000000000000000000000000001007",
+    "market_slug": "spacex-mars-2027",
+    "question": "Will SpaceX land humans on Mars before 2027?",
+    "active": true,
+    "closed": false,
+    "accepting_orders": true,
+    "accepting_order_timestamp": "2025-01-01T00:00:00Z",
+    "minimum_order_size": 5,
+    "minimum_tick_size": 0.01,
+    "maker_base_fee": 0,
+    "taker_base_fee": 0,
+    "collateral_token": "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174",
+    "tokens": [
+      {
+        "token_id": "244837814042638",
+        "outcome": "Yes",
+        "price": 0.05,
+        "winner": false
+      },
+      {
+        "token_id": "244837814042639",
+        "outcome": "No",
+        "price": 0.95,
+        "winner": false
+      }
+    ],
+    "end_date_iso": "2026-12-31T23:59:59Z",
+    "game_start_time": null,
+    "seconds_delay": 0,
+    "payout_numerators": null,
+    "payout_denominator": null,
+    "volume": 180000,
+    "volume_24hr": 2000,
+    "liquidity": 30000,
+    "_category": "active_skewed_no",
+    "_description": "5% Yes — shares calculation: 100 USDC at 5 cents = 2000 shares"
+  },
+  {
+    "condition_id": "0x0000000000000000000000000000000000000000000000000000000000000008",
+    "question_id": "0x0000000000000000000000000000000000000000000000000000000000001008",
+    "market_slug": "iso-blockchain-2026",
+    "question": "Will a new ISO standard for blockchain be published in 2026?",
+    "active": true,
+    "closed": false,
+    "accepting_orders": true,
+    "accepting_order_timestamp": "2025-01-01T00:00:00Z",
+    "minimum_order_size": 5,
+    "minimum_tick_size": 0.01,
+    "maker_base_fee": 0,
+    "taker_base_fee": 0,
+    "collateral_token": "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174",
+    "tokens": [
+      {
+        "token_id": "244837814042640",
+        "outcome": "Yes",
+        "price": 0.35,
+        "winner": false
+      },
+      {
+        "token_id": "244837814042641",
+        "outcome": "No",
+        "price": 0.65,
+        "winner": false
+      }
+    ],
+    "end_date_iso": "2026-12-31T23:59:59Z",
+    "game_start_time": null,
+    "seconds_delay": 0,
+    "payout_numerators": null,
+    "payout_denominator": null,
+    "volume": 800,
+    "volume_24hr": 0,
+    "liquidity": 200,
+    "_category": "active_illiquid",
+    "_description": "Very illiquid — FOK orders likely to fail (signing layer must call reportFOKFailure)"
+  },
+  {
+    "condition_id": "0x0000000000000000000000000000000000000000000000000000000000000009",
+    "question_id": "0x0000000000000000000000000000000000000000000000000000000000001009",
+    "market_slug": "obscure-zoning-law",
+    "question": "Will a specific obscure municipality pass a zoning law?",
+    "active": true,
+    "closed": false,
+    "accepting_orders": true,
+    "accepting_order_timestamp": "2025-01-01T00:00:00Z",
+    "minimum_order_size": 5,
+    "minimum_tick_size": 0.01,
+    "maker_base_fee": 0,
+    "taker_base_fee": 0,
+    "collateral_token": "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174",
+    "tokens": [
+      {
+        "token_id": "244837814042642",
+        "outcome": "Yes",
+        "price": 0.5,
+        "winner": false
+      },
+      {
+        "token_id": "244837814042643",
+        "outcome": "No",
+        "price": 0.5,
+        "winner": false
+      }
+    ],
+    "end_date_iso": "2026-12-31T23:59:59Z",
+    "game_start_time": null,
+    "seconds_delay": 0,
+    "payout_numerators": null,
+    "payout_denominator": null,
+    "volume": 150,
+    "volume_24hr": 0,
+    "liquidity": 50,
+    "_category": "active_illiquid",
+    "_description": "Essentially no liquidity — FOK fill impossible; cancellation path must be tested"
+  },
+  {
+    "condition_id": "0x0000000000000000000000000000000000000000000000000000000000000064",
+    "question_id": "0x0000000000000000000000000000000000000000000000000000000000001064",
+    "market_slug": "nfl-superbowl-2025",
+    "question": "Did the 2025 NFL Super Bowl occur?",
+    "active": false,
+    "closed": true,
+    "accepting_orders": false,
+    "accepting_order_timestamp": null,
+    "minimum_order_size": 5,
+    "minimum_tick_size": 0.01,
+    "maker_base_fee": 0,
+    "taker_base_fee": 0,
+    "collateral_token": "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174",
+    "tokens": [
+      {
+        "token_id": "244837814042824",
+        "outcome": "Yes",
+        "price": 1,
+        "winner": true
+      },
+      {
+        "token_id": "244837814042825",
+        "outcome": "No",
+        "price": 0,
+        "winner": false
+      }
+    ],
+    "end_date_iso": "2026-12-31T23:59:59Z",
+    "game_start_time": null,
+    "seconds_delay": 0,
+    "payout_numerators": [
+      1000000,
+      0
+    ],
+    "payout_denominator": 1000000,
+    "volume": 10000000,
+    "volume_24hr": 0,
+    "liquidity": 0,
+    "_category": "resolved_yes",
+    "_description": "YES resolution — payout_per_share = 1e6 (full pUSD)"
+  },
+  {
+    "condition_id": "0x0000000000000000000000000000000000000000000000000000000000000065",
+    "question_id": "0x0000000000000000000000000000000000000000000000000000000000001065",
+    "market_slug": "btc-100k-jan-2026",
+    "question": "Did Bitcoin close above $100k in January 2026?",
+    "active": false,
+    "closed": true,
+    "accepting_orders": false,
+    "accepting_order_timestamp": null,
+    "minimum_order_size": 5,
+    "minimum_tick_size": 0.01,
+    "maker_base_fee": 0,
+    "taker_base_fee": 0,
+    "collateral_token": "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174",
+    "tokens": [
+      {
+        "token_id": "244837814042826",
+        "outcome": "Yes",
+        "price": 1,
+        "winner": true
+      },
+      {
+        "token_id": "244837814042827",
+        "outcome": "No",
+        "price": 0,
+        "winner": false
+      }
+    ],
+    "end_date_iso": "2026-12-31T23:59:59Z",
+    "game_start_time": null,
+    "seconds_delay": 0,
+    "payout_numerators": [
+      1000000,
+      0
+    ],
+    "payout_denominator": 1000000,
+    "volume": 4500000,
+    "volume_24hr": 0,
+    "liquidity": 0,
+    "_category": "resolved_yes",
+    "_description": "YES resolution with large volume — settlement credit path"
+  },
+  {
+    "condition_id": "0x0000000000000000000000000000000000000000000000000000000000000066",
+    "question_id": "0x0000000000000000000000000000000000000000000000000000000000001066",
+    "market_slug": "world-cup-cancelled-2026",
+    "question": "Will the 2026 World Cup be cancelled?",
+    "active": false,
+    "closed": true,
+    "accepting_orders": false,
+    "accepting_order_timestamp": null,
+    "minimum_order_size": 5,
+    "minimum_tick_size": 0.01,
+    "maker_base_fee": 0,
+    "taker_base_fee": 0,
+    "collateral_token": "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174",
+    "tokens": [
+      {
+        "token_id": "244837814042828",
+        "outcome": "Yes",
+        "price": 0,
+        "winner": false
+      },
+      {
+        "token_id": "244837814042829",
+        "outcome": "No",
+        "price": 1,
+        "winner": true
+      }
+    ],
+    "end_date_iso": "2026-12-31T23:59:59Z",
+    "game_start_time": null,
+    "seconds_delay": 0,
+    "payout_numerators": [
+      0,
+      1000000
+    ],
+    "payout_denominator": 1000000,
+    "volume": 750000,
+    "volume_24hr": 0,
+    "liquidity": 0,
+    "_category": "resolved_no",
+    "_description": "NO resolution — Yes position pays 0; No pays full"
+  },
+  {
+    "condition_id": "0x0000000000000000000000000000000000000000000000000000000000000067",
+    "question_id": "0x0000000000000000000000000000000000000000000000000000000000001067",
+    "market_slug": "fed-raise-q1-2026",
+    "question": "Did the Fed raise rates in Q1 2026?",
+    "active": false,
+    "closed": true,
+    "accepting_orders": false,
+    "accepting_order_timestamp": null,
+    "minimum_order_size": 5,
+    "minimum_tick_size": 0.01,
+    "maker_base_fee": 0,
+    "taker_base_fee": 0,
+    "collateral_token": "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174",
+    "tokens": [
+      {
+        "token_id": "244837814042830",
+        "outcome": "Yes",
+        "price": 0,
+        "winner": false
+      },
+      {
+        "token_id": "244837814042831",
+        "outcome": "No",
+        "price": 1,
+        "winner": true
+      }
+    ],
+    "end_date_iso": "2026-12-31T23:59:59Z",
+    "game_start_time": null,
+    "seconds_delay": 0,
+    "payout_numerators": [
+      0,
+      1000000
+    ],
+    "payout_denominator": 1000000,
+    "volume": 1200000,
+    "volume_24hr": 0,
+    "liquidity": 0,
+    "_category": "resolved_no",
+    "_description": "NO resolution — tests that vault doesn't pay out Yes positions"
+  },
+  {
+    "condition_id": "0x0000000000000000000000000000000000000000000000000000000000000068",
+    "question_id": "0x0000000000000000000000000000000000000000000000000000000000001068",
+    "market_slug": "impossible-event-na",
+    "question": "Will an event that never happened happen?",
+    "active": false,
+    "closed": true,
+    "accepting_orders": false,
+    "accepting_order_timestamp": null,
+    "minimum_order_size": 5,
+    "minimum_tick_size": 0.01,
+    "maker_base_fee": 0,
+    "taker_base_fee": 0,
+    "collateral_token": "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174",
+    "tokens": [
+      {
+        "token_id": "244837814042832",
+        "outcome": "Yes",
+        "price": 0,
+        "winner": false
+      },
+      {
+        "token_id": "244837814042833",
+        "outcome": "No",
+        "price": 0,
+        "winner": false
+      }
+    ],
+    "end_date_iso": "2026-12-31T23:59:59Z",
+    "game_start_time": null,
+    "seconds_delay": 0,
+    "payout_numerators": [
+      0,
+      0
+    ],
+    "payout_denominator": 1000000,
+    "volume": 200000,
+    "volume_24hr": 0,
+    "liquidity": 0,
+    "_category": "resolved_na",
+    "_description": "N/A resolution — all zeros; naCancellationCredit path must trigger"
+  },
+  {
+    "condition_id": "0x0000000000000000000000000000000000000000000000000000000000000069",
+    "question_id": "0x0000000000000000000000000000000000000000000000000000000000001069",
+    "market_slug": "g7-earthquake-m9-2025",
+    "question": "Did an earthquake above M9 hit a G7 country in 2025?",
+    "active": false,
+    "closed": true,
+    "accepting_orders": false,
+    "accepting_order_timestamp": null,
+    "minimum_order_size": 5,
+    "minimum_tick_size": 0.01,
+    "maker_base_fee": 0,
+    "taker_base_fee": 0,
+    "collateral_token": "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174",
+    "tokens": [
+      {
+        "token_id": "244837814042834",
+        "outcome": "Yes",
+        "price": 0,
+        "winner": false
+      },
+      {
+        "token_id": "244837814042835",
+        "outcome": "No",
+        "price": 0,
+        "winner": false
+      }
+    ],
+    "end_date_iso": "2026-12-31T23:59:59Z",
+    "game_start_time": null,
+    "seconds_delay": 0,
+    "payout_numerators": [
+      0,
+      0
+    ],
+    "payout_denominator": 1000000,
+    "volume": 90000,
+    "volume_24hr": 0,
+    "liquidity": 0,
+    "_category": "resolved_na",
+    "_description": "N/A — second test case for all-zero numerators"
+  },
+  {
+    "condition_id": "0x00000000000000000000000000000000000000000000000000000000000000c8",
+    "question_id": "0x00000000000000000000000000000000000000000000000000000000000010c8",
+    "market_slug": "definitely-happened",
+    "question": "Did something definitely happen?",
+    "active": false,
+    "closed": true,
+    "accepting_orders": false,
+    "accepting_order_timestamp": null,
+    "minimum_order_size": 5,
+    "minimum_tick_size": 0.01,
+    "maker_base_fee": 0,
+    "taker_base_fee": 0,
+    "collateral_token": "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174",
+    "tokens": [
+      {
+        "token_id": "244837814043024",
+        "outcome": "Yes",
+        "price": 1,
+        "winner": true
+      },
+      {
+        "token_id": "244837814043025",
+        "outcome": "No",
+        "price": 0,
+        "winner": false
+      }
+    ],
+    "end_date_iso": "2026-12-31T23:59:59Z",
+    "game_start_time": null,
+    "seconds_delay": 0,
+    "payout_numerators": [
+      1000000,
+      0
+    ],
+    "payout_denominator": 1000000,
+    "volume": 500000,
+    "volume_24hr": 0,
+    "liquidity": 0,
+    "_category": "adversarial_na_fake",
+    "_description": "Resolved YES — attacker tries to claim N/A credit; vault must revert because payout_numerators != [0,0]"
+  },
+  {
+    "condition_id": "0x00000000000000000000000000000000000000000000000000000000000000c9",
+    "question_id": "0x00000000000000000000000000000000000000000000000000000000000010c9",
+    "market_slug": "event-201",
+    "question": "Will event 201 happen?",
+    "active": false,
+    "closed": true,
+    "accepting_orders": false,
+    "accepting_order_timestamp": null,
+    "minimum_order_size": 5,
+    "minimum_tick_size": 0.01,
+    "maker_base_fee": 0,
+    "taker_base_fee": 0,
+    "collateral_token": "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174",
+    "tokens": [
+      {
+        "token_id": "244837814043026",
+        "outcome": "Yes",
+        "price": 1,
+        "winner": true
+      },
+      {
+        "token_id": "244837814043027",
+        "outcome": "No",
+        "price": 0,
+        "winner": false
+      }
+    ],
+    "end_date_iso": "2026-12-31T23:59:59Z",
+    "game_start_time": null,
+    "seconds_delay": 0,
+    "payout_numerators": [
+      500000,
+      0
+    ],
+    "payout_denominator": 500000,
+    "volume": 300000,
+    "volume_24hr": 0,
+    "liquidity": 0,
+    "_category": "adversarial_bad_payout",
+    "_description": "Non-standard denominator — payout_per_share calculation must use actual denominator"
+  },
+  {
+    "condition_id": "0xdeaddeaddeaddeaddeaddeaddeaddeaddeaddeaddeaddeaddeaddeaddeaddead",
+    "question_id": "0x00000000000000000000000000000000000000000000000000000000000010ca",
+    "market_slug": "ghost-market-unregistered",
+    "question": "Will an event that was never registered happen?",
+    "active": false,
+    "closed": true,
+    "accepting_orders": false,
+    "accepting_order_timestamp": null,
+    "minimum_order_size": 5,
+    "minimum_tick_size": 0.01,
+    "maker_base_fee": 0,
+    "taker_base_fee": 0,
+    "collateral_token": "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174",
+    "tokens": [
+      {
+        "token_id": "244837814043028",
+        "outcome": "Yes",
+        "price": 0.5,
+        "winner": false
+      },
+      {
+        "token_id": "244837814043029",
+        "outcome": "No",
+        "price": 0.5,
+        "winner": false
+      }
+    ],
+    "end_date_iso": "2026-12-31T23:59:59Z",
+    "game_start_time": null,
+    "seconds_delay": 0,
+    "payout_numerators": null,
+    "payout_denominator": null,
+    "volume": 0,
+    "volume_24hr": 0,
+    "liquidity": 0,
+    "_category": "adversarial_stale",
+    "_description": "Ghost condition_id — lookup on CTF contract returns 0; all operations should revert"
+  },
+  {
+    "condition_id": "0x00000000000000000000000000000000000000000000000000000000000000cb",
+    "question_id": "0x00000000000000000000000000000000000000000000000000000000000010cb",
+    "market_slug": "shadow-market-203",
+    "question": "Shadow market for cross-market attack",
+    "active": false,
+    "closed": true,
+    "accepting_orders": false,
+    "accepting_order_timestamp": null,
+    "minimum_order_size": 5,
+    "minimum_tick_size": 0.01,
+    "maker_base_fee": 0,
+    "taker_base_fee": 0,
+    "collateral_token": "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174",
+    "tokens": [
+      {
+        "token_id": "244837814043030",
+        "outcome": "Yes",
+        "price": 1,
+        "winner": true
+      },
+      {
+        "token_id": "244837814043031",
+        "outcome": "No",
+        "price": 0,
+        "winner": false
+      }
+    ],
+    "end_date_iso": "2026-12-31T23:59:59Z",
+    "game_start_time": null,
+    "seconds_delay": 0,
+    "payout_numerators": [
+      1000000,
+      0
+    ],
+    "payout_denominator": 1000000,
+    "volume": 50000,
+    "volume_24hr": 0,
+    "liquidity": 0,
+    "_category": "adversarial_bad_payout",
+    "_description": "Attacker places bet on market 100 then submits settlement proof with market_id from market 203 (different payout); Vault must reject because market_id in BetRecord must match"
+  }
+]

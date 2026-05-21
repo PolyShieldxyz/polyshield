@@ -4,10 +4,12 @@ test = "test"
 script = "script"
 out = "out"
 libs = ["lib"]
+allow_paths = ["../groth16"]
 solc = "0.8.24"
 optimizer = true
 optimizer_runs = 200
 via_ir = false
+fs_permissions = [{ access = "read", path = "./" }, { access = "read", path = "../" }]
 
 [profile.default.fuzz]
 runs = 1000

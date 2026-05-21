@@ -1,0 +1,409 @@
+[
+  {
+    "id": "seq_nullifier_replay_full",
+    "description": "Full nullifier replay: deposit → bet → try to bet again with same nullifier",
+    "attackVector": "nullifier_replay",
+    "steps": [
+      {
+        "id": "hp_deposit_small",
+        "type": "deposit",
+        "actorId": "user_dust_01",
+        "outcome": "success",
+        "attackVector": "none",
+        "description": "Minimum $0.10 deposit — must succeed and insert commitment into tree",
+        "params": {
+          "amount": "100000",
+          "commitmentHex": "0x0101010101010101010101010101010101010101010101010101010101010101"
+        }
+      },
+      {
+        "id": "hp_authorize_bet_balanced",
+        "type": "authorize_bet",
+        "actorId": "user_med_01",
+        "marketId": "0x0101010101010101010101010101010101010101010101010101010101010101",
+        "outcome": "success",
+        "attackVector": "none",
+        "description": "Bet $500 at 0.52 on balanced market — valid proof, valid root, new nullifier",
+        "params": {
+          "betAmount": "500000000",
+          "price": "52000000",
+          "expectedShares": "961538461",
+          "merkleRootIndex": 0
+        }
+      },
+      {
+        "id": "atk_bet_nullifier_replay",
+        "type": "authorize_bet",
+        "actorId": "adv_zk_replay_nullifier",
+        "marketId": "0x0101010101010101010101010101010101010101010101010101010101010101",
+        "outcome": "revert_with",
+        "revertReason": "NullifierSpent",
+        "attackVector": "nullifier_replay",
+        "description": "Replay same bet proof twice — second must revert NullifierSpent",
+        "params": {
+          "nullifier": "0xdeaddeaddeaddeaddeaddeaddeaddeaddeaddeaddeaddeaddeaddeaddeaddead",
+          "betAmount": "100000000",
+          "price": "50000000",
+          "expectedShares": "200000000",
+          "attempt": 2
+        }
+      }
+    ],
+    "expectedFinalState": "Second bet reverts NullifierSpent; first bet is still active"
+  },
+  {
+    "id": "seq_double_credit",
+    "description": "Fill bet → credit settlement → attempt double credit",
+    "attackVector": "double_credit",
+    "steps": [
+      {
+        "id": "hp_deposit_small",
+        "type": "deposit",
+        "actorId": "user_dust_01",
+        "outcome": "success",
+        "attackVector": "none",
+        "description": "Minimum $0.10 deposit — must succeed and insert commitment into tree",
+        "params": {
+          "amount": "100000",
+          "commitmentHex": "0x0101010101010101010101010101010101010101010101010101010101010101"
+        }
+      },
+      {
+        "id": "hp_authorize_bet_balanced",
+        "type": "authorize_bet",
+        "actorId": "user_med_01",
+        "marketId": "0x0101010101010101010101010101010101010101010101010101010101010101",
+        "outcome": "success",
+        "attackVector": "none",
+        "description": "Bet $500 at 0.52 on balanced market — valid proof, valid root, new nullifier",
+        "params": {
+          "betAmount": "500000000",
+          "price": "52000000",
+          "expectedShares": "961538461",
+          "merkleRootIndex": 0
+        }
+      },
+      {
+        "id": "hp_authorize_bet_skewed",
+        "type": "authorize_bet",
+        "actorId": "user_large_01",
+        "marketId": "0x0202020202020202020202020202020202020202020202020202020202020202",
+        "outcome": "success",
+        "attackVector": "none",
+        "description": "Bet $100 at 0.05 (5% Yes) — extreme price; shares = 100e6*1e8/5e6 = 2000000000",
+        "params": {
+          "betAmount": "100000000",
+          "price": "5000000",
+          "expectedShares": "2000000000",
+          "merkleRootIndex": 0
+        }
+      },
+      {
+        "id": "atk_settlement_nullifier_replay",
+        "type": "credit_settlement",
+        "actorId": "adv_zk_replay_nullifier",
+        "marketId": "0x6464646464646464646464646464646464646464646464646464646464646464",
+        "outcome": "revert_with",
+        "revertReason": "NullifierSpent",
+        "attackVector": "nullifier_replay",
+        "description": "Replay same settlement credit proof twice",
+        "params": {
+          "nullifier": "0xbabebabebabebabebabebabebabebabebabebabebabebabebabebabebabebabe",
+          "nullifierOfBet": "0xfacefacefacefacefacefacefacefacefacefacefacefacefacefacefaceface",
+          "attempt": 2
+        }
+      }
+    ],
+    "expectedFinalState": "Second credit reverts NullifierSpent (nullifier from credit proof is spent)"
+  },
+  {
+    "id": "seq_status_skip_cancel_on_active",
+    "description": "Bet authorized → try cancellation without reportFOKFailure",
+    "attackVector": "status_violation",
+    "steps": [
+      {
+        "id": "hp_deposit_small",
+        "type": "deposit",
+        "actorId": "user_dust_01",
+        "outcome": "success",
+        "attackVector": "none",
+        "description": "Minimum $0.10 deposit — must succeed and insert commitment into tree",
+        "params": {
+          "amount": "100000",
+          "commitmentHex": "0x0101010101010101010101010101010101010101010101010101010101010101"
+        }
+      },
+      {
+        "id": "hp_authorize_bet_balanced",
+        "type": "authorize_bet",
+        "actorId": "user_med_01",
+        "marketId": "0x0101010101010101010101010101010101010101010101010101010101010101",
+        "outcome": "success",
+        "attackVector": "none",
+        "description": "Bet $500 at 0.52 on balanced market — valid proof, valid root, new nullifier",
+        "params": {
+          "betAmount": "500000000",
+          "price": "52000000",
+          "expectedShares": "961538461",
+          "merkleRootIndex": 0
+        }
+      },
+      {
+        "id": "atk_cancel_active_bet",
+        "type": "bet_cancellation_credit",
+        "actorId": "adv_zk_status_skip",
+        "outcome": "revert_with",
+        "revertReason": "InvalidBetStatus",
+        "attackVector": "status_violation",
+        "description": "Tries to cancel-credit an ACTIVE bet (status != FAILED)",
+        "params": {
+          "betStatus": "ACTIVE",
+          "nullifierOfBet": "0xa2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2"
+        }
+      }
+    ],
+    "expectedFinalState": "Cancel reverts InvalidBetStatus; bet remains ACTIVE"
+  },
+  {
+    "id": "seq_fok_failure_then_cancel",
+    "description": "Bet → FOK failure → cancellation credit → try double cancellation",
+    "attackVector": "double_credit",
+    "steps": [
+      {
+        "id": "hp_deposit_small",
+        "type": "deposit",
+        "actorId": "user_dust_01",
+        "outcome": "success",
+        "attackVector": "none",
+        "description": "Minimum $0.10 deposit — must succeed and insert commitment into tree",
+        "params": {
+          "amount": "100000",
+          "commitmentHex": "0x0101010101010101010101010101010101010101010101010101010101010101"
+        }
+      },
+      {
+        "id": "hp_authorize_bet_balanced",
+        "type": "authorize_bet",
+        "actorId": "user_med_01",
+        "marketId": "0x0101010101010101010101010101010101010101010101010101010101010101",
+        "outcome": "success",
+        "attackVector": "none",
+        "description": "Bet $500 at 0.52 on balanced market — valid proof, valid root, new nullifier",
+        "params": {
+          "betAmount": "500000000",
+          "price": "52000000",
+          "expectedShares": "961538461",
+          "merkleRootIndex": 0
+        }
+      },
+      {
+        "id": "hp_withdraw_partial",
+        "type": "withdraw",
+        "actorId": "user_med_01",
+        "outcome": "success",
+        "attackVector": "none",
+        "description": "Withdraw $1,000 from $2,100 remaining balance",
+        "params": {
+          "withdrawalAmount": "1000000000",
+          "recipientAddressHex": "0xbeef000000000000000000000000000000000000",
+          "recipientHashHex": "0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+        }
+      },
+      {
+        "id": "hp_fok_failure",
+        "type": "report_fok_failure",
+        "actorId": "user_med_02",
+        "outcome": "success",
+        "attackVector": "none",
+        "description": "Signing layer operator reports FOK fill failure on illiquid market",
+        "params": {
+          "nullifierOfBet": "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "callerIsOperator": true
+        }
+      },
+      {
+        "id": "atk_cancel_nullifier_replay",
+        "type": "bet_cancellation_credit",
+        "actorId": "adv_zk_replay_nullifier",
+        "outcome": "revert_with",
+        "revertReason": "NullifierSpent",
+        "attackVector": "nullifier_replay",
+        "description": "Replay same bet cancellation credit twice",
+        "params": {
+          "nullifier": "0xbeefbeefbeefbeefbeefbeefbeefbeefbeefbeefbeefbeefbeefbeefbeefbeef",
+          "nullifierOfBet": "0xd00dd00dd00dd00dd00dd00dd00dd00d",
+          "attempt": 2
+        }
+      }
+    ],
+    "expectedFinalState": "Double cancel reverts NullifierSpent; balance correctly restored once"
+  },
+  {
+    "id": "seq_cross_market_settlement",
+    "description": "Bet on market A → try to credit using market B's resolution",
+    "attackVector": "cross_market_abuse",
+    "steps": [
+      {
+        "id": "hp_deposit_small",
+        "type": "deposit",
+        "actorId": "user_dust_01",
+        "outcome": "success",
+        "attackVector": "none",
+        "description": "Minimum $0.10 deposit — must succeed and insert commitment into tree",
+        "params": {
+          "amount": "100000",
+          "commitmentHex": "0x0101010101010101010101010101010101010101010101010101010101010101"
+        }
+      },
+      {
+        "id": "hp_authorize_bet_balanced",
+        "type": "authorize_bet",
+        "actorId": "user_med_01",
+        "marketId": "0x0101010101010101010101010101010101010101010101010101010101010101",
+        "outcome": "success",
+        "attackVector": "none",
+        "description": "Bet $500 at 0.52 on balanced market — valid proof, valid root, new nullifier",
+        "params": {
+          "betAmount": "500000000",
+          "price": "52000000",
+          "expectedShares": "961538461",
+          "merkleRootIndex": 0
+        }
+      },
+      {
+        "id": "atk_cross_market_settlement",
+        "type": "credit_settlement",
+        "actorId": "user_large_01",
+        "marketId": "0x0303030303030303030303030303030303030303030303030303030303030303",
+        "outcome": "revert_with",
+        "revertReason": "MarketIdMismatch",
+        "attackVector": "cross_market_abuse",
+        "description": "Bet placed on market A (condition 0x01), settlement proof claims market B (condition 0x03)",
+        "params": {
+          "betMarketId": "0x0101010101010101010101010101010101010101010101010101010101010101",
+          "settlementMarketId": "0x0303030303030303030303030303030303030303030303030303030303030303",
+          "nullifierOfBet": "0xd1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1"
+        }
+      }
+    ],
+    "expectedFinalState": "Settlement reverts MarketIdMismatch; bet stays ACTIVE"
+  },
+  {
+    "id": "seq_na_abuse_on_yes_market",
+    "description": "Bet on YES-resolved market → try N/A cancellation credit",
+    "attackVector": "na_abuse",
+    "steps": [
+      {
+        "id": "hp_deposit_small",
+        "type": "deposit",
+        "actorId": "user_dust_01",
+        "outcome": "success",
+        "attackVector": "none",
+        "description": "Minimum $0.10 deposit — must succeed and insert commitment into tree",
+        "params": {
+          "amount": "100000",
+          "commitmentHex": "0x0101010101010101010101010101010101010101010101010101010101010101"
+        }
+      },
+      {
+        "id": "hp_authorize_bet_balanced",
+        "type": "authorize_bet",
+        "actorId": "user_med_01",
+        "marketId": "0x0101010101010101010101010101010101010101010101010101010101010101",
+        "outcome": "success",
+        "attackVector": "none",
+        "description": "Bet $500 at 0.52 on balanced market — valid proof, valid root, new nullifier",
+        "params": {
+          "betAmount": "500000000",
+          "price": "52000000",
+          "expectedShares": "961538461",
+          "merkleRootIndex": 0
+        }
+      },
+      {
+        "id": "atk_na_cancel_on_resolved_yes",
+        "type": "na_cancellation_credit",
+        "actorId": "adv_zk_na_abuse",
+        "marketId": "0xc8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8",
+        "outcome": "revert_with",
+        "revertReason": "NotNAMarket",
+        "attackVector": "na_abuse",
+        "description": "Tries N/A credit on a YES-resolved market (non-zero numerators)",
+        "params": {
+          "nullifierOfBet": "0xa5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5",
+          "marketPayoutNumerators": [
+            1000000,
+            0
+          ]
+        }
+      }
+    ],
+    "expectedFinalState": "N/A cancel reverts NotNAMarket; payout_numerators verified on-chain"
+  },
+  {
+    "id": "seq_reentrancy_attempt",
+    "description": "Deposit with malicious contract address → try re-entrant withdrawal",
+    "attackVector": "reentrancy",
+    "steps": [
+      {
+        "id": "hp_deposit_small",
+        "type": "deposit",
+        "actorId": "user_dust_01",
+        "outcome": "success",
+        "attackVector": "none",
+        "description": "Minimum $0.10 deposit — must succeed and insert commitment into tree",
+        "params": {
+          "amount": "100000",
+          "commitmentHex": "0x0101010101010101010101010101010101010101010101010101010101010101"
+        }
+      },
+      {
+        "id": "atk_withdrawal_reentrancy",
+        "type": "withdraw",
+        "actorId": "adv_addr_contract",
+        "outcome": "revert_with",
+        "revertReason": "ReentrancyGuardReentrantCall",
+        "attackVector": "reentrancy",
+        "description": "Malicious recipient contract re-enters withdraw() during USDC transfer — ReentrancyGuard must block",
+        "params": {
+          "recipientIsReentrant": true,
+          "withdrawalAmount": "1000000000"
+        }
+      }
+    ],
+    "expectedFinalState": "Reentrancy reverts ReentrancyGuardReentrantCall; funds stay in vault"
+  },
+  {
+    "id": "seq_cap_circumvention",
+    "description": "Deposit $50k → try to deposit $1 more",
+    "attackVector": "over_cap_deposit",
+    "steps": [
+      {
+        "id": "atk_deposit_exactly_at_cap",
+        "type": "deposit",
+        "actorId": "user_atcap_01",
+        "outcome": "success",
+        "attackVector": "none",
+        "description": "Deposit that brings cumulative to exactly $50k — must succeed",
+        "params": {
+          "amount": "50000000000",
+          "commitmentHex": "0x0404040404040404040404040404040404040404040404040404040404040404"
+        }
+      },
+      {
+        "id": "atk_deposit_one_over_cap",
+        "type": "deposit",
+        "actorId": "user_atcap_01",
+        "outcome": "revert_with",
+        "revertReason": "DepositCapExceeded",
+        "attackVector": "over_cap_deposit",
+        "description": "Second deposit of $1 after reaching $50k cap — must revert",
+        "params": {
+          "amount": "1000000",
+          "commitmentHex": "0x0505050505050505050505050505050505050505050505050505050505050505"
+        }
+      }
+    ],
+    "expectedFinalState": "Second deposit reverts DepositCapExceeded; cumulative capped at $50k"
+  }
+]

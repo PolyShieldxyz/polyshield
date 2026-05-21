@@ -1,0 +1,254 @@
+[
+  {
+    "condition_id": "0x0000000000000000000000000000000000000000000000000000000000000064",
+    "question_id": "0x0000000000000000000000000000000000000000000000000000000000001064",
+    "market_slug": "nfl-superbowl-2025",
+    "question": "Did the 2025 NFL Super Bowl occur?",
+    "active": false,
+    "closed": true,
+    "accepting_orders": false,
+    "accepting_order_timestamp": null,
+    "minimum_order_size": 5,
+    "minimum_tick_size": 0.01,
+    "maker_base_fee": 0,
+    "taker_base_fee": 0,
+    "collateral_token": "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174",
+    "tokens": [
+      {
+        "token_id": "244837814042824",
+        "outcome": "Yes",
+        "price": 1,
+        "winner": true
+      },
+      {
+        "token_id": "244837814042825",
+        "outcome": "No",
+        "price": 0,
+        "winner": false
+      }
+    ],
+    "end_date_iso": "2026-12-31T23:59:59Z",
+    "game_start_time": null,
+    "seconds_delay": 0,
+    "payout_numerators": [
+      1000000,
+      0
+    ],
+    "payout_denominator": 1000000,
+    "volume": 10000000,
+    "volume_24hr": 0,
+    "liquidity": 0,
+    "_category": "resolved_yes",
+    "_description": "YES resolution — payout_per_share = 1e6 (full pUSD)"
+  },
+  {
+    "condition_id": "0x0000000000000000000000000000000000000000000000000000000000000065",
+    "question_id": "0x0000000000000000000000000000000000000000000000000000000000001065",
+    "market_slug": "btc-100k-jan-2026",
+    "question": "Did Bitcoin close above $100k in January 2026?",
+    "active": false,
+    "closed": true,
+    "accepting_orders": false,
+    "accepting_order_timestamp": null,
+    "minimum_order_size": 5,
+    "minimum_tick_size": 0.01,
+    "maker_base_fee": 0,
+    "taker_base_fee": 0,
+    "collateral_token": "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174",
+    "tokens": [
+      {
+        "token_id": "244837814042826",
+        "outcome": "Yes",
+        "price": 1,
+        "winner": true
+      },
+      {
+        "token_id": "244837814042827",
+        "outcome": "No",
+        "price": 0,
+        "winner": false
+      }
+    ],
+    "end_date_iso": "2026-12-31T23:59:59Z",
+    "game_start_time": null,
+    "seconds_delay": 0,
+    "payout_numerators": [
+      1000000,
+      0
+    ],
+    "payout_denominator": 1000000,
+    "volume": 4500000,
+    "volume_24hr": 0,
+    "liquidity": 0,
+    "_category": "resolved_yes",
+    "_description": "YES resolution with large volume — settlement credit path"
+  },
+  {
+    "condition_id": "0x0000000000000000000000000000000000000000000000000000000000000066",
+    "question_id": "0x0000000000000000000000000000000000000000000000000000000000001066",
+    "market_slug": "world-cup-cancelled-2026",
+    "question": "Will the 2026 World Cup be cancelled?",
+    "active": false,
+    "closed": true,
+    "accepting_orders": false,
+    "accepting_order_timestamp": null,
+    "minimum_order_size": 5,
+    "minimum_tick_size": 0.01,
+    "maker_base_fee": 0,
+    "taker_base_fee": 0,
+    "collateral_token": "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174",
+    "tokens": [
+      {
+        "token_id": "244837814042828",
+        "outcome": "Yes",
+        "price": 0,
+        "winner": false
+      },
+      {
+        "token_id": "244837814042829",
+        "outcome": "No",
+        "price": 1,
+        "winner": true
+      }
+    ],
+    "end_date_iso": "2026-12-31T23:59:59Z",
+    "game_start_time": null,
+    "seconds_delay": 0,
+    "payout_numerators": [
+      0,
+      1000000
+    ],
+    "payout_denominator": 1000000,
+    "volume": 750000,
+    "volume_24hr": 0,
+    "liquidity": 0,
+    "_category": "resolved_no",
+    "_description": "NO resolution — Yes position pays 0; No pays full"
+  },
+  {
+    "condition_id": "0x0000000000000000000000000000000000000000000000000000000000000067",
+    "question_id": "0x0000000000000000000000000000000000000000000000000000000000001067",
+    "market_slug": "fed-raise-q1-2026",
+    "question": "Did the Fed raise rates in Q1 2026?",
+    "active": false,
+    "closed": true,
+    "accepting_orders": false,
+    "accepting_order_timestamp": null,
+    "minimum_order_size": 5,
+    "minimum_tick_size": 0.01,
+    "maker_base_fee": 0,
+    "taker_base_fee": 0,
+    "collateral_token": "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174",
+    "tokens": [
+      {
+        "token_id": "244837814042830",
+        "outcome": "Yes",
+        "price": 0,
+        "winner": false
+      },
+      {
+        "token_id": "244837814042831",
+        "outcome": "No",
+        "price": 1,
+        "winner": true
+      }
+    ],
+    "end_date_iso": "2026-12-31T23:59:59Z",
+    "game_start_time": null,
+    "seconds_delay": 0,
+    "payout_numerators": [
+      0,
+      1000000
+    ],
+    "payout_denominator": 1000000,
+    "volume": 1200000,
+    "volume_24hr": 0,
+    "liquidity": 0,
+    "_category": "resolved_no",
+    "_description": "NO resolution — tests that vault doesn't pay out Yes positions"
+  },
+  {
+    "condition_id": "0x0000000000000000000000000000000000000000000000000000000000000068",
+    "question_id": "0x0000000000000000000000000000000000000000000000000000000000001068",
+    "market_slug": "impossible-event-na",
+    "question": "Will an event that never happened happen?",
+    "active": false,
+    "closed": true,
+    "accepting_orders": false,
+    "accepting_order_timestamp": null,
+    "minimum_order_size": 5,
+    "minimum_tick_size": 0.01,
+    "maker_base_fee": 0,
+    "taker_base_fee": 0,
+    "collateral_token": "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174",
+    "tokens": [
+      {
+        "token_id": "244837814042832",
+        "outcome": "Yes",
+        "price": 0,
+        "winner": false
+      },
+      {
+        "token_id": "244837814042833",
+        "outcome": "No",
+        "price": 0,
+        "winner": false
+      }
+    ],
+    "end_date_iso": "2026-12-31T23:59:59Z",
+    "game_start_time": null,
+    "seconds_delay": 0,
+    "payout_numerators": [
+      0,
+      0
+    ],
+    "payout_denominator": 1000000,
+    "volume": 200000,
+    "volume_24hr": 0,
+    "liquidity": 0,
+    "_category": "resolved_na",
+    "_description": "N/A resolution — all zeros; naCancellationCredit path must trigger"
+  },
+  {
+    "condition_id": "0x0000000000000000000000000000000000000000000000000000000000000069",
+    "question_id": "0x0000000000000000000000000000000000000000000000000000000000001069",
+    "market_slug": "g7-earthquake-m9-2025",
+    "question": "Did an earthquake above M9 hit a G7 country in 2025?",
+    "active": false,
+    "closed": true,
+    "accepting_orders": false,
+    "accepting_order_timestamp": null,
+    "minimum_order_size": 5,
+    "minimum_tick_size": 0.01,
+    "maker_base_fee": 0,
+    "taker_base_fee": 0,
+    "collateral_token": "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174",
+    "tokens": [
+      {
+        "token_id": "244837814042834",
+        "outcome": "Yes",
+        "price": 0,
+        "winner": false
+      },
+      {
+        "token_id": "244837814042835",
+        "outcome": "No",
+        "price": 0,
+        "winner": false
+      }
+    ],
+    "end_date_iso": "2026-12-31T23:59:59Z",
+    "game_start_time": null,
+    "seconds_delay": 0,
+    "payout_numerators": [
+      0,
+      0
+    ],
+    "payout_denominator": 1000000,
+    "volume": 90000,
+    "volume_24hr": 0,
+    "liquidity": 0,
+    "_category": "resolved_na",
+    "_description": "N/A — second test case for all-zero numerators"
+  }
+]

@@ -7,7 +7,7 @@ import { FlowShell } from '@/components/app/FlowShell'
 import { KV } from '@/components/app/KV'
 import { Icon, ICONS } from '@/components/ui/Icon'
 import { VAULT_ABI, USDC_ABI } from '@/lib/vaultAbi'
-import { generateSecret, computeCommitment, computeNullifier, createDepositNote } from '@/lib/notes'
+import { generateSecret, computeCommitment, computeNullifier, addNote } from '@/lib/notes'
 
 const IS_DEV = process.env.NEXT_PUBLIC_DEV_MODE === 'true'
 const VAULT_ADDRESS = (process.env.NEXT_PUBLIC_VAULT_ADDRESS ?? '0x0000000000000000000000000000000000000000') as `0x${string}`
@@ -437,7 +437,21 @@ export default function DepositPage() {
   useEffect(() => {
     if (depositConfirmed && depositTxHash) {
       console.log('[deposit] deposit confirmed — saving note')
-      createDepositNote(amountMicro, depositTxHash)
+      // Save the note using the exact secret/commitment that was submitted on-chain.
+      // Do NOT call createDepositNote() here — it would generate a new secret,
+      // producing a commitment that doesn't exist in the Merkle tree.
+      addNote({
+        id: commitment,
+        kind: 'DEPOSIT',
+        secret,
+        balance: amountMicro,
+        nonce: 0n,
+        commitment,
+        nullifier,
+        spent: false,
+        createdAt: Date.now(),
+        txHash: depositTxHash,
+      })
       setFinalTxHash(depositTxHash)
       setPhase('done')
       setStep(3)
@@ -507,7 +521,7 @@ export default function DepositPage() {
 
   const steps: [string, string, string][] = [
     ['01', 'Amount',      'Choose deposit size.'],
-    ['02', 'Note',        'Local note generated. C = keccak(s, v, n).'],
+    ['02', 'Note',        'Local note generated. C = Poseidon(s, v, n).'],
     ['03', 'On-chain',    'Approve + deposit tx submitted.'],
     ['04', 'Done',        'Note saved. Ready to authorize bets.'],
   ]

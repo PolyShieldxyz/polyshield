@@ -10,6 +10,13 @@ contract MockCTF is ICTF {
 
     function setPayoutNumerators(bytes32 conditionId, uint256[] calldata numerators) external {
         _numerators[conditionId] = numerators;
+        emit ConditionResolution(
+            conditionId,
+            msg.sender,
+            conditionId,        // questionId == conditionId in our mock
+            numerators.length,
+            numerators
+        );
     }
 
     function setPayoutDenominator(bytes32 conditionId, uint256 denominator) external {

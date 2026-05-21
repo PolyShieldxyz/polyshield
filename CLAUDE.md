@@ -43,7 +43,7 @@ CLAUDE.md              This file
 - **Note structure:** `(secret: Field, balance: u64, nonce: u64)`. Commitment = `Poseidon(secret, balance, nonce)`. Nullifier = `Poseidon(secret, nonce)`.
 - **Merkle tree:** Poseidon-hashed, depth 32, append-only. Implemented in Solidity with off-chain proofs computed client-side.
 - **ZK language:** Noir (Aztec). Do not implement circuits in Circom or use another system without explicit approval.
-- **ZK backend:** UltraPLONK for development/testing. Target Groth16 for mainnet deployment to minimize on-chain gas.
+- **ZK backend:** UltraPLONK ONLY — both dev/testing and mainnet. Groth16 and UltraHonk are permanently dropped from the roadmap. Do not introduce Honk or Groth16 verifiers anywhere in the deployment path. The files in `packages/groth16/` and `packages/contracts/src/verifiers/*HonkVerifier.sol` are benchmarking artifacts only — never deployed.
 - **Chain:** Polygon mainnet (Polymarket runs here). Testnet target: Polygon Amoy.
 - **Collateral token:** Vault accepts and pays out in USDC only. pUSD conversion (via CollateralOnramp/Offramp) is internal to the Vault contract. Do not expose pUSD to users or circuits.
 - **Per-address deposit cap:** $50,000 USDC maximum cumulative deposit per address in MVP. Enforced in `deposit()` via `cumulativeDeposits[msg.sender]`. Do not remove without Project Agent approval.
@@ -158,30 +158,70 @@ Do not implement these without a spec document from the Project Agent:
 # Install all dependencies (from repo root)
 pnpm install
 
-# Contracts
+# ── Local dev stack (primary way to run everything) ──────────────────────────
+# Start Anvil + deploy all contracts + start all backend services (one terminal):
+pnpm dev:mock
+
+# Start Next.js frontend (separate terminal):
+pnpm dev:frontend
+
+# Or start both together:
+pnpm dev:all
+
+# ── Contracts ────────────────────────────────────────────────────────────────
 cd packages/contracts
 forge build
 forge test
 forge test --gas-report
 
-# Circuits
+# ── Circuits ─────────────────────────────────────────────────────────────────
 cd packages/circuits
 nargo check
 nargo test
 nargo compile
 
-# Backend
+# ── Backend ──────────────────────────────────────────────────────────────────
 cd packages/backend
 pnpm dev
 
-# Frontend
+# ── Frontend ─────────────────────────────────────────────────────────────────
 cd packages/frontend
 pnpm dev
 
-# SDK (build WASM prover)
+# ── SDK (build WASM prover) ───────────────────────────────────────────────────
 cd packages/sdk
 pnpm build:wasm
 ```
+
+---
+
+## Local Dev Stack
+
+`pnpm dev:mock` starts the full local environment in one command:
+
+| Service | Port | Notes |
+|---|---|---|
+| Anvil RPC | 8545 | Chain ID 31337; reset on every `dev:mock` restart |
+| Mock CLOB API | 3001 | Fake Polymarket; `POST /admin/settle-market` triggers settlement |
+| Proof Relay | 3002 | Real relay; proxies proofs to Vault on Anvil |
+| Indexer API | 3003 | Real indexer; listens for ConditionResolution events |
+| Signing Layer | — | Real event listener; submits FOK orders to mock CLOB |
+| Frontend | 3000 | `pnpm dev:frontend` (separate terminal) |
+
+**Deployed test addresses (refreshed on every restart):**
+- `ALICE`: `0x15d34AAf54267DB7D7c367839AAf71A00a2C6A65` — $100k USDC (Anvil account 4)
+- `BOB`: `0x9965507D1a55bcC2695C58ba16FB37d819B0A4dc` — $10k USDC (Anvil account 5)
+- `USER_1`: `0x2d209040c031d4e2D4d9cb4D3aabf18F52260AB0` — 2 ETH + $100k USDC
+- `USER_2`: `0x7D0A7d3a4508B33C6A0e9F3FCBc72562cC120e89` — 2 ETH + $100k USDC
+- `USER_3`: `0x46458d7CE6157AE78BFF94D2096308f352c7edc8` — 2 ETH + $100k USDC
+
+**Logging:** All services write structured JSON (pino) to stdout, tee'd to `logs/session-<timestamp>.jsonl`. Frontend events go to `logs/frontend.jsonl`. Run `tail -f logs/*.jsonl | jq .` to watch everything live.
+
+**Real vs mock components:**
+- Real: Vault, CommitmentMerkleTree, NullifierRegistry, all 5 UltraPLONK verifiers, PoseidonT3Hasher (BN254), Proof Relay, Indexer, Signing Layer, MockUSDC, MockCTF
+- Mock (intentional): mockClobServer only — mimics the Polymarket CLOB API
+
+**Known limitation:** Frontend currently uses MOCK_PROOF (64 zero bytes) and keccak256 for hashing. Real proof verification will reject these — the WASM prover and Poseidon hashing are the next items to wire up.
 
 ---
 

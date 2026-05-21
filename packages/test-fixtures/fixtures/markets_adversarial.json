@@ -1,0 +1,167 @@
+[
+  {
+    "condition_id": "0x00000000000000000000000000000000000000000000000000000000000000c8",
+    "question_id": "0x00000000000000000000000000000000000000000000000000000000000010c8",
+    "market_slug": "definitely-happened",
+    "question": "Did something definitely happen?",
+    "active": false,
+    "closed": true,
+    "accepting_orders": false,
+    "accepting_order_timestamp": null,
+    "minimum_order_size": 5,
+    "minimum_tick_size": 0.01,
+    "maker_base_fee": 0,
+    "taker_base_fee": 0,
+    "collateral_token": "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174",
+    "tokens": [
+      {
+        "token_id": "244837814043024",
+        "outcome": "Yes",
+        "price": 1,
+        "winner": true
+      },
+      {
+        "token_id": "244837814043025",
+        "outcome": "No",
+        "price": 0,
+        "winner": false
+      }
+    ],
+    "end_date_iso": "2026-12-31T23:59:59Z",
+    "game_start_time": null,
+    "seconds_delay": 0,
+    "payout_numerators": [
+      1000000,
+      0
+    ],
+    "payout_denominator": 1000000,
+    "volume": 500000,
+    "volume_24hr": 0,
+    "liquidity": 0,
+    "_category": "adversarial_na_fake",
+    "_description": "Resolved YES — attacker tries to claim N/A credit; vault must revert because payout_numerators != [0,0]"
+  },
+  {
+    "condition_id": "0x00000000000000000000000000000000000000000000000000000000000000c9",
+    "question_id": "0x00000000000000000000000000000000000000000000000000000000000010c9",
+    "market_slug": "event-201",
+    "question": "Will event 201 happen?",
+    "active": false,
+    "closed": true,
+    "accepting_orders": false,
+    "accepting_order_timestamp": null,
+    "minimum_order_size": 5,
+    "minimum_tick_size": 0.01,
+    "maker_base_fee": 0,
+    "taker_base_fee": 0,
+    "collateral_token": "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174",
+    "tokens": [
+      {
+        "token_id": "244837814043026",
+        "outcome": "Yes",
+        "price": 1,
+        "winner": true
+      },
+      {
+        "token_id": "244837814043027",
+        "outcome": "No",
+        "price": 0,
+        "winner": false
+      }
+    ],
+    "end_date_iso": "2026-12-31T23:59:59Z",
+    "game_start_time": null,
+    "seconds_delay": 0,
+    "payout_numerators": [
+      500000,
+      0
+    ],
+    "payout_denominator": 500000,
+    "volume": 300000,
+    "volume_24hr": 0,
+    "liquidity": 0,
+    "_category": "adversarial_bad_payout",
+    "_description": "Non-standard denominator — payout_per_share calculation must use actual denominator"
+  },
+  {
+    "condition_id": "0xdeaddeaddeaddeaddeaddeaddeaddeaddeaddeaddeaddeaddeaddeaddeaddead",
+    "question_id": "0x00000000000000000000000000000000000000000000000000000000000010ca",
+    "market_slug": "ghost-market-unregistered",
+    "question": "Will an event that was never registered happen?",
+    "active": false,
+    "closed": true,
+    "accepting_orders": false,
+    "accepting_order_timestamp": null,
+    "minimum_order_size": 5,
+    "minimum_tick_size": 0.01,
+    "maker_base_fee": 0,
+    "taker_base_fee": 0,
+    "collateral_token": "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174",
+    "tokens": [
+      {
+        "token_id": "244837814043028",
+        "outcome": "Yes",
+        "price": 0.5,
+        "winner": false
+      },
+      {
+        "token_id": "244837814043029",
+        "outcome": "No",
+        "price": 0.5,
+        "winner": false
+      }
+    ],
+    "end_date_iso": "2026-12-31T23:59:59Z",
+    "game_start_time": null,
+    "seconds_delay": 0,
+    "payout_numerators": null,
+    "payout_denominator": null,
+    "volume": 0,
+    "volume_24hr": 0,
+    "liquidity": 0,
+    "_category": "adversarial_stale",
+    "_description": "Ghost condition_id — lookup on CTF contract returns 0; all operations should revert"
+  },
+  {
+    "condition_id": "0x00000000000000000000000000000000000000000000000000000000000000cb",
+    "question_id": "0x00000000000000000000000000000000000000000000000000000000000010cb",
+    "market_slug": "shadow-market-203",
+    "question": "Shadow market for cross-market attack",
+    "active": false,
+    "closed": true,
+    "accepting_orders": false,
+    "accepting_order_timestamp": null,
+    "minimum_order_size": 5,
+    "minimum_tick_size": 0.01,
+    "maker_base_fee": 0,
+    "taker_base_fee": 0,
+    "collateral_token": "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174",
+    "tokens": [
+      {
+        "token_id": "244837814043030",
+        "outcome": "Yes",
+        "price": 1,
+        "winner": true
+      },
+      {
+        "token_id": "244837814043031",
+        "outcome": "No",
+        "price": 0,
+        "winner": false
+      }
+    ],
+    "end_date_iso": "2026-12-31T23:59:59Z",
+    "game_start_time": null,
+    "seconds_delay": 0,
+    "payout_numerators": [
+      1000000,
+      0
+    ],
+    "payout_denominator": 1000000,
+    "volume": 50000,
+    "volume_24hr": 0,
+    "liquidity": 0,
+    "_category": "adversarial_bad_payout",
+    "_description": "Attacker places bet on market 100 then submits settlement proof with market_id from market 203 (different payout); Vault must reject because market_id in BetRecord must match"
+  }
+]

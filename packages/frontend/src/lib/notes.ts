@@ -2,14 +2,15 @@
  * Client-side note management.
  *
  * A "note" is the private state a depositor holds: (secret, balance, nonce).
- * Commitment = keccak256(secret, balance, nonce) in dev mode (production uses Poseidon WASM).
- * Nullifier  = keccak256(secret, nonce) in dev mode.
+ * Commitment = Poseidon3(secret, balance, nonce)  — matches Noir's bn254::hash_3
+ * Nullifier  = Poseidon2(secret, nonce)           — matches Noir's bn254::hash_2
  *
+ * Both functions use poseidon-lite (verified against Noir's Prover.toml test vectors).
  * Notes are stored in localStorage under key "polyshield:notes".
  * NEVER send note preimages (secret, balance, nonce) to any server.
  */
 
-import { keccak256, encodePacked, hexToBigInt } from 'viem'
+import { poseidon2, poseidon3 } from 'poseidon-lite'
 
 export type NoteKind = 'DEPOSIT' | 'BET_OUTPUT' | 'SETTLE_CREDIT' | 'CANCEL_CREDIT'
 
@@ -25,9 +26,13 @@ export interface Note {
   createdAt: number    // unix ms
   txHash?: string
   marketId?: string
+  expectedShares?: bigint  // shares held after a bet, needed for settlement credit
 }
 
 const STORAGE_KEY = 'polyshield:notes'
+
+// BN254 scalar field prime — secrets and commitments must be < this value
+const BN254_P = 0x30644e72e131a029b85045b68181585d2833e84879b9709142e0f853d0d3883fn
 
 function loadAll(): Note[] {
   if (typeof window === 'undefined') return []
@@ -39,6 +44,7 @@ function loadAll(): Note[] {
       ...n,
       balance: BigInt(n.balance as string),
       nonce: BigInt(n.nonce as string),
+      ...(n.expectedShares != null ? { expectedShares: BigInt(n.expectedShares as string) } : {}),
     })) as Note[]
   } catch {
     return []
@@ -51,6 +57,7 @@ function saveAll(notes: Note[]): void {
     ...n,
     balance: n.balance.toString(),
     nonce: n.nonce.toString(),
+    ...(n.expectedShares != null ? { expectedShares: n.expectedShares.toString() } : {}),
   }))
   localStorage.setItem(STORAGE_KEY, JSON.stringify(serialized))
 }
@@ -63,32 +70,71 @@ export function getSpendableNotes(): Note[] {
   return loadAll().filter((n) => !n.spent)
 }
 
-// Dev-mode commitment: keccak256(secret ++ balance_as_bytes32 ++ nonce_as_bytes32)
+function hexToBigInt(hex: `0x${string}`): bigint {
+  return BigInt(hex)
+}
+
+function bigIntToField(n: bigint): string {
+  return `0x${n.toString(16).padStart(64, '0')}`
+}
+
 export function computeCommitment(
   secret: `0x${string}`,
   balance: bigint,
   nonce: bigint,
 ): `0x${string}` {
-  return keccak256(
-    encodePacked(
-      ['bytes32', 'uint256', 'uint256'],
-      [secret, balance, nonce],
-    )
-  )
+  const s = hexToBigInt(secret)
+  const hash = poseidon3([s, balance, nonce])
+  return bigIntToField(hash) as `0x${string}`
 }
 
-// Dev-mode nullifier: keccak256(secret ++ nonce_as_bytes32)
 export function computeNullifier(
   secret: `0x${string}`,
   nonce: bigint,
 ): `0x${string}` {
-  return keccak256(encodePacked(['bytes32', 'uint256'], [secret, nonce]))
+  const s = hexToBigInt(secret)
+  const hash = poseidon2([s, nonce])
+  return bigIntToField(hash) as `0x${string}`
+}
+
+// Recipient hash for withdrawal: Poseidon2(recipient_address_as_field, 0)
+// Matches Noir circuit: bn254::hash_2([recipient_address, 0])
+export function computeRecipientHash(recipientAddress: `0x${string}`): `0x${string}` {
+  const addrBigInt = BigInt(recipientAddress)
+  const hash = poseidon2([addrBigInt, 0n])
+  return bigIntToField(hash) as `0x${string}`
+}
+
+// Market/position IDs must be valid BN254 field elements (< p).
+// We keccak256-hash the label then reduce mod p — keeps it deterministic.
+export function marketToField(label: string): `0x${string}` {
+  // Use the TextEncoder to get a consistent byte representation
+  const enc = new TextEncoder().encode(label)
+  // Simple deterministic field derivation: hash bytes via SubtleCrypto isn't sync,
+  // so we use a manual djb2-style large-bigint accumulation reduced mod p.
+  // In a real deployment this would use a fixed on-chain condition ID.
+  let h = 5381n
+  for (const b of enc) {
+    h = ((h << 5n) + h + BigInt(b)) & ((1n << 256n) - 1n)
+  }
+  return bigIntToField(h % BN254_P) as `0x${string}`
+}
+
+export function positionToField(marketId: string, side: string): `0x${string}` {
+  return marketToField(marketId + ':' + side)
 }
 
 export function generateSecret(): `0x${string}` {
-  const bytes = new Uint8Array(32)
-  crypto.getRandomValues(bytes)
-  return `0x${Array.from(bytes).map((b) => b.toString(16).padStart(2, '0')).join('')}`
+  // Sample rejection-free: keep retrying until random bytes < BN254 prime.
+  // Expected retries: ~1.08 (p is just slightly less than 2^254).
+  while (true) {
+    const bytes = new Uint8Array(32)
+    crypto.getRandomValues(bytes)
+    const val = BigInt('0x' + Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join(''))
+    if (val > 0n && val < BN254_P) {
+      return `0x${val.toString(16).padStart(64, '0')}` as `0x${string}`
+    }
+  }
 }
 
 export function createDepositNote(amountUsdc: bigint, txHash?: string): Note {

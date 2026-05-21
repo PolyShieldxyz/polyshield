@@ -108,6 +108,47 @@ fn test_bet_auth_wrong_shares() {
     assert(lhs == rhs, "Invalid expected_shares");
 }
 
+// Print witness values for Prover.toml generation
+#[test]
+fn test_print_bench_inputs() {
+    let secret: Field = 42;
+    let current_balance: u64 = 1_000_000_000;
+    let nonce: u64 = 0;
+    let bet_amount: u64 = 100_000_000;
+    let price: u64 = 65_000_000;
+    let expected_shares: u64 = 153_846_153;
+    let share_remainder: u64 = 55_000_000;
+    let market_id: Field = 1;
+    let outcome_side: u8 = 1;
+    let position_id: Field = 2;
+
+    let old_commitment = bn254::hash_3([secret, current_balance as Field, nonce as Field]);
+    let merkle_path = build_zero_path();
+    let merkle_root = single_leaf_root(old_commitment);
+    let nullifier = bn254::hash_2([secret, nonce as Field]);
+    let new_balance = current_balance - bet_amount;
+    let new_commitment = bn254::hash_3([secret, new_balance as Field, (nonce + 1) as Field]);
+
+    println(f"BENCH secret {secret}");
+    println(f"BENCH current_balance {current_balance}");
+    println(f"BENCH nonce {nonce}");
+    println(f"BENCH bet_amount {bet_amount}");
+    println(f"BENCH price {price}");
+    println(f"BENCH expected_shares {expected_shares}");
+    println(f"BENCH share_remainder {share_remainder}");
+    println(f"BENCH market_id {market_id}");
+    println(f"BENCH outcome_side {outcome_side}");
+    println(f"BENCH position_id {position_id}");
+    println(f"BENCH merkle_root {merkle_root}");
+    println(f"BENCH nullifier {nullifier}");
+    println(f"BENCH new_commitment {new_commitment}");
+    println("BENCH path_start");
+    for i in 0..32 {
+        println(merkle_path[i]);
+    }
+    println("BENCH path_end");
+}
+
 // Wrong new_commitment -- constraint 5 should fail
 #[test(should_fail_with = "Invalid new_commitment")]
 fn test_bet_auth_wrong_new_commitment() {

@@ -1,15 +1,48 @@
-bet_amount = ""
-current_balance = ""
-expected_shares = ""
-market_id = ""
-merkle_path = ["", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", ""]
-merkle_path_indices = ["", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", ""]
-merkle_root = ""
-new_commitment = ""
-nonce = ""
-nullifier = ""
-outcome_side = ""
-position_id = ""
-price = ""
-secret = ""
-share_remainder = ""
+bet_amount = "100000000"
+current_balance = "1000000000"
+expected_shares = "153846153"
+market_id = "0x01"
+merkle_path = [
+  "0x0bc188d27dcceadc1dcfb6af0a7af08fe2864eecec96c5ae7cee6db31ba599aa",
+  "0x0bb8c4e79b87e21962d496cfc7bbe6726a8d1ab8ed987416de3c54333b1f651e",
+  "0x2baf726a0349814fdb008ed81ce69ccf8d92acfa44265374a0ab3f72e028bba4",
+  "0x1997719d020d6971a3b637e897e7f8b1491f1fa047ad91844c74fb354f76be1b",
+  "0x0ea9e4c41942f4080c0c33ade1733ec4a79764e5d8957c2e35e5b68d2c9bee21",
+  "0x051d3e30f0dfb59fc831535d5a2c9a1e3eba4a950c4b6837633f0604de1e027e",
+  "0x1b03cd8fe8e84fed0b098d2caa2dc493320e432e523d664a1adc9c60cb1bc6d0",
+  "0x23b2cd2f1177a96b9789e22f013b310b8ae0deb5a5757349efa8fc1214d40c73",
+  "0x0f37f290e089a368d35f09d9ff77bb2e329ecae0a5e05746c15e66f5a6ddc9d1",
+  "0x19269b0e3a33d5fa49ee53af22e691bda931c6d88d5765b3201881f5a6213b5e",
+  "0x1d467bb8ee17f67da5f3c9b595738ac732ebcd994dc2a4514d9677274363e9fa",
+  "0x2779a810177bfb8caf6fbef9b2623a1ee958e22136d7f534c1948053de33ba4e",
+  "0x0b62f0fbe1557a5771eb2485e76efcdc1d919d27a320198a47273c564c1e08ad",
+  "0x0f72f28075eacfad65bc5b44fe68d13450eb9afbaeb10e1ddc36087f95c3580e",
+  "0x1c051c9cd466046e3ba2c24d736271d9b2a3b7fa9bd7a7dc9d280c0cadfbc996",
+  "0x14960bfeb9294f9cf200770fa64bbfdd04b0eb0e7d964c7a7cd07bd6bbee73df",
+  "0x2b4ce93c772dac6056727fe40e8a0bfb5f0d3e1e61485c078c89d4f1b29d8167",
+  "0x124b823e0e7ad6004694f1ff41ebbefcc73973d650a63ae3808a22cba6c5be9d",
+  "0x23c9780ca31c55fc27775e54c33467fc83f2f3deacb770d6c1fb200985df6230",
+  "0x01b244fbb24dc3e77f1eaae694493dc9500a39c9e9859b2bc947a65f1e1d8c75",
+  "0x1217646f5fee5f734b9d3f748cf380868258cc8a33bbd2a5224989cec1b13e9f",
+  "0x202d273544061e85a0c3c643d026ae684bdf47f9b007bd9e61f45db8dfec836c",
+  "0x0de17a07ef8f7905a6d4d8816e5d1a9615e2b739bccf77f4267e78dc23a6ab74",
+  "0x13da50601f3c3f67bc354e8f2156b522ca65c6e369a613bb072ce919ccc19843",
+  "0x2fb10e4e180502d0a4905ef0e539312860c5a823b6b00c916e30209e73b7e25a",
+  "0x29d6b70339aba28c818b41774180b9ce33928a23d6b86528aa48f6f97fa8ab7b",
+  "0x2a4e0eef8876a96bceaeb40d73e966bba0c2889422d8e45b4a820601fd18be12",
+  "0x2bf422a33be1181dbb6362d5e625baab55a30bcc4db1c662d6b777a8ad509627",
+  "0x1ee95a5635eeeef68e05dce9c93861cf912cb7ac90fedc74167935d9073e110e",
+  "0x14268bcdb7540aa23286f121a73dbdd65ba1c390df69b61be529c6aaa7f57de5",
+  "0x23a38e11838f8b2f8c1eda9dc9623de80e5ff7f2437b8f2d3984cdd40e1fa3e4",
+  "0x140b5084159cfe3c429a0265542562b362644f10176f1883a1e027bfcd25f4a5"
+]
+merkle_path_indices = ["0","0","0","0","0","0","0","0","0","0","0","0","0","0","0","0","0","0","0","0","0","0","0","0","0","0","0","0","0","0","0","0"]
+merkle_root = "0x12849593c2e266fc89afced387e8c2d7d3f68a48f342613e37ad673bebcb6dff"
+new_commitment = "0x0a08b1bf4f86302f3e82727ae3734deeb823c926dca360f713a20f9d88489841"
+nonce = "0"
+nullifier = "0x08fb15898b5e4c6b8c1ee35eff746c62fc2f2c64c777e78640ece1f70a326d58"
+outcome_side = "1"
+position_id = "0x02"
+price = "65000000"
+secret = "42"
+share_remainder = "55000000"

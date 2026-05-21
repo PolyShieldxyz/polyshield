@@ -1,3 +1,6 @@
 @openzeppelin/=lib/openzeppelin-contracts/
 @zk-kit/=lib/zk-kit/packages/
+@poseidon-solidity/=lib/poseidon-solidity/contracts/
 forge-std/=lib/forge-std/src/
+@groth16/=../groth16/contracts/
+polyshield/=src/
