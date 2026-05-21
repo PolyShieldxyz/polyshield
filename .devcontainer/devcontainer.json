@@ -1,0 +1,39 @@
+{
+  "name": "Polyshield Dev",
+  "image": "mcr.microsoft.com/devcontainers/base:ubuntu-22.04",
+
+  "features": {
+    "ghcr.io/devcontainers/features/node:1": { "version": "20" },
+    "ghcr.io/devcontainers/features/common-utils:2": {}
+  },
+
+  "postCreateCommand": "bash .devcontainer/setup.sh",
+
+  "forwardPorts": [3000, 3001, 3002, 3003, 8545],
+  "portsAttributes": {
+    "3000": { "label": "Frontend",    "onAutoForward": "notify" },
+    "3001": { "label": "Mock CLOB",   "onAutoForward": "silent" },
+    "3002": { "label": "Proof Relay", "onAutoForward": "silent" },
+    "3003": { "label": "Indexer",     "onAutoForward": "silent" },
+    "8545": { "label": "Anvil RPC",   "onAutoForward": "silent" }
+  },
+
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "esbenp.prettier-vscode",
+        "dbaeumer.vscode-eslint",
+        "NomicFoundation.hardhat-solidity",
+        "tamasfe.even-better-toml"
+      ],
+      "settings": {
+        "editor.formatOnSave": true,
+        "terminal.integrated.defaultProfile.linux": "bash"
+      }
+    }
+  },
+
+  "remoteEnv": {
+    "FOUNDRY_DIR": "/home/vscode/.foundry"
+  }
+}

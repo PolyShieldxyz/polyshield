@@ -1,0 +1,3 @@
+[submodule "packages/contracts/lib/poseidon-solidity"]
+	path = packages/contracts/lib/poseidon-solidity
+	url = https://github.com/privacy-scaling-explorations/poseidon-solidity
