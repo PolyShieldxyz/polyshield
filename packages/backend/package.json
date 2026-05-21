@@ -5,7 +5,9 @@
   "workspaces": [
     "signing-layer",
     "indexer",
-    "proof-relay"
+    "proof-relay",
+    "mock-clob-server",
+    "mock-env"
   ],
   "scripts": {
     "test": "pnpm -r test",

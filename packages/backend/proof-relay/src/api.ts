@@ -15,6 +15,12 @@ export function createApp(): express.Application {
   const app = express();
   app.use(express.json({ limit: "1mb" }));
 
+  // Log every incoming request (path + method only, no IPs)
+  app.use((req, _res, next) => {
+    logger.info({ method: req.method, path: req.path }, "incoming request");
+    next();
+  });
+
   app.get("/health", (_req, res) => {
     res.status(200).json({ status: "ok" });
   });

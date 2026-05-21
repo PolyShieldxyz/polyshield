@@ -10,9 +10,15 @@
     "test": "pnpm -r test",
     "circuits:test": "cd packages/circuits && nargo test",
     "circuits:compile": "cd packages/circuits && nargo compile",
+    "groth16:build": "cd packages/groth16 && npm run build",
+    "groth16:test": "cd packages/groth16 && npm test",
+    "groth16:generate": "cd packages/groth16 && npm run generate:all",
     "contracts:build": "cd packages/contracts && forge build",
     "contracts:test": "cd packages/contracts && forge test",
-    "contracts:coverage": "cd packages/contracts && forge coverage"
+    "contracts:coverage": "cd packages/contracts && forge coverage",
+    "dev:mock": "PATH=\"$HOME/.foundry/bin:$PATH\" ts-node packages/backend/mock-env/src/index.ts",
+    "dev:frontend": "cd packages/frontend && pnpm dev",
+    "dev:all": "concurrently --names 'mock,frontend' --prefix-colors 'cyan,magenta' 'pnpm dev:mock' 'pnpm dev:frontend'"
   },
   "devDependencies": {
     "typescript": "^5.4.0"
