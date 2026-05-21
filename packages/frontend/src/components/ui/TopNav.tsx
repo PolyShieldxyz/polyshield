@@ -3,7 +3,6 @@ import Link from 'next/link'
 import { usePathname } from 'next/navigation'
 import { Logo } from './Logo'
 import { Icon, ICONS } from './Icon'
-import { WalletConnect } from './WalletConnect'
 
 const NAV_LINKS: [string, string][] = [
   ['/', 'Product'],
@@ -16,6 +15,9 @@ const NAV_LINKS: [string, string][] = [
 export function TopNav() {
   const pathname = usePathname()
   const isApp = pathname.startsWith('/app')
+
+  // Don't render the marketing nav inside the app — the app has its own sidebar.
+  if (isApp) return null
 
   return (
     <div className="topnav">
@@ -42,13 +44,9 @@ export function TopNav() {
         </div>
         <div className="row gap-3">
           <Link href="/testnet" className="btn btn-sm btn-ghost">Testnet</Link>
-          <Link
-            href="/app/markets"
-            className={`btn btn-sm ${isApp ? 'btn-cyan' : 'btn-primary'}`}
-          >
-            {isApp ? 'In App' : 'Launch App'} <Icon d={ICONS.arrow} size={12} />
+          <Link href="/app/markets" className="btn btn-sm btn-primary">
+            Launch App <Icon d={ICONS.arrow} size={12} />
           </Link>
-          <WalletConnect />
         </div>
       </div>
     </div>
