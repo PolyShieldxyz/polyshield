@@ -26,6 +26,9 @@ packages/contracts/cache/
 # TypeScript build
 packages/backend/**/dist/
 
+# Next.js build cache
+packages/frontend/.next/
+
 # Misc
 .DS_Store
 *.log
