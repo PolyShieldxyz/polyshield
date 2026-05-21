@@ -16,8 +16,8 @@
     "contracts:build": "cd packages/contracts && forge build",
     "contracts:test": "cd packages/contracts && forge test",
     "contracts:coverage": "cd packages/contracts && forge coverage",
-    "dev:mock": "PATH=\"$HOME/.foundry/bin:$PATH\" ts-node packages/backend/mock-env/src/index.ts",
-    "dev:frontend": "cd packages/frontend && pnpm dev",
+    "dev:mock": "PATH=\"$HOME/.foundry/bin:$PATH\" sh -c 'cd packages/backend && node_modules/.bin/ts-node mock-env/src/index.ts'",
+    "dev:frontend": "cd packages/frontend && node node_modules/next/dist/bin/next dev",
     "dev:all": "concurrently --names 'mock,frontend' --prefix-colors 'cyan,magenta' 'pnpm dev:mock' 'pnpm dev:frontend'"
   },
   "devDependencies": {

@@ -16,7 +16,7 @@ if (!process.env.PATH?.includes(foundryBin)) {
   process.env.PATH = `${foundryBin}:${process.env.PATH ?? ""}`;
 }
 
-const CONTRACTS_DIR = path.resolve(__dirname, "../../../../contracts");
+const CONTRACTS_DIR = path.resolve(__dirname, "../../../../packages/contracts");
 
 export interface DeployedAddresses {
   USDC_ADDRESS: string;
@@ -42,11 +42,13 @@ export function deployContracts(rpcUrl = "http://127.0.0.1:8545"): DeployedAddre
   console.log("[deploy] building contracts...");
   execSync(`${forge} build --quiet`, { cwd: CONTRACTS_DIR, stdio: "inherit" });
 
-  console.log("[deploy] running MockDeploy.s.sol...");
+  console.log("[deploy] running MockDeploy.s.sol... (first run takes 2–4 minutes)");
+  const started = Date.now();
   const output = execSync(
-    `${forge} script script/MockDeploy.s.sol --rpc-url ${rpcUrl} --broadcast --quiet`,
-    { cwd: CONTRACTS_DIR }
+    `${forge} script script/MockDeploy.s.sol --rpc-url ${rpcUrl} --broadcast`,
+    { cwd: CONTRACTS_DIR, stdio: ["ignore", "pipe", "inherit"] }
   ).toString();
+  console.log(`[deploy] done in ${((Date.now() - started) / 1000).toFixed(1)}s`);
 
   return parseAddresses(output);
 }

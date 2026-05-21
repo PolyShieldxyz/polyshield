@@ -5,6 +5,7 @@ import { Logo } from '@/components/ui/Logo'
 import { Icon, ICONS } from '@/components/ui/Icon'
 import { Hash } from '@/components/ui/Hash'
 import { Sparkline } from '@/components/ui/Sparkline'
+import { WalletConnect } from '@/components/ui/WalletConnect'
 import { ReactNode } from 'react'
 
 interface SidebarGroup {
@@ -88,6 +89,10 @@ export function AppSidebar() {
         </div>
       ))}
       <div style={{ flex: 1 }}></div>
+      {/* Wallet connect / disconnect — only shown inside the app */}
+      <div style={{ padding: '0 8px 8px' }}>
+        <WalletConnect variant="sidebar" />
+      </div>
       <div className="panel" style={{ padding: 12, margin: 8 }}>
         <div className="row" style={{ justifyContent: 'space-between' }}>
           <div className="micro">VAULT</div>

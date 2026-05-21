@@ -39,21 +39,15 @@ export function startAnvil(): Promise<ChildProcess> {
     const proc = spawn(anvilBin, [
       "--port", String(ANVIL_PORT),
       "--chain-id", "31337",
-      "--block-time", "1",       // 1s block time so confirmations arrive quickly
+      // No --block-time: instant mining. Each tx is mined immediately.
+      // --block-time 1 caused the pipe buffer to fill during execSync, freezing Anvil's HTTP server.
       "--accounts", "10",
       "--balance", "10000",      // 10k ETH each for gas
     ], {
-      stdio: ["ignore", "pipe", "pipe"],
-    });
-
-    proc.stdout?.on("data", (d: Buffer) => {
-      const line = d.toString().trim();
-      if (line) process.stdout.write(`[anvil] ${line}\n`);
-    });
-
-    proc.stderr?.on("data", (d: Buffer) => {
-      const line = d.toString().trim();
-      if (line) process.stderr.write(`[anvil:err] ${line}\n`);
+      // inherit: Anvil writes directly to the terminal without going through Node.js pipe buffers.
+      // Using "pipe" here caused Anvil to block on write() when execSync held the event loop,
+      // which froze its HTTP server and made forge script time out.
+      stdio: ["ignore", "inherit", "inherit"],
     });
 
     proc.on("error", (err) => {
