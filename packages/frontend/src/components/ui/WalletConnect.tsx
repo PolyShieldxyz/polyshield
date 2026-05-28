@@ -3,6 +3,7 @@ import { useEffect, useRef } from 'react'
 import { ConnectKitButton } from 'connectkit'
 import { useAccount } from 'wagmi'
 import { log } from '@/lib/logger'
+import { clearNoteCache } from '@/lib/notes'
 
 // Used in two places:
 // 1. Gate panel (app/layout.tsx) — shows "Connect Wallet" when not connected
@@ -22,6 +23,7 @@ export function WalletConnect({ variant = 'gate' }: { variant?: 'gate' | 'sideba
       log('wallet_connected', { address, ens: null })
     } else if (prevConnected.current && !isConnected) {
       log('wallet_disconnected', { prevAddress: prevAddress.current })
+      clearNoteCache()
     } else if (isConnected && address && address !== prevAddress.current) {
       log('wallet_address_changed', { from: prevAddress.current, to: address })
     }

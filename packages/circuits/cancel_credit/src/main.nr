@@ -18,6 +18,7 @@ fn main(
     nonce: u64,
     merkle_path: [Field; 32],
     merkle_path_indices: [u1; 32],
+    owner_address: Field,
 
     // Public inputs
     merkle_root: pub Field,
@@ -31,7 +32,7 @@ fn main(
     bet_amount: pub u64,
 ) {
     // 1. Verify the post-bet note is in the Merkle tree
-    let old_commitment = bn254::hash_3([secret, current_balance as Field, nonce as Field]);
+    let old_commitment = bn254::hash_4([secret, current_balance as Field, nonce as Field, owner_address]);
     let computed_root = merkle_verify(old_commitment, merkle_path, merkle_path_indices);
     assert(computed_root == merkle_root, "Invalid Merkle proof");
 
@@ -41,10 +42,11 @@ fn main(
 
     // 3. Verify the new commitment restores exactly bet_amount to the balance
     let restored_balance = current_balance + bet_amount;
-    let computed_new_commitment = bn254::hash_3([
+    let computed_new_commitment = bn254::hash_4([
         secret,
         restored_balance as Field,
         (nonce + 1) as Field,
+        owner_address,
     ]);
     assert(computed_new_commitment == new_commitment, "Invalid new_commitment");
 

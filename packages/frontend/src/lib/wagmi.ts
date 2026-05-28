@@ -1,5 +1,5 @@
 import { polygon, polygonAmoy } from 'wagmi/chains'
-import { http, createConfig } from 'wagmi'
+import { http, createConfig, type Transport } from 'wagmi'
 import { defineChain } from 'viem'
 import { getDefaultConfig } from 'connectkit'
 
@@ -20,7 +20,7 @@ const chains = IS_DEV
   ? ([anvilChain, polygon, polygonAmoy] as const)
   : ([polygon, polygonAmoy] as const)
 
-const transports = IS_DEV
+const transports: Record<number, Transport> = IS_DEV
   ? {
       [anvilChain.id]: http(DEV_RPC),
       [polygon.id]: http(process.env.NEXT_PUBLIC_POLYGON_RPC || undefined),

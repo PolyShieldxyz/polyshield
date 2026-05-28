@@ -25,7 +25,7 @@ const provider = new ethers.JsonRpcProvider(POLYGON_RPC_URL);
 initRelayer(RELAYER_PRIVATE_KEY, VAULT_CONTRACT_ADDRESS, provider);
 
 if (TREE_ADDRESS) {
-  initMerkle(provider, TREE_ADDRESS);
+  initMerkle(provider, TREE_ADDRESS, VAULT_CONTRACT_ADDRESS);
   logger.info({ treeAddress: TREE_ADDRESS }, "merkle path endpoint enabled");
 } else {
   logger.warn("TREE_ADDRESS not set — /merkle-path endpoint disabled");

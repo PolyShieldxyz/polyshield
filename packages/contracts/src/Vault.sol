@@ -40,10 +40,12 @@ contract Vault is ReentrancyGuard, Ownable {
     }
 
     struct BetRecord {
-        bytes32 market_id;
+        bytes32 market_id; // circuit-safe field element (conditionId % BN254_P)
+        bytes32 condition_id; // same as market_id at authorizeBet time
         bytes32 position_id;
         uint64 expected_shares;
-        uint256 bet_amount;
+        uint64 bet_amount;
+        uint8 outcome_side;  // 0 = YES, 1 = NO
         BetStatus status;
     }
 
@@ -66,8 +68,8 @@ contract Vault is ReentrancyGuard, Ownable {
         bytes32 new_commitment;
         bytes32 nullifier_of_bet;
         bytes32 market_id;
-        uint64 payout_per_share;
-        // shares_held is NOT here — it is injected from betRecords[nullifier_of_bet]
+        // payout_per_share REMOVED — read from pendingCredit[market_id]
+        // shares_held is NOT here — injected from betRecords[nullifier_of_bet]
         uint64 total_credit;
     }
 
@@ -76,6 +78,7 @@ contract Vault is ReentrancyGuard, Ownable {
         bytes32 nullifier;
         uint64 withdrawal_amount;
         bytes32 recipient_hash;
+        bytes32 new_commitment;
     }
 
     struct BetCancelPublicInputs {
@@ -99,6 +102,9 @@ contract Vault is ReentrancyGuard, Ownable {
     // Constants
     // -------------------------------------------------------------------------
     uint256 public constant DEPOSIT_CAP = 50_000 * 1e6; // $50k USDC (6 decimals)
+    // BN254 scalar field prime — conditionIds that exceed this are reduced before
+    // use as circuit Field inputs and as pendingCredit keys.
+    uint256 private constant BN254_P = 21888242871839275222246405745257275088548364400416034343698204186575808495617;
 
     // -------------------------------------------------------------------------
     // State
@@ -116,6 +122,13 @@ contract Vault is ReentrancyGuard, Ownable {
     mapping(uint8 => address) public verifiers;
     mapping(bytes32 => BetRecord) public betRecords;
     mapping(address => uint256) public cumulativeDeposits;
+    // circuit_key (conditionId % BN254_P) => outcome_side => payout_per_share
+    // payout_per_share = numerators[outcome_side] / denominator (0 or 1 for binary markets)
+    mapping(bytes32 => mapping(uint8 => uint64)) public pendingCredit;
+    mapping(bytes32 => uint64) public marketResolvedAt; // conditionId => block.timestamp
+    mapping(bytes32 => uint64) public betCreatedAt;    // nullifier_of_bet => block.timestamp at authorizeBet
+    uint256 public adminCancelTimelock = 86_400;        // seconds; default 24 hours; governance-mutable
+    uint256 public deployedToPolymarket;               // USDC-equivalent currently held in depositWallet
 
     // -------------------------------------------------------------------------
     // Errors
@@ -131,11 +144,21 @@ contract Vault is ReentrancyGuard, Ownable {
     error NotNA();
     error BadRecipient();
     error OnlyOperator();
+    error MarketAlreadyResolved();
+    error MarketNotResolved();
+    error ConditionNotResolved();
+    error BetNotCancellable();
+    error BetNotActive();
+    error BetTimeoutNotElapsed();
+    error InsufficientVaultLiquidity();
+    error InsufficientLiquidity(uint256 available, uint256 requested);
+    error InvalidAmount();
 
     // -------------------------------------------------------------------------
     // Events
     // -------------------------------------------------------------------------
     event Deposited(address indexed depositor, bytes32 commitment, uint256 amount);
+    event MarketResolved(bytes32 indexed market_id, uint64 payout_per_share, uint64 resolvedAt);
     event BetAuthorized(
         bytes32 indexed nullifier,
         bytes32 market_id,
@@ -143,14 +166,18 @@ contract Vault is ReentrancyGuard, Ownable {
         uint64 expected_shares,
         uint256 bet_amount,
         uint64 price,
+        uint8 outcome_side,
         bytes32 new_commitment
     );
+    event FundedPolymarketWallet(uint256 amount);
+    event PolymarketReturnAcknowledged(uint256 amount);
     event BetFilled(bytes32 indexed nullifier_of_bet);
     event FOKFailed(bytes32 indexed nullifier_of_bet);
     event SettlementCredited(bytes32 indexed nullifier, bytes32 nullifier_of_bet, bytes32 new_commitment);
-    event Withdrawn(bytes32 indexed nullifier, address recipient, uint256 amount);
+    event Withdrawn(bytes32 indexed nullifier, address recipient, uint256 amount, bytes32 new_commitment);
     event BetCancellationCredited(bytes32 indexed nullifier, bytes32 nullifier_of_bet, bytes32 new_commitment);
     event NACancellationCredited(bytes32 indexed nullifier, bytes32 nullifier_of_bet, bytes32 new_commitment);
+    event AdminBetCancelled(bytes32 indexed nullifier_of_bet);
 
     // -------------------------------------------------------------------------
     // Constructor
@@ -187,13 +214,43 @@ contract Vault is ReentrancyGuard, Ownable {
         signingLayerOperator = operator;
     }
 
+    /// @notice Update the timelock duration for adminCancelBet. Owner-controlled.
+    function setAdminCancelTimelock(uint256 _seconds) external onlyOwner {
+        adminCancelTimelock = _seconds;
+    }
+
+    /// @notice Convert vault USDC to pUSD via onramp and forward to the Polymarket
+    /// deposit wallet. Operator-callable; tracks deployed amount in deployedToPolymarket.
+    function fundPolymarketWallet(uint256 amount) external nonReentrant {
+        if (msg.sender != signingLayerOperator) revert OnlyOperator();
+        if (usdc.balanceOf(address(this)) < amount) revert InsufficientVaultLiquidity();
+        deployedToPolymarket += amount;
+
+        IERC20 pusd = IERC20(onramp.pusdAddress());
+        usdc.forceApprove(address(onramp), amount);
+        onramp.deposit(amount); // USDC leaves vault, pUSD arrives at vault
+
+        pusd.safeTransfer(depositWallet, amount); // forward pUSD to deposit wallet
+        emit FundedPolymarketWallet(amount);
+    }
+
+    /// @notice Acknowledge that USDC has returned to the vault from Polymarket settlement.
+    /// Called by operator after the full redemption pipeline completes.
+    function acknowledgePolymarketReturn(uint256 amount) external {
+        if (msg.sender != signingLayerOperator) revert OnlyOperator();
+        if (amount > deployedToPolymarket) revert InvalidAmount();
+        deployedToPolymarket -= amount;
+        emit PolymarketReturnAcknowledged(amount);
+    }
+
     // -------------------------------------------------------------------------
     // Deposit
     // -------------------------------------------------------------------------
 
     /// @notice Deposit USDC and insert a commitment leaf.
-    /// The commitment must be the Poseidon hash of (secret, initial_balance, 0)
-    /// computed client-side. The vault does not verify the preimage on-chain.
+    /// The commitment must equal Poseidon4(secret, initial_balance, 0, owner_address)
+    /// computed client-side (see docs/zk-design.md §2). The vault does not verify
+    /// the preimage on-chain; the depositor is bound by the commitment they submit.
     function deposit(bytes32 commitment, uint256 amount) external nonReentrant {
         if (cumulativeDeposits[msg.sender] + amount > DEPOSIT_CAP) revert DepositCapExceeded();
         cumulativeDeposits[msg.sender] += amount;
@@ -223,11 +280,14 @@ contract Vault is ReentrancyGuard, Ownable {
 
         betRecords[inputs.nullifier] = BetRecord({
             market_id: inputs.market_id,
+            condition_id: inputs.market_id,
             position_id: inputs.position_id,
             expected_shares: inputs.expected_shares,
-            bet_amount: uint256(inputs.bet_amount),
+            bet_amount: inputs.bet_amount,
+            outcome_side: inputs.outcome_side,
             status: BetStatus.ACTIVE
         });
+        betCreatedAt[inputs.nullifier] = uint64(block.timestamp);
 
         emit BetAuthorized(
             inputs.nullifier,
@@ -236,6 +296,7 @@ contract Vault is ReentrancyGuard, Ownable {
             inputs.expected_shares,
             uint256(inputs.bet_amount),
             inputs.price,
+            inputs.outcome_side,
             inputs.new_commitment
         );
     }
@@ -262,6 +323,62 @@ contract Vault is ReentrancyGuard, Ownable {
         emit FOKFailed(nullifier_of_bet);
     }
 
+    /// @notice Emergency cancel for in-flight bets when the Signing Layer EOA is
+    /// banned or otherwise unable to report fill status. Sets the bet to FAILED so
+    /// the depositor can call betCancellationCredit to recover their funds.
+    ///
+    /// Only callable on ACTIVE bets (not yet reported by the operator). A 24-hour
+    /// timelock (adminCancelTimelock) prevents the owner from cancelling bets
+    /// before the signing layer has had a reasonable chance to submit or report.
+    /// See docs/open-questions.md Q14.
+    function adminCancelBet(bytes32 nullifier_of_bet) external onlyOwner {
+        BetRecord storage rec = betRecords[nullifier_of_bet];
+        if (rec.market_id == bytes32(0)) revert BetNotFound();
+        if (rec.status != BetStatus.ACTIVE) revert BetNotActive();
+        if (block.timestamp < uint256(betCreatedAt[nullifier_of_bet]) + adminCancelTimelock)
+            revert BetTimeoutNotElapsed();
+        rec.status = BetStatus.FAILED;
+        emit AdminBetCancelled(nullifier_of_bet);
+    }
+
+    // -------------------------------------------------------------------------
+    // Market Resolution
+    // -------------------------------------------------------------------------
+
+    /// @notice Called by the operator after a Polymarket market resolves (non-N/A).
+    /// Reads payout from the CTF contract and stores per-outcome payouts keyed by
+    /// the BN254-reduced circuit_key so settlement proofs can use it directly.
+    /// payout_per_share for each outcome = numerators[i] / denominator (0 or 1 for
+    /// standard binary Polymarket markets).
+    function resolveMarket(bytes32 market_id) external {
+        if (msg.sender != signingLayerOperator) revert OnlyOperator();
+
+        // Reduce conditionId to BN254 field range for use as circuit-compatible key.
+        bytes32 circuit_key = bytes32(uint256(market_id) % BN254_P);
+        if (marketResolvedAt[circuit_key] != 0) revert MarketAlreadyResolved();
+
+        uint256[] memory numerators = ctf.payoutNumerators(market_id);
+        uint256 denominator = ctf.payoutDenominator(market_id);
+        if (denominator == 0) revert ConditionNotResolved();
+
+        bool anyNonZero = false;
+        for (uint256 i = 0; i < numerators.length; i++) {
+            if (numerators[i] > 0) { anyNonZero = true; break; }
+        }
+        if (!anyNonZero) revert NotNA();
+
+        // Store payout for each outcome. For binary markets numerators[i]/denominator
+        // is exactly 0 or 1. Users whose outcome_side lost get payout_per_share = 0
+        // and their bet is treated as worthless (no settlement needed).
+        for (uint256 i = 0; i < numerators.length; i++) {
+            pendingCredit[circuit_key][uint8(i)] = uint64(numerators[i] / denominator);
+        }
+
+        uint64 resolvedAt = uint64(block.timestamp);
+        marketResolvedAt[circuit_key] = resolvedAt;
+        emit MarketResolved(circuit_key, uint64(numerators[0] / denominator), resolvedAt);
+    }
+
     // -------------------------------------------------------------------------
     // Settlement Credit
     // -------------------------------------------------------------------------
@@ -281,8 +398,16 @@ contract Vault is ReentrancyGuard, Ownable {
         if (rec.market_id != inputs.market_id) revert WrongMarket();
         if (rec.status != BetStatus.FILLED) revert BetNotFilled();
 
-        // Inject shares_held from storage — user cannot supply a different value
-        bytes32[] memory pubInputs = _settlementPublicInputs(inputs, rec.expected_shares);
+        // Market must be resolved; losing bets (payout_per_share == 0) revert here.
+        if (marketResolvedAt[inputs.market_id] == 0) revert MarketNotResolved();
+        uint64 payout_per_share = pendingCredit[inputs.market_id][rec.outcome_side];
+
+        // Verify total_credit arithmetic on-chain — circuit trusts this as injected.
+        // payout_per_share is 0 or 1 for binary markets; for a loss total_credit must be 0.
+        uint64 shares_held = rec.expected_shares;
+        require(uint256(shares_held) * uint256(payout_per_share) == uint256(inputs.total_credit), "Invalid total_credit");
+
+        bytes32[] memory pubInputs = _settlementPublicInputs(inputs);
         if (!IVerifier(verifiers[SETTLEMENT_CREDIT]).verify(proof, pubInputs)) revert InvalidProof();
 
         nullifiers.markSpent(inputs.nullifier);
@@ -313,10 +438,18 @@ contract Vault is ReentrancyGuard, Ownable {
         bytes32 computedHash = tree.hashTwo(bytes32(uint256(uint160(recipientAddress))), bytes32(0));
         if (computedHash != inputs.recipient_hash) revert BadRecipient();
 
+        // H1: explicit solvency guard — gives a meaningful error when funds are deployed.
+        uint256 available = usdc.balanceOf(address(this));
+        if (available < uint256(inputs.withdrawal_amount))
+            revert InsufficientLiquidity(available, uint256(inputs.withdrawal_amount));
+
         nullifiers.markSpent(inputs.nullifier);
+        if (inputs.new_commitment != bytes32(0)) {
+            tree.insert(inputs.new_commitment);
+        }
         usdc.safeTransfer(recipientAddress, uint256(inputs.withdrawal_amount));
 
-        emit Withdrawn(inputs.nullifier, recipientAddress, uint256(inputs.withdrawal_amount));
+        emit Withdrawn(inputs.nullifier, recipientAddress, uint256(inputs.withdrawal_amount), inputs.new_commitment);
     }
 
     // -------------------------------------------------------------------------
@@ -363,6 +496,11 @@ contract Vault is ReentrancyGuard, Ownable {
         BetRecord storage rec = betRecords[inputs.nullifier_of_bet];
         if (rec.market_id == bytes32(0)) revert BetNotFound();
         if (rec.market_id != inputs.market_id) revert WrongMarket();
+        // C1: prevent double-credit — only ACTIVE and FILLED bets can be N/A-credited
+        if (rec.status != BetStatus.ACTIVE && rec.status != BetStatus.FILLED) revert BetNotCancellable();
+        // C2: confirm the condition has actually resolved (denominator > 0) before checking N/A
+        uint256 denominator = ctf.payoutDenominator(inputs.market_id);
+        if (denominator == 0) revert ConditionNotResolved();
 
         // Verify N/A: all payoutNumerators must be zero
         uint256[] memory numerators = ctf.payoutNumerators(inputs.market_id);
@@ -399,47 +537,7 @@ contract Vault is ReentrancyGuard, Ownable {
         return p;
     }
 
-    function _settlementPublicInputs(SettlementPublicInputs calldata i, uint64 shares_held)
-        internal
-        pure
-        returns (bytes32[] memory)
-    {
-        bytes32[] memory p = new bytes32[](8);
-        p[0] = i.merkle_root;
-        p[1] = i.nullifier;
-        p[2] = i.new_commitment;
-        p[3] = i.nullifier_of_bet;
-        p[4] = i.market_id;
-        p[5] = bytes32(uint256(i.payout_per_share));
-        p[6] = bytes32(uint256(shares_held)); // Vault-injected
-        p[7] = bytes32(uint256(i.total_credit));
-        return p;
-    }
-
-    function _withdrawalPublicInputs(WithdrawalPublicInputs calldata i) internal pure returns (bytes32[] memory) {
-        bytes32[] memory p = new bytes32[](4);
-        p[0] = i.merkle_root;
-        p[1] = i.nullifier;
-        p[2] = bytes32(uint256(i.withdrawal_amount));
-        p[3] = i.recipient_hash;
-        return p;
-    }
-
-    function _betCancelPublicInputs(BetCancelPublicInputs calldata i, uint256 bet_amount)
-        internal
-        pure
-        returns (bytes32[] memory)
-    {
-        bytes32[] memory p = new bytes32[](5);
-        p[0] = i.merkle_root;
-        p[1] = i.nullifier;
-        p[2] = i.new_commitment;
-        p[3] = i.nullifier_of_bet;
-        p[4] = bytes32(bet_amount); // Vault-injected
-        return p;
-    }
-
-    function _naCancelPublicInputs(NACancelPublicInputs calldata i, uint256 bet_amount)
+    function _settlementPublicInputs(SettlementPublicInputs calldata i)
         internal
         pure
         returns (bytes32[] memory)
@@ -450,7 +548,46 @@ contract Vault is ReentrancyGuard, Ownable {
         p[2] = i.new_commitment;
         p[3] = i.nullifier_of_bet;
         p[4] = i.market_id;
-        p[5] = bytes32(bet_amount); // Vault-injected
+        p[5] = bytes32(uint256(i.total_credit));
+        return p;
+    }
+
+    function _withdrawalPublicInputs(WithdrawalPublicInputs calldata i) internal pure returns (bytes32[] memory) {
+        bytes32[] memory p = new bytes32[](5);
+        p[0] = i.merkle_root;
+        p[1] = i.nullifier;
+        p[2] = bytes32(uint256(i.withdrawal_amount));
+        p[3] = i.recipient_hash;
+        p[4] = i.new_commitment;
+        return p;
+    }
+
+    function _betCancelPublicInputs(BetCancelPublicInputs calldata i, uint64 bet_amount)
+        internal
+        pure
+        returns (bytes32[] memory)
+    {
+        bytes32[] memory p = new bytes32[](5);
+        p[0] = i.merkle_root;
+        p[1] = i.nullifier;
+        p[2] = i.new_commitment;
+        p[3] = i.nullifier_of_bet;
+        p[4] = bytes32(uint256(bet_amount)); // Vault-injected; uint64 → uint256 → bytes32
+        return p;
+    }
+
+    function _naCancelPublicInputs(NACancelPublicInputs calldata i, uint64 bet_amount)
+        internal
+        pure
+        returns (bytes32[] memory)
+    {
+        bytes32[] memory p = new bytes32[](6);
+        p[0] = i.merkle_root;
+        p[1] = i.nullifier;
+        p[2] = i.new_commitment;
+        p[3] = i.nullifier_of_bet;
+        p[4] = i.market_id;
+        p[5] = bytes32(uint256(bet_amount)); // Vault-injected; uint64 → uint256 → bytes32
         return p;
     }
 }

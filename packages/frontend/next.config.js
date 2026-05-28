@@ -1,17 +1,21 @@
 /** @type {import('next').NextConfig} */
 const nextConfig = {
   webpack(config, { isServer }) {
-    // Enable async WebAssembly — required for @noir-lang/acvm_js and @noir-lang/noirc_abi
-    config.experiments = {
-      ...config.experiments,
-      asyncWebAssembly: true,
-      layers: true,
+    // snarkjs uses some Node.js built-ins — provide browser stubs for client bundles
+    if (!isServer) {
+      config.resolve.fallback = {
+        ...config.resolve.fallback,
+        fs: false,
+        path: false,
+        os: false,
+        crypto: false,
+      }
     }
 
-    // Prevent server-side bundling of browser-only WASM/crypto packages
+    // Prevent SSR bundling of snarkjs (it's browser-only at runtime)
     if (isServer) {
       config.externals = config.externals || []
-      config.externals.push('@aztec/bb.js')
+      config.externals.push('snarkjs')
     }
 
     return config

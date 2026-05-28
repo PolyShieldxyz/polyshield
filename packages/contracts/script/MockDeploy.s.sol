@@ -13,6 +13,9 @@ import {BetCancelVerifier} from "../src/verifiers/BetCancelVerifier.sol";
 import {CancelCreditVerifier} from "../src/verifiers/CancelCreditVerifier.sol";
 import {MockUSDC} from "../src/mocks/MockUSDC.sol";
 import {MockCTF} from "../src/mocks/MockCTF.sol";
+import {MockCollateralOfframp} from "../src/mocks/MockCollateralOfframp.sol";
+import {MockCollateralOnramp} from "../src/mocks/MockCollateralOnramp.sol";
+import {MockPUSD} from "../src/mocks/MockPUSD.sol";
 
 /// @notice Deploys all contracts + mocks on a local Anvil node for dev/integration testing.
 /// Uses contract-level storage variables to stay within the Solidity stack limit.
@@ -42,7 +45,10 @@ contract MockDeploy is Script {
 
     // ── Contract storage (avoids Solidity stack-too-deep in run()) ────────────
     MockUSDC                internal s_usdc;
+    MockPUSD                internal s_pusd;
     MockCTF                 internal s_ctf;
+    MockCollateralOnramp  internal s_onramp;
+    MockCollateralOfframp internal s_offramp;
     PoseidonT3Hasher        internal s_poseidon;
     NullifierRegistry       internal s_registry;
     CommitmentMerkleTree    internal s_tree;
@@ -76,8 +82,10 @@ contract MockDeploy is Script {
     function _deployMocks() internal {
         vm.startBroadcast(DEPLOYER_KEY);
         s_usdc     = new MockUSDC();
-        s_ctf      = new MockCTF();
+        s_pusd     = new MockPUSD();
+        s_ctf      = new MockCTF(address(s_pusd));
         s_poseidon = new PoseidonT3Hasher();   // real BN254 Poseidon2 — matches Noir
+        s_onramp   = new MockCollateralOnramp(address(s_usdc), address(s_pusd));
         vm.stopBroadcast();
     }
 
@@ -86,19 +94,22 @@ contract MockDeploy is Script {
     function _deployCore() internal {
         address deployer = vm.addr(DEPLOYER_KEY);
         // After step 1, deployer nonce advanced by 3 (usdc, ctf, poseidon).
-        // Core order: registry(+0), tree(+1), vault(+2) relative to current nonce.
+        // Core order: registry(+0), tree(+1), offramp(+2), vault(+3) relative to current nonce.
         uint64 nonce = vm.getNonce(deployer);
-        address predictedVault = vm.computeCreateAddress(deployer, nonce + 2);
+        address predictedOfframp = vm.computeCreateAddress(deployer, nonce + 2);
+        address predictedVault = vm.computeCreateAddress(deployer, nonce + 3);
 
         vm.startBroadcast(DEPLOYER_KEY);
         s_registry = new NullifierRegistry(predictedVault);
         s_tree     = new CommitmentMerkleTree(predictedVault, address(s_poseidon));
+        s_offramp  = new MockCollateralOfframp(address(s_usdc), address(s_pusd));
+        require(address(s_offramp) == predictedOfframp, "MockDeploy: offramp addr mismatch");
         s_vault    = new Vault(
             address(s_usdc),
             address(s_tree),
             address(s_registry),
-            address(0), // onramp  — not needed locally
-            address(0), // offramp — not needed locally
+            address(s_onramp),
+            address(s_offramp),
             address(s_ctf),
             OPERATOR,
             DEPOSIT_WALLET,
@@ -190,6 +201,9 @@ contract MockDeploy is Script {
 
     function _log() internal view {
         console2.log("USDC_ADDRESS=%s",          address(s_usdc));
+        console2.log("PUSD_ADDRESS=%s",          address(s_pusd));
+        console2.log("ONRAMP_ADDRESS=%s",        address(s_onramp));
+        console2.log("OFFRAMP_ADDRESS=%s",       address(s_offramp));
         console2.log("CTF_ADDRESS=%s",            address(s_ctf));
         console2.log("POSEIDON_ADDRESS=%s",       address(s_poseidon));
         console2.log("REGISTRY_ADDRESS=%s",       address(s_registry));

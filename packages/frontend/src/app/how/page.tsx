@@ -4,8 +4,8 @@ const STEPS = [
   {
     n: '01',
     title: 'Deposit USDC into the shared vault',
-    body: 'You transfer USDC to the Vault contract. A local spending note (secret, balance, nonce) is generated in your browser. The Poseidon commitment of that note becomes a new leaf in the vault\'s Merkle tree. Your deposit amount is public; the note contents are not.',
-    code: 'C = poseidon(secret, balance, nonce)',
+    body: 'You transfer USDC to the Vault contract. A local spending note (secret, balance, nonce, owner_address) is generated in your browser. The secret is derived from a wallet signature — you never need to back anything up. The Poseidon commitment of that note becomes a new leaf in the vault\'s Merkle tree. Your deposit amount is public; the note contents are not.',
+    code: 'C = Poseidon4(secret, balance, nonce, owner_address)',
   },
   {
     n: '02',
@@ -29,12 +29,12 @@ const STEPS = [
     n: '05',
     title: 'Settle winnings as a new private note',
     body: 'When a market resolves, you generate a SETTLE_CRED proof locally. This proof binds your original position to the market outcome without revealing your note\'s identity. The settlement credit becomes a fresh private note in your vault.',
-    code: 'new_commitment = poseidon(secret, balance + credit, nonce+1)',
+    code: 'new_commitment = Poseidon4(secret, balance + credit, nonce+1, owner_address)',
   },
   {
     n: '06',
-    title: 'Withdraw to any address',
-    body: 'The WITHDRAW proof proves you know a note\'s secret, and commits to a recipient address via its Poseidon hash (a private input). The relay submits the withdrawal. Only the nullifier is public — the link from deposit to withdrawal is cryptographically broken.',
+    title: 'Withdraw to your own address',
+    body: 'The WITHDRAW proof proves you know a note\'s secret, and commits to a recipient address via its Poseidon hash (a private input). The relay submits the withdrawal. You can only withdraw to the wallet that made the original deposit — this is enforced inside the ZK circuit via the owner_address field. The link from deposit to withdrawal is still unlinkable on-chain because no identifying data appears in the withdrawal transaction.',
     code: 'recipient_hash = poseidon(recipient_address, 0)',
   },
 ]

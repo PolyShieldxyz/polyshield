@@ -35,7 +35,6 @@ export interface RelaySettlementInputs {
   new_commitment: string
   nullifier_of_bet: string
   market_id: string
-  payout_per_share: string
   total_credit: string
 }
 
@@ -44,6 +43,7 @@ export interface RelayWithdrawalInputs {
   nullifier: string
   withdrawal_amount: string
   recipient_hash: string
+  new_commitment: string
 }
 
 export interface RelayBetCancelInputs {
@@ -154,6 +154,86 @@ export async function fetchDevStatus(): Promise<DevStatus> {
 export async function fetchMerklePath(commitment: `0x${string}`): Promise<MerkleProof> {
   console.log('[polyshield:api] fetching merkle path for', commitment)
   return get(`/api/merkle-path/${commitment}`) as Promise<MerkleProof>
+}
+
+// Fetch payout_per_share for a resolved market from Vault.pendingCredit(bytes32,uint8).
+// outcome_side: 0 = YES, 1 = NO. Returns 0n if unresolved or if user's side lost.
+// Selector: keccak256("pendingCredit(bytes32,uint8)") = 0x64043a2f
+export async function fetchPendingCredit(
+  vaultAddress: string,
+  market_id: `0x${string}`,
+  outcome_side: number,
+  rpcUrl = process.env.NEXT_PUBLIC_CHAIN_RPC ?? 'http://127.0.0.1:8545',
+): Promise<bigint> {
+  const data = `0x64043a2f${market_id.slice(2).padStart(64, '0')}${outcome_side.toString(16).padStart(64, '0')}`
+  const res = await fetch(rpcUrl, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      jsonrpc: '2.0', id: 1, method: 'eth_call',
+      params: [{ to: vaultAddress, data }, 'latest'],
+    }),
+  })
+  const json = await res.json() as { result: string }
+  return BigInt(json.result ?? '0x0')
+}
+
+// Fetch the block.timestamp when a market was resolved (0 if not yet resolved).
+// Selector: keccak256("marketResolvedAt(bytes32)") = 0x1acf3695
+export async function fetchMarketResolvedAt(
+  vaultAddress: string,
+  market_id: `0x${string}`,
+  rpcUrl = process.env.NEXT_PUBLIC_CHAIN_RPC ?? 'http://127.0.0.1:8545',
+): Promise<bigint> {
+  const res = await fetch(rpcUrl, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      jsonrpc: '2.0', id: 1, method: 'eth_call',
+      params: [{ to: vaultAddress, data: `0x1acf3695${market_id.slice(2).padStart(64, '0')}` }, 'latest'],
+    }),
+  })
+  const json = await res.json() as { result: string }
+  return BigInt(json.result ?? '0x0')
+}
+
+export async function waitForTransactionConfirmation(
+  txHash: `0x${string}`,
+  rpcUrl = process.env.NEXT_PUBLIC_CHAIN_RPC ?? 'http://127.0.0.1:8545',
+  timeoutMs = 60_000,
+  pollMs = 1_500,
+): Promise<void> {
+  const start = Date.now()
+  while (Date.now() - start < timeoutMs) {
+    const res = await fetch(rpcUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        jsonrpc: '2.0',
+        id: 1,
+        method: 'eth_getTransactionReceipt',
+        params: [txHash],
+      }),
+    })
+
+    const json = await res.json() as {
+      result?: { status?: string | null } | null
+      error?: { message?: string }
+    }
+
+    if (json.error?.message) {
+      throw new Error(json.error.message)
+    }
+
+    if (json.result) {
+      if (json.result.status === '0x1') return
+      if (json.result.status === '0x0') throw new Error('Transaction reverted on-chain.')
+    }
+
+    await new Promise((resolve) => setTimeout(resolve, pollMs))
+  }
+
+  throw new Error('Timed out waiting for on-chain confirmation.')
 }
 
 // Fetch the current Merkle root from the live CommitmentMerkleTree.

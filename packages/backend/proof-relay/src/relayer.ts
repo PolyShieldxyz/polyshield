@@ -5,19 +5,95 @@ const logger = pino({ name: "relayer", level: "debug" });
 
 const VAULT_ABI = [
   "function authorizeBet(bytes calldata proof, tuple(bytes32 merkle_root, bytes32 nullifier, bytes32 new_commitment, uint64 bet_amount, uint64 price, uint64 expected_shares, bytes32 market_id, uint8 outcome_side, bytes32 position_id) calldata inputs)",
-  "function creditSettlement(bytes calldata proof, tuple(bytes32 merkle_root, bytes32 nullifier, bytes32 new_commitment, bytes32 nullifier_of_bet, bytes32 market_id, uint64 payout_per_share, uint64 total_credit) calldata inputs)",
-  "function withdraw(bytes calldata proof, tuple(bytes32 merkle_root, bytes32 nullifier, uint64 withdrawal_amount, bytes32 recipient_hash) calldata inputs, address recipientAddress)",
+  "function creditSettlement(bytes calldata proof, tuple(bytes32 merkle_root, bytes32 nullifier, bytes32 new_commitment, bytes32 nullifier_of_bet, bytes32 market_id, uint64 total_credit) calldata inputs)",
+  "function withdraw(bytes calldata proof, tuple(bytes32 merkle_root, bytes32 nullifier, uint64 withdrawal_amount, bytes32 recipient_hash, bytes32 new_commitment) calldata inputs, address recipientAddress)",
   "function betCancellationCredit(bytes calldata proof, tuple(bytes32 merkle_root, bytes32 nullifier, bytes32 new_commitment, bytes32 nullifier_of_bet) calldata inputs)",
   "function naCancellationCredit(bytes calldata proof, tuple(bytes32 merkle_root, bytes32 nullifier, bytes32 new_commitment, bytes32 nullifier_of_bet, bytes32 market_id) calldata inputs)",
 ];
 
+// ── Nonce manager ─────────────────────────────────────────────────────────────
+//
+// Fetching the nonce from eth_getTransactionCount("latest") on each call
+// returns only confirmed-transaction counts. Under concurrent submissions this
+// causes the second request to reuse the same nonce as the first, dropping one
+// of the two transactions. We maintain a monotonically-incrementing in-memory
+// counter, seeding from "pending" on first use, and reset on any nonce error.
+
+class NonceManager {
+  private nonce: number | null = null;
+  private lastSeenBlock = 0;
+
+  async getAndIncrement(provider: ethers.JsonRpcProvider, address: string): Promise<number> {
+    if (this.nonce === null) {
+      this.nonce = await provider.getTransactionCount(address, "pending");
+    }
+    return this.nonce++;
+  }
+
+  // Call when a tx was never broadcast (e.g. estimateGas failed) so the nonce
+  // slot can be reused by the next call instead of leaving a gap.
+  decrement(): void {
+    if (this.nonce !== null && this.nonce > 0) this.nonce--;
+  }
+
+  reset(): void {
+    this.nonce = null;
+  }
+
+  async checkForChainReset(provider: ethers.JsonRpcProvider): Promise<void> {
+    if (process.env.NODE_ENV === "production") return;
+    try {
+      const current = await provider.getBlockNumber();
+      if (current < this.lastSeenBlock) {
+        logger.warn({ current, lastSeen: this.lastSeenBlock }, "relayer: chain reset detected — resetting nonce");
+        this.reset();
+      }
+      this.lastSeenBlock = current;
+    } catch {
+      // Non-fatal: if the RPC is unavailable we skip the check
+    }
+  }
+}
+
+const nonceManager = new NonceManager();
+
 let wallet: ethers.Wallet;
 let vault: ethers.Contract;
+let _provider: ethers.JsonRpcProvider;
 
 export function initRelayer(relayerKey: string, vaultAddress: string, provider: ethers.JsonRpcProvider): void {
   wallet = new ethers.Wallet(relayerKey, provider);
   vault = new ethers.Contract(vaultAddress, VAULT_ABI, wallet);
+  _provider = provider;
+  nonceManager.reset();
+  void nonceManager.checkForChainReset(provider);
   logger.info({ relayerAddress: wallet.address, vaultAddress }, "relayer:init");
+}
+
+// ── Nonce-aware tx sender ─────────────────────────────────────────────────────
+
+const NONCE_ERROR_PATTERNS = ["nonce too low", "nonce too high", "replacement underpriced", "NONCE_EXPIRED", "already known", "invalid nonce"];
+
+async function sendWithNonce(
+  fn: (nonce: number) => Promise<ethers.TransactionResponse>,
+): Promise<ethers.TransactionResponse> {
+  const nonce = await nonceManager.getAndIncrement(_provider, wallet.address);
+  try {
+    return await fn(nonce);
+  } catch (err) {
+    const msg = String(err).toLowerCase();
+    const isNonceError = NONCE_ERROR_PATTERNS.some((p) => msg.includes(p.toLowerCase()));
+    if (isNonceError) {
+      logger.warn({ nonce, err: String(err) }, "relayer: nonce error — resetting and retrying once");
+      nonceManager.reset();
+      const freshNonce = await nonceManager.getAndIncrement(_provider, wallet.address);
+      return fn(freshNonce);
+    }
+    // The tx was never broadcast (e.g. estimateGas reverted). Return the nonce
+    // so the next call can reuse it instead of leaving a gap in the mempool.
+    nonceManager.decrement();
+    throw err;
+  }
 }
 
 function proofBytes(proof: string): number {
@@ -58,9 +134,11 @@ export async function relayAuthorizeBet(proof: string, inputs: unknown): Promise
     inputs,
   }, "relay:authorizeBet:start");
 
-  const tx = await (vault as ethers.Contract & {
-    authorizeBet: (p: string, i: unknown) => Promise<ethers.TransactionResponse>
-  }).authorizeBet(proof, inputs);
+  const tx = await sendWithNonce((nonce) =>
+    (vault as ethers.Contract & {
+      authorizeBet: (p: string, i: unknown, o: ethers.Overrides) => Promise<ethers.TransactionResponse>
+    }).authorizeBet(proof, inputs, { nonce }),
+  );
 
   logger.info({ event: "relay:authorizeBet:tx_sent", txHash: tx.hash, nonce: tx.nonce, elapsed_ms: Date.now() - start }, "relay:authorizeBet:tx_sent");
   trackReceipt("relay:authorizeBet", tx, start);
@@ -76,9 +154,11 @@ export async function relayCreditSettlement(proof: string, inputs: unknown): Pro
     inputs,
   }, "relay:creditSettlement:start");
 
-  const tx = await (vault as ethers.Contract & {
-    creditSettlement: (p: string, i: unknown) => Promise<ethers.TransactionResponse>
-  }).creditSettlement(proof, inputs);
+  const tx = await sendWithNonce((nonce) =>
+    (vault as ethers.Contract & {
+      creditSettlement: (p: string, i: unknown, o: ethers.Overrides) => Promise<ethers.TransactionResponse>
+    }).creditSettlement(proof, inputs, { nonce }),
+  );
 
   logger.info({ event: "relay:creditSettlement:tx_sent", txHash: tx.hash, nonce: tx.nonce, elapsed_ms: Date.now() - start }, "relay:creditSettlement:tx_sent");
   trackReceipt("relay:creditSettlement", tx, start);
@@ -95,9 +175,11 @@ export async function relayWithdraw(proof: string, inputs: unknown, recipientAdd
     inputs,
   }, "relay:withdraw:start");
 
-  const tx = await (vault as ethers.Contract & {
-    withdraw: (p: string, i: unknown, a: string) => Promise<ethers.TransactionResponse>
-  }).withdraw(proof, inputs, recipientAddress);
+  const tx = await sendWithNonce((nonce) =>
+    (vault as ethers.Contract & {
+      withdraw: (p: string, i: unknown, a: string, o: ethers.Overrides) => Promise<ethers.TransactionResponse>
+    }).withdraw(proof, inputs, recipientAddress, { nonce }),
+  );
 
   logger.info({ event: "relay:withdraw:tx_sent", txHash: tx.hash, nonce: tx.nonce, elapsed_ms: Date.now() - start }, "relay:withdraw:tx_sent");
   trackReceipt("relay:withdraw", tx, start);
@@ -113,9 +195,11 @@ export async function relayBetCancellationCredit(proof: string, inputs: unknown)
     inputs,
   }, "relay:betCancellationCredit:start");
 
-  const tx = await (vault as ethers.Contract & {
-    betCancellationCredit: (p: string, i: unknown) => Promise<ethers.TransactionResponse>
-  }).betCancellationCredit(proof, inputs);
+  const tx = await sendWithNonce((nonce) =>
+    (vault as ethers.Contract & {
+      betCancellationCredit: (p: string, i: unknown, o: ethers.Overrides) => Promise<ethers.TransactionResponse>
+    }).betCancellationCredit(proof, inputs, { nonce }),
+  );
 
   logger.info({ event: "relay:betCancellationCredit:tx_sent", txHash: tx.hash, nonce: tx.nonce, elapsed_ms: Date.now() - start }, "relay:betCancellationCredit:tx_sent");
   trackReceipt("relay:betCancellationCredit", tx, start);
@@ -131,9 +215,11 @@ export async function relayNACancellationCredit(proof: string, inputs: unknown):
     inputs,
   }, "relay:naCancellationCredit:start");
 
-  const tx = await (vault as ethers.Contract & {
-    naCancellationCredit: (p: string, i: unknown) => Promise<ethers.TransactionResponse>
-  }).naCancellationCredit(proof, inputs);
+  const tx = await sendWithNonce((nonce) =>
+    (vault as ethers.Contract & {
+      naCancellationCredit: (p: string, i: unknown, o: ethers.Overrides) => Promise<ethers.TransactionResponse>
+    }).naCancellationCredit(proof, inputs, { nonce }),
+  );
 
   logger.info({ event: "relay:naCancellationCredit:tx_sent", txHash: tx.hash, nonce: tx.nonce, elapsed_ms: Date.now() - start }, "relay:naCancellationCredit:tx_sent");
   trackReceipt("relay:naCancellationCredit", tx, start);

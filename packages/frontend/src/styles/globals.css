@@ -118,7 +118,7 @@ button { font-family: inherit; }
 .nav-link.active { color: var(--text); background: rgba(255,255,255,0.05); }
 
 /* App layout */
-.app-shell { display: grid; grid-template-columns: 232px 1fr; min-height: calc(100vh - 56px); }
+.app-shell { min-height: calc(100vh - 56px); }
 .sidebar { background: var(--bg-1); border-right: 1px solid var(--line); padding: 18px 14px; display: flex; flex-direction: column; gap: 4px; }
 .sb-group { padding: 14px 8px 6px; }
 .sb-item { display: flex; align-items: center; gap: 10px; padding: 7px 10px; border-radius: var(--r-2); font-size: 13px; color: var(--text-1); cursor: pointer; white-space: nowrap; }
@@ -169,6 +169,17 @@ button { font-family: inherit; }
 .tbl th { text-align: left; font-weight: 500; color: var(--text-2); font-family: var(--mono); font-size: 11px; letter-spacing: 0.06em; text-transform: uppercase; padding: 10px 14px; border-bottom: 1px solid var(--line); }
 .tbl td { padding: 12px 14px; border-bottom: 1px solid var(--line); color: var(--text-1); }
 .tbl tr:hover td { background: rgba(255,255,255,0.015); }
+
+@media (max-width: 1180px) {
+  .nav-links { display: none; }
+  .topnav-inner { padding: 0 18px; gap: 12px; }
+}
+
+@media (max-width: 760px) {
+  .topnav { height: auto; }
+  .topnav-inner { height: auto; flex-wrap: wrap; padding: 12px 16px; }
+  .app-shell { min-height: calc(100vh - 96px); }
+}
 
 /* Scrollbar */
 ::-webkit-scrollbar { width: 10px; height: 10px; }

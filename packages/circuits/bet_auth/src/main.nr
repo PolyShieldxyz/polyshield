@@ -14,6 +14,7 @@ fn main(
     // share_remainder = (bet_amount * 1e8) mod price
     // Prover computes this; circuit verifies the floor via Field equality + u64 range check.
     share_remainder: u64,
+    owner_address: Field,
 
     // Public inputs
     merkle_root: pub Field,
@@ -27,7 +28,7 @@ fn main(
     position_id: pub Field,
 ) {
     // 1. Verify the old note commitment is in the Merkle tree
-    let old_commitment = bn254::hash_3([secret, current_balance as Field, nonce as Field]);
+    let old_commitment = bn254::hash_4([secret, current_balance as Field, nonce as Field, owner_address]);
     let computed_root = merkle_verify(old_commitment, merkle_path, merkle_path_indices);
     assert(computed_root == merkle_root, "Invalid Merkle proof");
 
@@ -50,10 +51,11 @@ fn main(
 
     // 5. Verify the new commitment (balance decremented, nonce incremented)
     let new_balance = current_balance - bet_amount;
-    let computed_new_commitment = bn254::hash_3([
+    let computed_new_commitment = bn254::hash_4([
         secret,
         new_balance as Field,
         (nonce + 1) as Field,
+        owner_address,
     ]);
     assert(computed_new_commitment == new_commitment, "Invalid new_commitment");
 

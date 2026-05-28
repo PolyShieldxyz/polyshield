@@ -1,8 +1,28 @@
 import express from "express";
+import { ethers } from "ethers";
 import pino from "pino";
 import { getSettlement } from "./database";
 
 const logger = pino({ name: "indexer-api" });
+
+const VAULT_ABI = [
+  "function marketResolvedAt(bytes32 market_id) view returns (uint64)",
+  "function pendingCredit(bytes32 market_id) view returns (uint64)",
+];
+
+async function fetchVaultResolvedAt(marketId: string): Promise<number | null> {
+  const rpc = process.env.POLYGON_RPC_URL;
+  const vault = process.env.VAULT_CONTRACT_ADDRESS;
+  if (!rpc || !vault) return null;
+  try {
+    const provider = new ethers.JsonRpcProvider(rpc);
+    const contract = new ethers.Contract(vault, VAULT_ABI, provider);
+    const ts: bigint = await contract.marketResolvedAt(marketId);
+    return ts > 0n ? Number(ts) : null;
+  } catch {
+    return null;
+  }
+}
 
 export function createApp(): express.Application {
   const app = express();
@@ -18,18 +38,21 @@ export function createApp(): express.Application {
     res.status(200).json({ status: "ok" });
   });
 
-  app.get("/settlement/:market_id", (req, res) => {
+  app.get("/settlement/:market_id", async (req, res) => {
     const record = getSettlement(req.params.market_id);
     if (!record) {
       res.status(404).json({ error: "Settlement not found" });
       return;
     }
+    const vaultResolvedAt = await fetchVaultResolvedAt(req.params.market_id);
     res.json({
       conditionId: record.condition_id,
       positionId: record.position_id,
       payout_per_share: record.payout_per_share,
       block_number: record.block_number,
       outcome: record.outcome,
+      resolved_at: vaultResolvedAt ?? record.resolved_at ?? null,
+      claimable: (vaultResolvedAt ?? record.resolved_at ?? 0) > 0,
     });
   });
 

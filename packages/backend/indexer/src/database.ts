@@ -9,6 +9,7 @@ export interface SettlementRecord {
   block_number: number;
   outcome: number; // 0=NO, 1=YES, -1=N/A
   created_at: number; // unix seconds
+  resolved_at: number; // unix seconds when Vault.resolveMarket confirmed (0 = unknown)
 }
 
 let db: Database.Database;
@@ -24,17 +25,27 @@ export function openDatabase(dbPath: string): void {
       payout_per_share INTEGER NOT NULL,
       block_number     INTEGER NOT NULL,
       outcome          INTEGER NOT NULL,
-      created_at       INTEGER NOT NULL
+      created_at       INTEGER NOT NULL,
+      resolved_at      INTEGER NOT NULL DEFAULT 0
     )
   `);
+  try {
+    db.exec(`ALTER TABLE settlements ADD COLUMN resolved_at INTEGER NOT NULL DEFAULT 0`);
+  } catch {
+    // column already exists
+  }
+}
+
+export function setResolvedAt(marketId: string, resolvedAt: number): void {
+  db.prepare("UPDATE settlements SET resolved_at = ? WHERE market_id = ?").run(resolvedAt, marketId);
 }
 
 export function upsertSettlement(record: SettlementRecord): void {
   db
     .prepare(
       `INSERT OR REPLACE INTO settlements
-       (market_id, condition_id, position_id, payout_per_share, block_number, outcome, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?)`
+       (market_id, condition_id, position_id, payout_per_share, block_number, outcome, created_at, resolved_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
     )
     .run(
       record.market_id,
@@ -43,7 +54,8 @@ export function upsertSettlement(record: SettlementRecord): void {
       record.payout_per_share,
       record.block_number,
       record.outcome,
-      record.created_at
+      record.created_at,
+      record.resolved_at ?? 0
     );
 }
 

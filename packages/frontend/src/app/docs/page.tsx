@@ -12,13 +12,13 @@ const SECTIONS: Record<string, { title: string; content: string }[]> = {
     },
     {
       title: 'Quickstart',
-      content: `1. Connect your EVM wallet (Polygon mainnet)
+      content: `1. Connect your EVM wallet (Polygon Amoy testnet)
 2. Deposit USDC into the vault — the Vault contract records a Poseidon commitment
-3. Your browser generates a spending note \`(secret, balance, nonce)\` locally
-4. **Save your note** — Polyshield cannot recover it. Use the encrypted backup.
-5. Browse markets and authorize bets via ZK proof
-6. Collect winnings via settlement credit proofs
-7. Withdraw to any address via the withdrawal relay`,
+3. Your browser generates a spending note \`(secret, balance, nonce, owner_address)\` locally
+Your note secret is derived from your wallet signature — no backup is needed. If you switch devices, click "Recover notes" to restore from on-chain history.
+4. Browse markets and authorize bets via ZK proof
+5. Collect winnings via settlement credit proofs
+6. Withdraw to your own address via the withdrawal relay`,
     },
   ],
   'Architecture': [
@@ -34,17 +34,18 @@ The Vault accepts the last 30 Merkle roots (not just the current one) to allow f
     },
     {
       title: 'Note structure',
-      content: `A spending note has three fields:
+      content: `A spending note has four fields:
 \`\`\`
-secret: Field    // 256-bit entropy from crypto.getRandomValues()
-balance: u64     // USDC balance in micro-units (6 decimals)
-nonce: u64       // Increments on each spend
+secret: Field         // Derived from wallet signature — never random
+balance: u64          // USDC balance in micro-units (6 decimals)
+nonce: u64            // Increments on each spend
+owner_address: Field  // Depositing wallet address cast to BN254 field
 \`\`\`
 
-The commitment stored on-chain: \`C = poseidon3(secret, balance, nonce)\`
+The commitment stored on-chain: \`C = Poseidon4(secret, balance, nonce, owner_address)\`
 The nullifier (public, computed once per spend): \`N = poseidon2(secret, nonce)\`
 
-The secret never leaves the browser.`,
+The secret is re-derived from your wallet signature on demand — never stored.`,
     },
     {
       title: 'ZK circuits',
@@ -60,7 +61,7 @@ The secret never leaves the browser.`,
 
 **CANCEL_CRED** — Handles N/A market resolutions (all-zero CTF payout numerators).
 
-Circuits use Noir's \`poseidon2\` and \`poseidon3\` from the stdlib (BN254 field, same constants as @zk-kit/poseidon-solidity).`,
+Circuits use \`bn254::hash_2\` (nullifier) and \`bn254::hash_4\` (commitment) from Noir's BN254 stdlib. Commitment hashes 4 inputs: secret, balance, nonce, owner_address.`,
     },
     {
       title: 'Signing layer',
@@ -102,14 +103,13 @@ Full threat model: \`docs/threat-model.md\` in the repository.`,
     },
     {
       title: 'Note backup',
-      content: `Your note is the only credential that lets you spend from your vault position. If you lose it, your funds are unrecoverable.
+      content: `Your note secret is derived from your wallet signature using a deterministic formula. You do not need to back up any secret.
 
-**Backup options:**
-1. Download the encrypted backup file (note encrypted with your wallet's public key)
-2. Write the hex-encoded secret to paper and store offline
-3. Use a hardware wallet that supports EIP-1024 encryption
+**Recovery:** On a new device or after clearing storage, click "Recover notes" in the app. The app re-derives your secrets by index and replays your note history from on-chain events.
 
-Polyshield stores nothing server-side. There is no account recovery.`,
+**What you must preserve:** Your wallet. Your note secret is recoverable as long as you control the depositing wallet. If you lose access to that wallet, your vault position is unrecoverable — there is no admin override.
+
+**Withdrawal restriction:** You can only withdraw to the wallet address that made the original deposit. This is enforced cryptographically inside the withdrawal ZK circuit.`,
     },
   ],
   'API reference': [

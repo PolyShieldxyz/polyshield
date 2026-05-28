@@ -4,6 +4,18 @@
 export const VAULT_ABI = [
   // ── Read ────────────────────────────────────────────────────────────────────
   {
+    type: 'function', name: 'pendingCredit',
+    inputs: [{ name: 'market_id', type: 'bytes32' }],
+    outputs: [{ name: '', type: 'uint64' }],
+    stateMutability: 'view',
+  },
+  {
+    type: 'function', name: 'marketResolvedAt',
+    inputs: [{ name: 'market_id', type: 'bytes32' }],
+    outputs: [{ name: '', type: 'uint64' }],
+    stateMutability: 'view',
+  },
+  {
     type: 'function', name: 'cumulativeDeposits',
     inputs: [{ name: '', type: 'address' }],
     outputs: [{ name: '', type: 'uint256' }],
@@ -59,7 +71,6 @@ export const VAULT_ABI = [
           { name: 'new_commitment',    type: 'bytes32' },
           { name: 'nullifier_of_bet',  type: 'bytes32' },
           { name: 'market_id',         type: 'bytes32' },
-          { name: 'payout_per_share',  type: 'uint64'  },
           { name: 'total_credit',      type: 'uint64'  },
         ],
       },
@@ -78,6 +89,7 @@ export const VAULT_ABI = [
           { name: 'nullifier',         type: 'bytes32' },
           { name: 'withdrawal_amount', type: 'uint64'  },
           { name: 'recipient_hash',    type: 'bytes32' },
+          { name: 'new_commitment',    type: 'bytes32' },
         ],
       },
       { name: 'recipientAddress', type: 'address' },
@@ -121,6 +133,7 @@ export const VAULT_ABI = [
       { name: 'expected_shares', type: 'uint64',  indexed: false },
       { name: 'bet_amount',      type: 'uint256', indexed: false },
       { name: 'price',           type: 'uint64',  indexed: false },
+      { name: 'outcome_side',    type: 'uint8',   indexed: false },
       { name: 'new_commitment',  type: 'bytes32', indexed: false },
     ],
   },
@@ -130,6 +143,39 @@ export const VAULT_ABI = [
       { name: 'nullifier', type: 'bytes32', indexed: true  },
       { name: 'recipient', type: 'address', indexed: false },
       { name: 'amount',    type: 'uint256', indexed: false },
+      { name: 'new_commitment', type: 'bytes32', indexed: false },
+    ],
+  },
+  {
+    type: 'event', name: 'SettlementCredited',
+    inputs: [
+      { name: 'nullifier',       type: 'bytes32', indexed: true  },
+      { name: 'nullifier_of_bet',type: 'bytes32', indexed: false },
+      { name: 'new_commitment',  type: 'bytes32', indexed: false },
+    ],
+  },
+  {
+    type: 'event', name: 'BetCancellationCredited',
+    inputs: [
+      { name: 'nullifier',       type: 'bytes32', indexed: true  },
+      { name: 'nullifier_of_bet',type: 'bytes32', indexed: false },
+      { name: 'new_commitment',  type: 'bytes32', indexed: false },
+    ],
+  },
+  {
+    type: 'event', name: 'NACancellationCredited',
+    inputs: [
+      { name: 'nullifier',       type: 'bytes32', indexed: true  },
+      { name: 'nullifier_of_bet',type: 'bytes32', indexed: false },
+      { name: 'new_commitment',  type: 'bytes32', indexed: false },
+    ],
+  },
+  {
+    type: 'event', name: 'MarketResolved',
+    inputs: [
+      { name: 'market_id',       type: 'bytes32', indexed: true  },
+      { name: 'payout_per_share',type: 'uint64',  indexed: false },
+      { name: 'resolvedAt',      type: 'uint64',  indexed: false },
     ],
   },
 ] as const

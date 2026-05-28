@@ -243,6 +243,15 @@ function buildSharedEnv(addrs: DeployedAddresses): Record<string, string> {
     POLYGON_RPC_URL:                   "http://127.0.0.1:8545",
     VAULT_CONTRACT_ADDRESS:            addrs.VAULT_ADDRESS,
     CTF_ADDRESS:                       addrs.CTF_ADDRESS,
+    USDC_ADDRESS:                      addrs.USDC_ADDRESS,
+    PUSD_ADDRESS:                      addrs.PUSD_ADDRESS,
+    ONRAMP_ADDRESS:                    addrs.ONRAMP_ADDRESS,
+    OFFRAMP_ADDRESS:                   addrs.OFFRAMP_ADDRESS,
+    DEPOSIT_WALLET_ADDRESS:            ACCOUNTS.DEPOSIT_WALLET,
+    // C2/H2: signing layer uses this key to sign pUSD approvals, offramp calls,
+    // and USDC transfers that must originate from the deposit wallet in local dev.
+    DEPOSIT_WALLET_KEY:                ACCOUNTS.DEPOSIT_WALLET_KEY,
+    MOCK_DEPLOYER_PRIVATE_KEY:         ACCOUNTS.OWNER_PRIVATE_KEY,
     TREE_ADDRESS:                      addrs.TREE_ADDRESS,
     DEPLOYER_PRIVATE_KEY:              ACCOUNTS.OWNER_PRIVATE_KEY,  // mock-clob settle endpoint
     VAULT_EOA_PRIVATE_KEY:             ACCOUNTS.OPERATOR_PRIVATE_KEY,
