@@ -20,6 +20,9 @@ const CONTRACTS_DIR = path.resolve(__dirname, "../../../../packages/contracts");
 
 export interface DeployedAddresses {
   USDC_ADDRESS: string;
+  PUSD_ADDRESS: string;
+  ONRAMP_ADDRESS: string;
+  OFFRAMP_ADDRESS: string;
   CTF_ADDRESS: string;
   POSEIDON_ADDRESS: string;
   REGISTRY_ADDRESS: string;
@@ -65,7 +68,7 @@ function parseAddresses(output: string): DeployedAddresses {
   }
 
   const required: (keyof DeployedAddresses)[] = [
-    "USDC_ADDRESS", "CTF_ADDRESS", "POSEIDON_ADDRESS", "REGISTRY_ADDRESS",
+    "USDC_ADDRESS", "PUSD_ADDRESS", "ONRAMP_ADDRESS", "OFFRAMP_ADDRESS", "CTF_ADDRESS", "POSEIDON_ADDRESS", "REGISTRY_ADDRESS",
     "TREE_ADDRESS", "VAULT_ADDRESS", "BET_AUTH_VERIFIER", "SETTLEMENT_VERIFIER",
     "WITHDRAWAL_VERIFIER", "BET_CANCEL_VERIFIER", "CANCEL_CREDIT_VERIFIER",
     "RESOLVED_YES_MARKET", "NA_MARKET", "ALICE_COMMITMENT_1", "BOB_COMMITMENT_1",

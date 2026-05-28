@@ -9,6 +9,7 @@ import {MockVerifier} from "../src/mocks/MockVerifier.sol";
 import {MockPoseidonT3} from "../src/mocks/MockPoseidonT3.sol";
 import {MockUSDC} from "../src/mocks/MockUSDC.sol";
 import {MockCTF} from "../src/mocks/MockCTF.sol";
+import {MockPUSD} from "../src/mocks/MockPUSD.sol";
 
 contract VaultTest is Test {
     Vault public vault;
@@ -47,7 +48,7 @@ contract VaultTest is Test {
     function setUp() public {
         poseidon = new MockPoseidonT3();
         usdc = new MockUSDC();
-        ctf = new MockCTF();
+        ctf = new MockCTF(address(new MockPUSD()));
 
         // Deploy infrastructure with vault address = this contract initially,
         // then we re-deploy with the actual vault address
@@ -184,6 +185,7 @@ contract VaultTest is Test {
             200_000_000,
             100 * 1e6,
             50_000_000,
+            0,           // outcome_side (matches _betAuthInputs)
             COMMITMENT_2
         );
         vault.authorizeBet(DUMMY_PROOF, inputs);
@@ -192,12 +194,14 @@ contract VaultTest is Test {
     function test_authorizeBet_storesBetRecord() public {
         bytes32 root = _depositAndGetRoot();
         vault.authorizeBet(DUMMY_PROOF, _betAuthInputs(root));
-        (bytes32 mktId, bytes32 posId, uint64 shares, uint256 betAmt, Vault.BetStatus status) =
+        (bytes32 mktId, bytes32 condId, bytes32 posId, uint64 shares, uint64 betAmt, uint8 outcomeSide, Vault.BetStatus status) =
             vault.betRecords(NULLIFIER_1);
         assertEq(mktId, MARKET_ID);
+        assertEq(condId, MARKET_ID);
         assertEq(posId, POSITION_ID);
         assertEq(shares, 200_000_000);
         assertEq(betAmt, 100 * 1e6);
+        assertEq(outcomeSide, 0);
         assertEq(uint8(status), uint8(Vault.BetStatus.ACTIVE));
     }
 
@@ -238,7 +242,7 @@ contract VaultTest is Test {
         bytes32 null1 = _authorizeBetAndGetNullifier();
         vm.prank(operator);
         vault.reportFilled(null1);
-        (,,,, Vault.BetStatus status) = vault.betRecords(null1);
+        (,,,,,, Vault.BetStatus status) = vault.betRecords(null1);
         assertEq(uint8(status), uint8(Vault.BetStatus.FILLED));
     }
 
@@ -253,7 +257,7 @@ contract VaultTest is Test {
         bytes32 null1 = _authorizeBetAndGetNullifier();
         vm.prank(operator);
         vault.reportFOKFailure(null1);
-        (,,,, Vault.BetStatus status) = vault.betRecords(null1);
+        (,,,,,, Vault.BetStatus status) = vault.betRecords(null1);
         assertEq(uint8(status), uint8(Vault.BetStatus.FAILED));
     }
 
@@ -283,9 +287,20 @@ contract VaultTest is Test {
             new_commitment: COMMITMENT_3,
             nullifier_of_bet: NULLIFIER_1,
             market_id: MARKET_ID,
-            payout_per_share: 1_000_000, // $1 per share (6 decimals)
-            total_credit: 200_000_000   // shares_held * payout_per_share
+            // payout_per_share removed — read from pendingCredit[market_id]
+            // expected_shares = 200_000_000, payout_per_share = 1 => total_credit = 200_000_000
+            total_credit: 200_000_000
         });
+    }
+
+    // Set up CTF so resolveMarket(MARKET_ID) succeeds with YES win.
+    // numerators[0]/denominator = 1_000_000/1_000_000 = 1 for outcome_side=0 (YES).
+    function _setupResolvableMarket() internal {
+        uint256[] memory numerators = new uint256[](2);
+        numerators[0] = 1_000_000; // YES wins
+        numerators[1] = 0;
+        ctf.setPayoutNumerators(MARKET_ID, numerators);
+        ctf.setPayoutDenominator(MARKET_ID, 1_000_000);
     }
 
     function _setupFilledBet() internal {
@@ -294,17 +309,24 @@ contract VaultTest is Test {
         vault.reportFilled(NULLIFIER_1);
     }
 
-    function test_creditSettlement_succeeds() public {
+    function _setupFilledAndResolvedBet() internal {
         _setupFilledBet();
+        _setupResolvableMarket();
+        vm.prank(operator);
+        vault.resolveMarket(MARKET_ID);
+    }
+
+    function test_creditSettlement_succeeds() public {
+        _setupFilledAndResolvedBet();
         bytes32 root = _currentRoot();
         vault.creditSettlement(DUMMY_PROOF, _settlementInputs(root));
         assertTrue(registry.isSpent(NULLIFIER_2));
-        (,,,, Vault.BetStatus status) = vault.betRecords(NULLIFIER_1);
+        (,,,,,, Vault.BetStatus status) = vault.betRecords(NULLIFIER_1);
         assertEq(uint8(status), uint8(Vault.BetStatus.CREDITED));
     }
 
     function test_creditSettlement_revert_nullifierSpent() public {
-        _setupFilledBet();
+        _setupFilledAndResolvedBet();
         bytes32 root = _currentRoot();
         vault.creditSettlement(DUMMY_PROOF, _settlementInputs(root));
         bytes32 root2 = _currentRoot();
@@ -331,7 +353,7 @@ contract VaultTest is Test {
     }
 
     function test_creditSettlement_revert_wrongMarket() public {
-        _setupFilledBet();
+        _setupFilledAndResolvedBet();
         bytes32 root = _currentRoot();
         Vault.SettlementPublicInputs memory inputs = _settlementInputs(root);
         inputs.market_id = keccak256("wrong_market");
@@ -339,8 +361,16 @@ contract VaultTest is Test {
         vault.creditSettlement(DUMMY_PROOF, inputs);
     }
 
-    function test_creditSettlement_revert_invalidProof() public {
+    function test_creditSettlement_revert_marketNotResolved() public {
+        // Bet is FILLED but resolveMarket was never called
         _setupFilledBet();
+        bytes32 root = _currentRoot();
+        vm.expectRevert(Vault.MarketNotResolved.selector);
+        vault.creditSettlement(DUMMY_PROOF, _settlementInputs(root));
+    }
+
+    function test_creditSettlement_revert_invalidProof() public {
+        _setupFilledAndResolvedBet();
         bytes32 root = _currentRoot();
         settlementVerifier.setShouldPass(false);
         vm.expectRevert(Vault.InvalidProof.selector);
@@ -348,10 +378,10 @@ contract VaultTest is Test {
     }
 
     function test_creditSettlement_revert_doubleCreditAfterCredited() public {
-        _setupFilledBet();
+        _setupFilledAndResolvedBet();
         bytes32 root = _currentRoot();
         vault.creditSettlement(DUMMY_PROOF, _settlementInputs(root));
-        // Try to credit again with a new nullifier — bet status is CREDITED, not FILLED
+        // Try to credit again with a new nullifier -- bet status is CREDITED, not FILLED
         bytes32 root2 = _currentRoot();
         Vault.SettlementPublicInputs memory inputs2 = _settlementInputs(root2);
         inputs2.nullifier = keccak256("nullifier_3");
@@ -360,10 +390,60 @@ contract VaultTest is Test {
     }
 
     // =========================================================================
+    // resolveMarket
+    // =========================================================================
+
+    function test_resolveMarket_succeeds() public {
+        _setupResolvableMarket();
+        vm.prank(operator);
+        vm.expectEmit(true, false, false, true);
+        emit Vault.MarketResolved(MARKET_ID, 1, uint64(block.timestamp));
+        vault.resolveMarket(MARKET_ID);
+        assertEq(vault.pendingCredit(MARKET_ID, 0), 1); // YES side payout = 1
+        assertEq(vault.pendingCredit(MARKET_ID, 1), 0); // NO side payout = 0
+        assertEq(vault.marketResolvedAt(MARKET_ID), block.timestamp);
+    }
+
+    function test_resolveMarket_revert_conditionNotResolved() public {
+        vm.prank(operator);
+        vm.expectRevert(Vault.ConditionNotResolved.selector);
+        vault.resolveMarket(MARKET_ID);
+    }
+
+    function test_resolveMarket_revert_notNA_market() public {
+        // All-zero numerators = N/A; resolveMarket should revert NotNA
+        uint256[] memory numerators = new uint256[](2);
+        numerators[0] = 0;
+        numerators[1] = 0;
+        ctf.setPayoutNumerators(MARKET_ID, numerators);
+        ctf.setPayoutDenominator(MARKET_ID, 1_000_000);
+        vm.prank(operator);
+        vm.expectRevert(Vault.NotNA.selector);
+        vault.resolveMarket(MARKET_ID);
+    }
+
+    function test_resolveMarket_revert_alreadyResolved() public {
+        _setupResolvableMarket();
+        vm.prank(operator);
+        vault.resolveMarket(MARKET_ID);
+        // Second call should revert
+        vm.prank(operator);
+        vm.expectRevert(Vault.MarketAlreadyResolved.selector);
+        vault.resolveMarket(MARKET_ID);
+    }
+
+    function test_resolveMarket_revert_onlyOperator() public {
+        _setupResolvableMarket();
+        vm.prank(attacker);
+        vm.expectRevert(Vault.OnlyOperator.selector);
+        vault.resolveMarket(MARKET_ID);
+    }
+
+    // =========================================================================
     // withdraw
     // =========================================================================
 
-    function _withdrawInputs(bytes32 root, bytes32 recipientHash)
+    function _withdrawInputs(bytes32 root, bytes32 recipientHash, bytes32 newCommitment)
         internal
         pure
         returns (Vault.WithdrawalPublicInputs memory)
@@ -372,7 +452,8 @@ contract VaultTest is Test {
             merkle_root: root,
             nullifier: NULLIFIER_2,
             withdrawal_amount: 500 * 1e6,
-            recipient_hash: recipientHash
+            recipient_hash: recipientHash,
+            new_commitment: newCommitment
         });
     }
 
@@ -385,10 +466,12 @@ contract VaultTest is Test {
         vault.deposit(COMMITMENT_1, DEPOSIT_AMOUNT);
         bytes32 root = _currentRoot();
         bytes32 rHash = _recipientHash(recipient);
+        bytes32 nextCommitment = COMMITMENT_2;
         uint256 balBefore = usdc.balanceOf(recipient);
-        vault.withdraw(DUMMY_PROOF, _withdrawInputs(root, rHash), recipient);
+        vault.withdraw(DUMMY_PROOF, _withdrawInputs(root, rHash, nextCommitment), recipient);
         assertEq(usdc.balanceOf(recipient) - balBefore, 500 * 1e6);
         assertTrue(registry.isSpent(NULLIFIER_2));
+        assertEq(_currentRoot(), tree.recentRoots(tree.currentRootIndex()));
     }
 
     function test_withdraw_emitsEvent() public {
@@ -396,9 +479,45 @@ contract VaultTest is Test {
         vault.deposit(COMMITMENT_1, DEPOSIT_AMOUNT);
         bytes32 root = _currentRoot();
         bytes32 rHash = _recipientHash(recipient);
+        bytes32 nextCommitment = COMMITMENT_2;
         vm.expectEmit(true, false, false, true);
-        emit Vault.Withdrawn(NULLIFIER_2, recipient, 500 * 1e6);
-        vault.withdraw(DUMMY_PROOF, _withdrawInputs(root, rHash), recipient);
+        emit Vault.Withdrawn(NULLIFIER_2, recipient, 500 * 1e6, nextCommitment);
+        vault.withdraw(DUMMY_PROOF, _withdrawInputs(root, rHash, nextCommitment), recipient);
+    }
+
+    function test_withdraw_partial_insertsRemainderCommitment() public {
+        vm.prank(alice);
+        vault.deposit(COMMITMENT_1, DEPOSIT_AMOUNT);
+        bytes32 root = _currentRoot();
+        bytes32 rHash = _recipientHash(recipient);
+        bytes32 nextCommitment = COMMITMENT_2;
+        uint32 rootIndexBefore = tree.currentRootIndex();
+
+        vault.withdraw(DUMMY_PROOF, _withdrawInputs(root, rHash, nextCommitment), recipient);
+
+        assertEq(tree.currentRootIndex(), rootIndexBefore + 1);
+        assertEq(_currentRoot(), tree.recentRoots(tree.currentRootIndex()));
+    }
+
+    function test_withdraw_full_skipsRemainderInsert() public {
+        vm.prank(alice);
+        vault.deposit(COMMITMENT_1, DEPOSIT_AMOUNT);
+        bytes32 root = _currentRoot();
+        bytes32 rHash = _recipientHash(recipient);
+        Vault.WithdrawalPublicInputs memory inputs = Vault.WithdrawalPublicInputs({
+            merkle_root: root,
+            nullifier: NULLIFIER_2,
+            withdrawal_amount: uint64(DEPOSIT_AMOUNT),
+            recipient_hash: rHash,
+            new_commitment: bytes32(0)
+        });
+        uint32 rootIndexBefore = tree.currentRootIndex();
+        uint256 balBefore = usdc.balanceOf(recipient);
+
+        vault.withdraw(DUMMY_PROOF, inputs, recipient);
+
+        assertEq(usdc.balanceOf(recipient) - balBefore, DEPOSIT_AMOUNT);
+        assertEq(tree.currentRootIndex(), rootIndexBefore);
     }
 
     function test_withdraw_revert_nullifierSpent() public {
@@ -406,16 +525,16 @@ contract VaultTest is Test {
         vault.deposit(COMMITMENT_1, DEPOSIT_AMOUNT);
         bytes32 root = _currentRoot();
         bytes32 rHash = _recipientHash(recipient);
-        vault.withdraw(DUMMY_PROOF, _withdrawInputs(root, rHash), recipient);
+        vault.withdraw(DUMMY_PROOF, _withdrawInputs(root, rHash, COMMITMENT_2), recipient);
         bytes32 root2 = _currentRoot();
         vm.expectRevert(Vault.NullifierSpent.selector);
-        vault.withdraw(DUMMY_PROOF, _withdrawInputs(root2, rHash), recipient);
+        vault.withdraw(DUMMY_PROOF, _withdrawInputs(root2, rHash, COMMITMENT_3), recipient);
     }
 
     function test_withdraw_revert_unknownRoot() public {
         bytes32 rHash = _recipientHash(recipient);
         vm.expectRevert(Vault.UnknownRoot.selector);
-        vault.withdraw(DUMMY_PROOF, _withdrawInputs(keccak256("stale"), rHash), recipient);
+        vault.withdraw(DUMMY_PROOF, _withdrawInputs(keccak256("stale"), rHash, COMMITMENT_2), recipient);
     }
 
     function test_withdraw_revert_badRecipient() public {
@@ -425,7 +544,7 @@ contract VaultTest is Test {
         bytes32 rHash = _recipientHash(recipient);
         // Supply bob's address instead of recipient
         vm.expectRevert(Vault.BadRecipient.selector);
-        vault.withdraw(DUMMY_PROOF, _withdrawInputs(root, rHash), bob);
+        vault.withdraw(DUMMY_PROOF, _withdrawInputs(root, rHash, COMMITMENT_2), bob);
     }
 
     function test_withdraw_revert_invalidProof() public {
@@ -435,7 +554,7 @@ contract VaultTest is Test {
         bytes32 rHash = _recipientHash(recipient);
         withdrawalVerifier.setShouldPass(false);
         vm.expectRevert(Vault.InvalidProof.selector);
-        vault.withdraw(DUMMY_PROOF, _withdrawInputs(root, rHash), recipient);
+        vault.withdraw(DUMMY_PROOF, _withdrawInputs(root, rHash, COMMITMENT_2), recipient);
     }
 
     // =========================================================================
@@ -462,7 +581,7 @@ contract VaultTest is Test {
         bytes32 root = _currentRoot();
         vault.betCancellationCredit(DUMMY_PROOF, _betCancelInputs(root));
         assertTrue(registry.isSpent(NULLIFIER_2));
-        (,,,, Vault.BetStatus status) = vault.betRecords(NULLIFIER_1);
+        (,,,,,, Vault.BetStatus status) = vault.betRecords(NULLIFIER_1);
         assertEq(uint8(status), uint8(Vault.BetStatus.CANCELLED_CREDITED));
     }
 
@@ -510,11 +629,12 @@ contract VaultTest is Test {
 
     function _setupNAMarket() internal {
         _authorizeBetAndGetNullifier();
-        // Set all-zero numerators (N/A resolution)
+        // Set all-zero numerators with non-zero denominator (N/A resolution)
         uint256[] memory numerators = new uint256[](2);
         numerators[0] = 0;
         numerators[1] = 0;
         ctf.setPayoutNumerators(MARKET_ID, numerators);
+        ctf.setPayoutDenominator(MARKET_ID, 1_000_000); // C2: denominator > 0 confirms condition resolved
     }
 
     function test_naCancellationCredit_succeeds() public {
@@ -522,17 +642,18 @@ contract VaultTest is Test {
         bytes32 root = _currentRoot();
         vault.naCancellationCredit(DUMMY_PROOF, _naCancelInputs(root));
         assertTrue(registry.isSpent(NULLIFIER_2));
-        (,,,, Vault.BetStatus status) = vault.betRecords(NULLIFIER_1);
+        (,,,,,, Vault.BetStatus status) = vault.betRecords(NULLIFIER_1);
         assertEq(uint8(status), uint8(Vault.BetStatus.CANCELLED_CREDITED));
     }
 
     function test_naCancellationCredit_revert_notNA() public {
         _authorizeBetAndGetNullifier();
-        // Non-zero numerators = not N/A
+        // Non-zero numerators = not N/A; denominator must be set so C2 passes
         uint256[] memory numerators = new uint256[](2);
         numerators[0] = 0;
         numerators[1] = 1_000_000; // YES wins
         ctf.setPayoutNumerators(MARKET_ID, numerators);
+        ctf.setPayoutDenominator(MARKET_ID, 1_000_000);
         bytes32 root = _currentRoot();
         vm.expectRevert(Vault.NotNA.selector);
         vault.naCancellationCredit(DUMMY_PROOF, _naCancelInputs(root));
@@ -618,7 +739,7 @@ contract VaultTest is Test {
         vm.prank(operator);
         vault.reportFOKFailure(NULLIFIER_1);
         _setupFailedBetCancellation();
-        (,,,, Vault.BetStatus status) = vault.betRecords(NULLIFIER_1);
+        (,,,,,, Vault.BetStatus status) = vault.betRecords(NULLIFIER_1);
         assertEq(uint8(status), uint8(Vault.BetStatus.CANCELLED_CREDITED));
     }
 
@@ -654,5 +775,46 @@ contract VaultTest is Test {
         vm.prank(attacker);
         vm.expectRevert();
         vault.setSigningLayerOperator(attacker);
+    }
+
+    // =========================================================================
+    // adminCancelBet
+    // =========================================================================
+
+    function test_adminCancelBet_happyPath() public {
+        _authorizeBetAndGetNullifier();
+        vm.warp(block.timestamp + vault.adminCancelTimelock() + 1);
+        vm.prank(owner);
+        vm.expectEmit(true, false, false, false);
+        emit Vault.AdminBetCancelled(NULLIFIER_1);
+        vault.adminCancelBet(NULLIFIER_1);
+        (,,,,,, Vault.BetStatus status) = vault.betRecords(NULLIFIER_1);
+        assertEq(uint8(status), uint8(Vault.BetStatus.FAILED));
+    }
+
+    function test_adminCancelBet_revertBeforeTimelock() public {
+        _authorizeBetAndGetNullifier();
+        vm.warp(block.timestamp + vault.adminCancelTimelock() - 1);
+        vm.prank(owner);
+        vm.expectRevert(Vault.BetTimeoutNotElapsed.selector);
+        vault.adminCancelBet(NULLIFIER_1);
+    }
+
+    function test_adminCancelBet_revertNotActive() public {
+        _authorizeBetAndGetNullifier();
+        vm.prank(operator);
+        vault.reportFilled(NULLIFIER_1);
+        vm.warp(block.timestamp + vault.adminCancelTimelock() + 1);
+        vm.prank(owner);
+        vm.expectRevert(Vault.BetNotActive.selector);
+        vault.adminCancelBet(NULLIFIER_1);
+    }
+
+    function test_adminCancelBet_revertNotOwner() public {
+        _authorizeBetAndGetNullifier();
+        vm.warp(block.timestamp + vault.adminCancelTimelock() + 1);
+        vm.prank(attacker);
+        vm.expectRevert();
+        vault.adminCancelBet(NULLIFIER_1);
     }
 }

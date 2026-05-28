@@ -1,29 +1,31 @@
 /**
- * Client-side ZK proof generation via @noir-lang/noir_js (ACVM) + @aztec/bb.js (UltraPLONK).
+ * Client-side ZK proof generation via snarkjs (Groth16) + circom circuits.
  *
- * All proof generation runs in the browser. Private inputs (secret, balance, nonce)
- * never leave the client. The 63 MB barretenberg WASM is lazy-loaded on first call.
+ * Circuit .wasm files (~2.4 MB each) and .zkey files (~8.7 MB each) are fetched
+ * from /circuits/ and /zkeys/ on first call to initProver() and cached in memory.
+ * All proof generation runs in the browser — private inputs never leave the client.
  *
- * Circuits are fetched from /circuits/<name>.json (served from public/).
- * Each backend instance is cached — creating a new UltraPlonkBackend is expensive.
+ * Call initProver() once at app startup. Use isProverReady() / onProverReady() to
+ * gate UI controls on asset availability.
  */
 
 export interface ProofResult {
-  /** Raw UltraPLONK proof bytes, hex-encoded with 0x prefix */
+  /** ABI-encoded Groth16 proof: abi.encode(uint256[2] pA, uint256[2][2] pB, uint256[2] pC) — 256 bytes */
   proof: `0x${string}`
-  /** Public inputs as 0x-prefixed hex strings, in circuit declaration order */
+  /** Public signals as 0x-prefixed 32-byte hex strings, in circuit declaration order */
   publicInputs: string[]
 }
 
-// Input types mirror the Noir circuit fn main() signatures exactly.
+// Input types mirror the circom circuit signal names exactly.
 
 export interface BetAuthInputs {
-  secret: string          // Field (hex or decimal)
-  current_balance: bigint // u64
-  nonce: bigint           // u64
-  merkle_path: string[]   // [Field; 32]
-  merkle_path_indices: number[] // [u1; 32]
-  share_remainder: bigint // u64
+  secret: string
+  current_balance: bigint
+  nonce: bigint
+  merkle_path: string[]
+  merkle_path_indices: number[]
+  share_remainder: bigint
+  owner_address: string
   // public
   merkle_root: string
   nullifier: string
@@ -32,7 +34,7 @@ export interface BetAuthInputs {
   price: bigint
   expected_shares: bigint
   market_id: string
-  outcome_side: number    // u8
+  outcome_side: number
   position_id: string
 }
 
@@ -42,12 +44,14 @@ export interface WithdrawalInputs {
   nonce: bigint
   merkle_path: string[]
   merkle_path_indices: number[]
-  recipient_address: string   // private Field (hex of uint160 address)
+  owner_address: string
+  recipient_address: string
   // public
   merkle_root: string
   nullifier: string
   withdrawal_amount: bigint
   recipient_hash: string
+  new_commitment: string
 }
 
 export interface SettlementInputs {
@@ -56,14 +60,13 @@ export interface SettlementInputs {
   nonce: bigint
   merkle_path: string[]
   merkle_path_indices: number[]
+  owner_address: string
   // public
   merkle_root: string
   nullifier: string
   new_commitment: string
   nullifier_of_bet: string
   market_id: string
-  payout_per_share: bigint
-  shares_held: bigint
   total_credit: bigint
 }
 
@@ -73,6 +76,7 @@ export interface BetCancelInputs {
   nonce: bigint
   merkle_path: string[]
   merkle_path_indices: number[]
+  owner_address: string
   // public
   merkle_root: string
   nullifier: string
@@ -87,6 +91,7 @@ export interface CancelCreditInputs {
   nonce: bigint
   merkle_path: string[]
   merkle_path_indices: number[]
+  owner_address: string
   // public
   merkle_root: string
   nullifier: string
@@ -96,103 +101,103 @@ export interface CancelCreditInputs {
   bet_amount: bigint
 }
 
-// ── Internal cache ────────────────────────────────────────────────────────────
+// ── Internals ────────────────────────────────────────────────────────────────
 
-type CircuitJSON = { bytecode: string; abi: object; noir_version: string; hash: string }
+const CIRCUIT_NAMES = ['bet_auth', 'withdrawal', 'settlement_credit', 'bet_cancel', 'cancel_credit'] as const
+type CircuitName = typeof CIRCUIT_NAMES[number]
 
-const circuitCache = new Map<string, Promise<CircuitJSON>>()
-const backendCache = new Map<string, Promise<unknown>>() // UltraPlonkBackend
+const wasmCache = new Map<CircuitName, Promise<Uint8Array>>()
+const zkeyCache = new Map<CircuitName, Promise<Uint8Array>>()
 
-async function loadCircuit(name: string): Promise<CircuitJSON> {
-  if (!circuitCache.has(name)) {
-    circuitCache.set(
-      name,
-      fetch(`/circuits/${name}.json`).then((r) => {
-        if (!r.ok) throw new Error(`Failed to load circuit ${name}: HTTP ${r.status}`)
-        return r.json() as Promise<CircuitJSON>
-      }),
-    )
-  }
-  return circuitCache.get(name)!
+let _isReady = false
+const _readyCallbacks: Array<() => void> = []
+
+async function fetchAsset(url: string): Promise<Uint8Array> {
+  const r = await fetch(url)
+  if (!r.ok) throw new Error(`[prover] Failed to fetch ${url}: HTTP ${r.status}`)
+  return new Uint8Array(await r.arrayBuffer())
 }
 
-async function getBackend(name: string): Promise<unknown> {
-  if (!backendCache.has(name)) {
-    backendCache.set(
-      name,
-      (async () => {
-        const [{ UltraPlonkBackend }, circuit] = await Promise.all([
-          // Dynamic import keeps the 63 MB WASM out of the initial bundle
-          import('@aztec/bb.js'),
-          loadCircuit(name),
-        ])
-        // threads: 1 — safe in browsers that don't support SharedArrayBuffer
-        return new UltraPlonkBackend(circuit.bytecode, { threads: 1 })
-      })(),
-    )
-  }
-  return backendCache.get(name)!
+function ensurePreloaded(name: CircuitName): void {
+  if (!wasmCache.has(name)) wasmCache.set(name, fetchAsset(`/circuits/${name}.wasm`))
+  if (!zkeyCache.has(name)) zkeyCache.set(name, fetchAsset(`/zkeys/${name}.zkey`))
 }
 
-// ── Shared proof runner ───────────────────────────────────────────────────────
+// ABI-encode Groth16 proof as 256-byte hex string matching abi.decode in the Solidity adapter.
+// G2 coordinate pairs are reversed vs snarkjs ordering (EIP-197 convention).
+function encodeProof(proof: import('snarkjs').Groth16Proof): `0x${string}` {
+  const words: bigint[] = [
+    BigInt(proof.pi_a[0]),
+    BigInt(proof.pi_a[1]),
+    BigInt(proof.pi_b[0][1]), // G2 coords swapped
+    BigInt(proof.pi_b[0][0]),
+    BigInt(proof.pi_b[1][1]),
+    BigInt(proof.pi_b[1][0]),
+    BigInt(proof.pi_c[0]),
+    BigInt(proof.pi_c[1]),
+  ]
+  return `0x${words.map(w => w.toString(16).padStart(64, '0')).join('')}` as `0x${string}`
+}
 
-async function prove(circuitName: string, circuitInputs: Record<string, unknown>): Promise<ProofResult> {
-  const [{ Noir }, circuit, backend] = await Promise.all([
-    import('@noir-lang/noir_js'),
-    loadCircuit(circuitName),
-    getBackend(circuitName),
+function signalToHex(sig: string): string {
+  return `0x${BigInt(sig).toString(16).padStart(64, '0')}`
+}
+
+type SnarkjsInputs = Record<string, string | string[]>
+
+async function prove(name: CircuitName, inputs: SnarkjsInputs): Promise<ProofResult> {
+  ensurePreloaded(name)
+  const [snarkjs, wasm, zkey] = await Promise.all([
+    // Dynamic import keeps snarkjs out of the SSR bundle
+    import('snarkjs'),
+    wasmCache.get(name)!,
+    zkeyCache.get(name)!,
   ])
 
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const noir = new Noir(circuit as any)
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const { witness } = await noir.execute(circuitInputs as any)
-
-  const { proof, publicInputs } = await (backend as {
-    generateProof(w: Uint8Array): Promise<{ proof: Uint8Array; publicInputs: string[] }>
-  }).generateProof(witness)
+  const { proof, publicSignals } = await snarkjs.groth16.fullProve(
+    inputs,
+    { type: 'mem', data: wasm },
+    { type: 'mem', data: zkey },
+  )
 
   return {
-    proof: `0x${Buffer.from(proof).toString('hex')}`,
-    publicInputs,
+    proof: encodeProof(proof),
+    publicInputs: publicSignals.map(signalToHex),
   }
 }
 
-// ── WASM warm-up ─────────────────────────────────────────────────────────────
+// ── Lifecycle ─────────────────────────────────────────────────────────────────
 
 /**
- * Start downloading and initialising the bb.js WASM in the background.
- *
- * Call this as soon as the user enters the app so the 63 MB bundle is cached
- * before they reach the proof step.  Fire-and-forget: failures are silently
- * swallowed — the user will just pay the init cost when they actually prove.
- *
- * Strategy:
- *   1. Pre-fetch all five circuit JSONs (cheap, ~1.5 MB each)
- *   2. Initialise the bet_auth backend — this triggers the WASM download and
- *      compilation.  All subsequent backends share the same compiled WASM, so
- *      only the first init is expensive.
+ * Eagerly fetch all circuit .wasm and .zkey files in the background.
+ * Call once at app entry. Fires-and-forgets — the user can still prove before
+ * completion (assets will just be fetched on-demand at that point).
  */
-export function warmUpProver(): void {
-  const CIRCUITS = ['bet_auth', 'withdrawal', 'settlement_credit', 'bet_cancel', 'cancel_credit']
+export function initProver(): void {
+  // Kick off all 5 × 2 = 10 asset fetches in parallel
+  for (const name of CIRCUIT_NAMES) ensurePreloaded(name)
 
   void (async () => {
     try {
-      // Pre-fetch all circuit JSONs in parallel (small files, just need to be in browser cache)
-      await Promise.all(CIRCUITS.map(loadCircuit))
-
-      // Initialise the first backend — this is what actually downloads + compiles the WASM.
-      // The remaining four share the compiled WASM instance and init in the background.
-      await getBackend('bet_auth')
-
-      // Kick off the rest without blocking
-      for (const name of CIRCUITS.slice(1)) {
-        void getBackend(name)
-      }
+      await Promise.all([
+        ...CIRCUIT_NAMES.map(n => wasmCache.get(n)!),
+        ...CIRCUIT_NAMES.map(n => zkeyCache.get(n)!),
+      ])
+      _isReady = true
+      _readyCallbacks.splice(0).forEach(cb => cb())
     } catch {
-      // Non-fatal: user pays the init cost at prove time instead
+      // Non-fatal: assets will be fetched on-demand when prove() is called
     }
   })()
+}
+
+export function isProverReady(): boolean {
+  return _isReady
+}
+
+export function onProverReady(cb: () => void): void {
+  if (_isReady) { cb(); return }
+  _readyCallbacks.push(cb)
 }
 
 // ── Public API ────────────────────────────────────────────────────────────────
@@ -205,6 +210,7 @@ export async function generateBetAuthProof(inputs: BetAuthInputs): Promise<Proof
     merkle_path:          inputs.merkle_path,
     merkle_path_indices:  inputs.merkle_path_indices.map(String),
     share_remainder:      inputs.share_remainder.toString(),
+    owner_address:        inputs.owner_address,
     merkle_root:          inputs.merkle_root,
     nullifier:            inputs.nullifier,
     new_commitment:       inputs.new_commitment,
@@ -224,29 +230,30 @@ export async function generateWithdrawalProof(inputs: WithdrawalInputs): Promise
     nonce:                inputs.nonce.toString(),
     merkle_path:          inputs.merkle_path,
     merkle_path_indices:  inputs.merkle_path_indices.map(String),
+    owner_address:        inputs.owner_address,
     recipient_address:    inputs.recipient_address,
     merkle_root:          inputs.merkle_root,
     nullifier:            inputs.nullifier,
     withdrawal_amount:    inputs.withdrawal_amount.toString(),
     recipient_hash:       inputs.recipient_hash,
+    new_commitment:       inputs.new_commitment,
   })
 }
 
 export async function generateSettlementProof(inputs: SettlementInputs): Promise<ProofResult> {
   return prove('settlement_credit', {
-    secret:                 inputs.secret,
-    balance_before_credit:  inputs.balance_before_credit.toString(),
-    nonce:                  inputs.nonce.toString(),
-    merkle_path:            inputs.merkle_path,
-    merkle_path_indices:    inputs.merkle_path_indices.map(String),
-    merkle_root:            inputs.merkle_root,
-    nullifier:              inputs.nullifier,
-    new_commitment:         inputs.new_commitment,
-    nullifier_of_bet:       inputs.nullifier_of_bet,
-    market_id:              inputs.market_id,
-    payout_per_share:       inputs.payout_per_share.toString(),
-    shares_held:            inputs.shares_held.toString(),
-    total_credit:           inputs.total_credit.toString(),
+    secret:                inputs.secret,
+    balance_before_credit: inputs.balance_before_credit.toString(),
+    nonce:                 inputs.nonce.toString(),
+    merkle_path:           inputs.merkle_path,
+    merkle_path_indices:   inputs.merkle_path_indices.map(String),
+    owner_address:         inputs.owner_address,
+    merkle_root:           inputs.merkle_root,
+    nullifier:             inputs.nullifier,
+    new_commitment:        inputs.new_commitment,
+    nullifier_of_bet:      inputs.nullifier_of_bet,
+    market_id:             inputs.market_id,
+    total_credit:          inputs.total_credit.toString(),
   })
 }
 
@@ -257,6 +264,7 @@ export async function generateBetCancelProof(inputs: BetCancelInputs): Promise<P
     nonce:                inputs.nonce.toString(),
     merkle_path:          inputs.merkle_path,
     merkle_path_indices:  inputs.merkle_path_indices.map(String),
+    owner_address:        inputs.owner_address,
     merkle_root:          inputs.merkle_root,
     nullifier:            inputs.nullifier,
     new_commitment:       inputs.new_commitment,
@@ -272,6 +280,7 @@ export async function generateCancelCreditProof(inputs: CancelCreditInputs): Pro
     nonce:                inputs.nonce.toString(),
     merkle_path:          inputs.merkle_path,
     merkle_path_indices:  inputs.merkle_path_indices.map(String),
+    owner_address:        inputs.owner_address,
     merkle_root:          inputs.merkle_root,
     nullifier:            inputs.nullifier,
     new_commitment:       inputs.new_commitment,
@@ -279,4 +288,60 @@ export async function generateCancelCreditProof(inputs: CancelCreditInputs): Pro
     market_id:            inputs.market_id,
     bet_amount:           inputs.bet_amount.toString(),
   })
+}
+
+// ── Web Worker proof runner ───────────────────────────────────────────────────
+
+import type { ProverWorkerMessage, ProverWorkerResult } from '../workers/prover.worker'
+
+const PROOF_TIMEOUT_MS = 3 * 60 * 1000
+
+/**
+ * Run a proof in a dedicated Web Worker to keep the UI responsive.
+ * Falls back to main-thread execution if the worker fails to start.
+ */
+export function generateProofInWorker(message: ProverWorkerMessage): Promise<ProofResult> {
+  return new Promise((resolve, reject) => {
+    let worker: Worker
+    try {
+      worker = new Worker(new URL('../workers/prover.worker', import.meta.url), { type: 'module' })
+    } catch {
+      resolve(runProofMainThread(message))
+      return
+    }
+
+    const timeout = window.setTimeout(() => {
+      worker.terminate()
+      reject(new Error('Proof generation timed out after 3 minutes'))
+    }, PROOF_TIMEOUT_MS)
+
+    worker.onmessage = (event: MessageEvent<ProverWorkerResult>) => {
+      clearTimeout(timeout)
+      worker.terminate()
+      if (event.data.type === 'done') {
+        resolve(event.data.result)
+      } else {
+        reject(new Error(event.data.message))
+      }
+    }
+
+    worker.onerror = () => {
+      clearTimeout(timeout)
+      worker.terminate()
+      console.warn('[prover] Worker failed, falling back to main thread')
+      runProofMainThread(message).then(resolve, reject)
+    }
+
+    worker.postMessage(message)
+  })
+}
+
+function runProofMainThread(message: ProverWorkerMessage): Promise<ProofResult> {
+  switch (message.type) {
+    case 'bet_auth':       return generateBetAuthProof(message.inputs)
+    case 'withdrawal':     return generateWithdrawalProof(message.inputs)
+    case 'settlement':     return generateSettlementProof(message.inputs)
+    case 'bet_cancel':     return generateBetCancelProof(message.inputs)
+    case 'cancel_credit':  return generateCancelCreditProof(message.inputs)
+  }
 }

@@ -54,11 +54,12 @@ export async function startCTFListener(provider: ethers.JsonRpcProvider): Promis
         upsertSettlement({
           market_id: conditionId,
           condition_id: conditionId,
-          position_id: "", // populated by signing layer on redemption
+          position_id: "",
           payout_per_share: payoutPerShare,
           block_number: blockNumber,
           outcome,
           created_at: Math.floor(Date.now() / 1000),
+          resolved_at: 0,
         });
 
         logger.info({ conditionId, outcome, payoutPerShare, blockNumber }, "Settlement recorded");

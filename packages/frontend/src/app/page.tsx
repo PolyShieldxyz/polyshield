@@ -85,8 +85,8 @@ function HeroVisual() {
             </g>
           )
         })}
-        <text x={w / 2} y={h / 2 + 60} textAnchor="middle" fontFamily="JetBrains Mono" fontSize="9" fill="rgba(255,255,255,0.5)" letterSpacing="2">VAULT 0x7a4f</text>
-        <text x={w / 2 - 235} y={h / 2 - 235} fontFamily="JetBrains Mono" fontSize="9" fill="rgba(255,255,255,0.35)" letterSpacing="1">DEPOSITORS · ANON SET 1,842</text>
+        <text x={w / 2} y={h / 2 + 60} textAnchor="middle" fontFamily="JetBrains Mono" fontSize="9" fill="rgba(255,255,255,0.5)" letterSpacing="2">VAULT · SHARED EOA</text>
+        <text x={w / 2 - 235} y={h / 2 - 235} fontFamily="JetBrains Mono" fontSize="9" fill="rgba(255,255,255,0.35)" letterSpacing="1">DEPOSITORS · PRIVATE BETA</text>
         <text x={w - 12} y={h - 12} textAnchor="end" fontFamily="JetBrains Mono" fontSize="9" fill="rgba(255,255,255,0.25)" letterSpacing="1">PROOF RELAY · LIVE</text>
       </svg>
     </div>
@@ -96,17 +96,17 @@ function HeroVisual() {
 /* ---------- Live vault tape ---------- */
 function HeroTape() {
   const rows = [
-    ['VAULT TX', '0x7a4f…c2b9', 'YES · TRUMP-2024', '12,400 USDC', 'FILLED'],
-    ['PROOF', '0xe92b…1147', 'BET-AUTH-V2', '142ms', 'VERIFIED'],
-    ['VAULT TX', '0x7a4f…c2b9', 'NO · FED-CUT-DEC', '4,250 USDC', 'FILLED'],
-    ['SETTLE', '0x1c83…aa07', 'SETTLEMENT-V1', '+18,720', 'CREDIT'],
-    ['VAULT TX', '0x7a4f…c2b9', 'YES · OPENAI-IPO', '850 USDC', 'PARTIAL'],
+    ['VAULT TX', '0xVAULT…EOA', 'YES · MARKET-A', '500 USDC', 'FILLED'],
+    ['PROOF', '0xe92b…1147', 'BET-AUTH-V2', '45s', 'VERIFIED'],
+    ['VAULT TX', '0xVAULT…EOA', 'NO · MARKET-B', '1,000 USDC', 'FILLED'],
+    ['SETTLE', '0x1c83…aa07', 'SETTLEMENT-V1', '+2,000', 'CREDIT'],
+    ['VAULT TX', '0xVAULT…EOA', 'YES · MARKET-C', '500 USDC', 'FILLED'],
   ]
   return (
     <div className="panel" style={{ padding: 0, overflow: 'hidden' }}>
       <div className="row hairline-b" style={{ padding: '10px 16px', justifyContent: 'space-between' }}>
-        <div className="micro">Vault tape · last 90s</div>
-        <div className="micro" style={{ color: 'var(--green)' }}>● LIVE</div>
+        <div className="micro">Simulated vault tape</div>
+        <div className="micro" style={{ color: 'var(--text-2)' }}>● SIMULATED</div>
       </div>
       <table className="tbl">
         <thead><tr><th>Kind</th><th>Vault</th><th>Subject</th><th>Size</th><th>State</th></tr></thead>
@@ -203,7 +203,7 @@ const FEATURES = [
   },
   {
     num: 'F.04', title: 'Shared anonymity set.',
-    body: '1,842 active depositors share one vault. Every trade you authorize is cryptographically indistinguishable from every other depositor\'s trade. Privacy grows with the crowd.',
+    body: 'Every depositor in the vault shares one Polymarket EOA. Every trade you authorize is cryptographically indistinguishable from every other depositor\'s trade. The anonymity set grows with every new depositor.',
     diagram: (
       <svg viewBox="0 0 320 160" width="100%">
         <circle cx="160" cy="80" r="65" fill="oklch(0.82 0.13 210 / 0.04)" stroke="oklch(0.82 0.13 210 / 0.25)" strokeDasharray="3 4" />
@@ -214,13 +214,13 @@ const FEATURES = [
           const you = i === 11
           return <circle key={i} cx={160 + Math.cos(a) * r} cy={80 + Math.sin(a) * r} r={you ? 4 : 2.5} fill={you ? 'oklch(0.85 0.13 210)' : 'rgba(255,255,255,0.4)'} />
         })}
-        <text x="160" y="154" textAnchor="middle" fontFamily="JetBrains Mono" fontSize="9" fill="rgba(255,255,255,0.4)">1,842 wallets · you indistinguishable</text>
+        <text x="160" y="154" textAnchor="middle" fontFamily="JetBrains Mono" fontSize="9" fill="rgba(255,255,255,0.4)">depositors · you indistinguishable</text>
       </svg>
     ),
   },
   {
     num: 'F.05', title: 'Non-custodial.',
-    body: 'Your note is generated locally. Your secret never leaves your browser. The vault holds USDC — not your identity. Withdraw any time to any address with a ZK proof.',
+    body: 'Your note is generated locally. Your secret never leaves your browser. The vault holds USDC — not your identity. Withdraw any time back to your own address with a ZK proof. Your depositing wallet is cryptographically bound inside the note commitment.',
     diagram: (
       <svg viewBox="0 0 320 160" width="100%">
         <rect x="10" y="50" width="90" height="60" rx="6" fill="rgba(255,255,255,0.04)" stroke="rgba(255,255,255,0.14)" />
@@ -233,8 +233,8 @@ const FEATURES = [
         <text x="175" y="74" textAnchor="middle" fontFamily="Inter" fontSize="10" fill="#E6EAF0">Vault contract</text>
         <text x="175" y="90" textAnchor="middle" fontFamily="JetBrains Mono" fontSize="8" fill="rgba(255,255,255,0.5)">commitment tree</text>
         <text x="175" y="102" textAnchor="middle" fontFamily="JetBrains Mono" fontSize="8" fill="oklch(0.78 0.16 152)">USDC</text>
-        <text x="240" y="55" fontFamily="JetBrains Mono" fontSize="8" fill="rgba(255,255,255,0.3)">withdraw any</text>
-        <text x="240" y="67" fontFamily="JetBrains Mono" fontSize="8" fill="rgba(255,255,255,0.3)">time to any</text>
+        <text x="240" y="55" fontFamily="JetBrains Mono" fontSize="8" fill="rgba(255,255,255,0.3)">withdraw to</text>
+        <text x="240" y="67" fontFamily="JetBrains Mono" fontSize="8" fill="rgba(255,255,255,0.3)">your own</text>
         <text x="240" y="79" fontFamily="JetBrains Mono" fontSize="8" fill="rgba(255,255,255,0.3)">address.</text>
       </svg>
     ),
@@ -249,7 +249,7 @@ const ARCH_NODES = [
   { id: 'vault', label: 'Vault Contract', x: 400, y: 140, color: 'var(--cyan)', role: 'Verifies ZK proofs, maintains commitment Merkle tree, holds USDC.' },
   { id: 'tree', label: 'Merkle Tree', x: 560, y: 80, color: 'rgba(255,255,255,0.5)', role: 'Poseidon depth-32 append-only commitment accumulator.' },
   { id: 'nullifier', label: 'Nullifier Registry', x: 560, y: 200, color: 'rgba(255,255,255,0.5)', role: 'Tracks spent nullifiers to prevent double-spend.' },
-  { id: 'signer', label: 'Signing Layer', x: 400, y: 280, color: 'var(--amber)', role: 'TEE-attested signer. Submits FOK orders to Polymarket CLOB.' },
+  { id: 'signer', label: 'Signing Layer', x: 400, y: 280, color: 'var(--amber)', role: 'Centralized signing operator (v1). Listens for BetAuthorized events and submits FOK orders to Polymarket CLOB. TEE-attested enclave is planned for v2.' },
   { id: 'pm', label: 'Polymarket', x: 560, y: 340, color: 'rgba(255,255,255,0.4)', role: 'CTF exchange. Executes fills. Sees vault trades, not depositor identity.' },
 ]
 const ARCH_EDGES = [
@@ -305,7 +305,7 @@ function ArchitectureDiagram() {
         <div className="hairline-t mt-6" style={{ paddingTop: 12 }}>
           <div className="micro">LEGEND</div>
           <div className="col mt-3 gap-2">
-            {[['var(--cyan)', 'On-chain (Polygon)'], ['var(--violet)', 'Relay network'], ['var(--amber)', 'TEE signer (v2)'], ['rgba(255,255,255,0.5)', 'User / Polymarket']].map(([c, l]) => (
+            {[['var(--cyan)', 'On-chain (Polygon)'], ['var(--violet)', 'Relay network'], ['var(--amber)', 'Signing layer (v1 centralized)'], ['rgba(255,255,255,0.5)', 'User / Polymarket']].map(([c, l]) => (
               <div key={l} className="row gap-2">
                 <div style={{ width: 8, height: 8, borderRadius: '50%', background: c, flexShrink: 0 }} />
                 <span className="small" style={{ fontSize: 12 }}>{l}</span>
@@ -321,16 +321,16 @@ function ArchitectureDiagram() {
 /* ---------- Security section ---------- */
 const SECURITY = [
   { icon: ICONS.proof, title: 'Soundness via ZK', body: 'Every state transition is gated by a circuit constraint. Invalid proofs are rejected on-chain. No admin backdoor.' },
-  { icon: ICONS.privacy, title: 'Audited contracts', body: 'Smart contracts independently verified. Audit reports published on GitHub. MIT licensed.' },
+  { icon: ICONS.privacy, title: 'Open-source contracts', body: 'Smart contracts are open-source and MIT licensed. Independent audits are planned before mainnet deployment.' },
   { icon: ICONS.lock, title: 'No custody of secrets', body: 'Your note preimage never leaves your browser. The vault holds USDC, not your identity material.' },
-  { icon: ICONS.proof, title: 'Browser-side proving', body: 'WASM prover runs in your browser. Proof generation takes 100–400ms depending on device.' },
+  { icon: ICONS.proof, title: 'Browser-side proving', body: 'Proof generation runs entirely in your browser via WASM. Expect 30 seconds to 2 minutes depending on device and circuit.' },
   { icon: ICONS.vault, title: 'Private note ownership', body: 'A note is only spendable by whoever knows the secret. Lose the note, lose access — no recovery.' },
   { icon: ICONS.settle, title: 'Nullifier protection', body: 'Every spent note produces a public nullifier. On-chain deduplication prevents double-spend without revealing which note was spent.' },
 ]
 
 /* ---------- Final CTA ---------- */
 function FinalCTA() {
-  const seated = 1842, total = 2000
+  const seated = 0, total = 200
   const pct = (seated / total) * 100
   return (
     <div className="panel" style={{ padding: 48, textAlign: 'center' }}>
@@ -338,10 +338,9 @@ function FinalCTA() {
         <span className="dot"></span>
         {seated} / {total} SEATS CLAIMED
       </div>
-      <h2 className="h2 mt-6" style={{ margin: 0 }}>Ready to trade privately?</h2>
+      <h2 className="h2 mt-6" style={{ margin: 0 }}>Apply for testnet access.</h2>
       <p className="body mt-4" style={{ maxWidth: 480, margin: '16px auto 0' }}>
-        Join the testnet. Deposit USDC, place your first ZK-authorized bet,
-        and withdraw — entirely without leaving a wallet fingerprint on Polymarket.
+        We're onboarding a limited cohort to validate the full ZK proof flow on Polygon Amoy. Testnet USDC provided — no real funds required.
       </p>
       <div style={{ maxWidth: 320, margin: '32px auto 0' }}>
         <div style={{ height: 4, background: 'rgba(255,255,255,0.06)', borderRadius: 2 }}>
@@ -371,7 +370,7 @@ export default function LandingPage() {
           <div style={{ display: 'grid', gridTemplateColumns: '1.05fr 0.95fr', gap: 56, alignItems: 'center' }}>
             <div>
               <div className="pill pill-cyan" style={{ fontSize: 11 }}>
-                <span className="dot" />&nbsp;MAINNET ALPHA · 1,842 ACTIVE ANON SET
+                <span className="dot" />&nbsp;POLYGON AMOY TESTNET · PRIVATE BETA
               </div>
               <h1 className="h1 mt-6">
                 Trade prediction<br />markets<span className="text-cyan">,</span> privately.
@@ -388,10 +387,10 @@ export default function LandingPage() {
               </div>
               <div className="row gap-6 mt-12">
                 {[
-                  ['Vault volume', '$184.2M', 'all-time'],
-                  ['Active traders', '1,842', 'last 7d'],
-                  ['Avg proof time', '142ms', 'browser side'],
-                  ['Markets', '4,310', 'on-chain'],
+                  ['Vault volume', '—', 'testnet only'],
+                  ['Active testers', '< 200', 'private beta'],
+                  ['Avg proof time', '30s – 2min', 'browser WASM'],
+                  ['Proof types', '5', 'circuits live'],
                 ].map(([l, v, s]) => (
                   <div key={l as string}>
                     <div className="micro">{l}</div>

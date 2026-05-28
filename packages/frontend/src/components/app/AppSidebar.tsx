@@ -23,10 +23,8 @@ const GROUPS: SidebarGroup[] = [
   },
   {
     title: 'VAULT', items: [
-      ['/app/vault', 'Vault & notes', ICONS.vault, null],
       ['/app/deposit', 'Deposit', ICONS.arrowDown, null],
       ['/app/withdraw', 'Withdraw', ICONS.withdraw, null],
-      ['/app/settle', 'Settlements', ICONS.settle, '3'],
     ]
   },
   {

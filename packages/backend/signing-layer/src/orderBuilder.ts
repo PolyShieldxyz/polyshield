@@ -3,6 +3,7 @@ import Bottleneck from "bottleneck";
 import pino from "pino";
 import { config } from "./config";
 import { checkResponse, isHalted } from "./circuitBreaker";
+import { signingLayerNonceManager } from "./nonceManager";
 
 const logger = pino({ name: "order-builder" });
 
@@ -83,6 +84,8 @@ export async function submitFOKOrder(
             passphrase: config.polyPassphrase,
           },
           signatureType: SignatureTypeV2.POLY_1271,
+          // Required for POLY_1271: maker/signer must be deposit wallet, not operator EOA.
+          funderAddress: config.depositWalletAddress,
         });
         resp = (await client.createAndPostOrder({
           tokenID: event.position_id,   // capital D — Polymarket UserOrderV2 field
@@ -101,12 +104,18 @@ export async function submitFOKOrder(
 
       if (status === "matched") {
         logger.info({ nullifier: event.nullifier }, "FOK order filled — calling reportFilled");
-        const tx = await (vault as ethers.Contract & { reportFilled: (n: string) => Promise<ethers.TransactionResponse> }).reportFilled(event.nullifier);
+        const tx = await signingLayerNonceManager.send(provider, wallet, (nonce) =>
+          (vault as ethers.Contract & { reportFilled: (n: string, o: ethers.Overrides) => Promise<ethers.TransactionResponse> })
+            .reportFilled(event.nullifier, { nonce })
+        );
         await tx.wait(1);
         logger.info({ nullifier: event.nullifier }, "reportFilled confirmed");
       } else {
         logger.warn({ nullifier: event.nullifier, status }, "FOK order not filled — calling reportFOKFailure");
-        const tx = await (vault as ethers.Contract & { reportFOKFailure: (n: string) => Promise<ethers.TransactionResponse> }).reportFOKFailure(event.nullifier);
+        const tx = await signingLayerNonceManager.send(provider, wallet, (nonce) =>
+          (vault as ethers.Contract & { reportFOKFailure: (n: string, o: ethers.Overrides) => Promise<ethers.TransactionResponse> })
+            .reportFOKFailure(event.nullifier, { nonce })
+        );
         await tx.wait(1);
       }
     } catch (err: unknown) {

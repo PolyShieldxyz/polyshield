@@ -1,19 +1,21 @@
 'use client'
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import { useRouter } from 'next/navigation'
-import { useAccount, useWriteContract, useWaitForTransactionReceipt, useReadContract } from 'wagmi'
+import { useAccount, useWriteContract, useWaitForTransactionReceipt, useReadContract, useSignMessage, usePublicClient } from 'wagmi'
 import { parseUnits } from 'viem'
 import { FlowShell } from '@/components/app/FlowShell'
 import { KV } from '@/components/app/KV'
 import { Icon, ICONS } from '@/components/ui/Icon'
 import { VAULT_ABI, USDC_ABI } from '@/lib/vaultAbi'
-import { generateSecret, computeCommitment, computeNullifier, addNote } from '@/lib/notes'
+import {
+  deriveSecret, computeCommitment, computeNullifier,
+  getNextDepositIndex, incrementDepositIndex, addNote, clearNoteCache, recordWalletActivity,
+} from '@/lib/notes'
 
 const IS_DEV = process.env.NEXT_PUBLIC_DEV_MODE === 'true'
 const VAULT_ADDRESS = (process.env.NEXT_PUBLIC_VAULT_ADDRESS ?? '0x0000000000000000000000000000000000000000') as `0x${string}`
 const USDC_ADDRESS  = (process.env.NEXT_PUBLIC_USDC_ADDRESS  ?? '0x0000000000000000000000000000000000000000') as `0x${string}`
 
-// Truncate an address or hash for display
 function short(hex: string) { return hex.slice(0, 8) + '…' + hex.slice(-6) }
 
 // ── Visual components ────────────────────────────────────────────────────────
@@ -54,12 +56,13 @@ function MerkleInsertionVisual({ pct }: { pct: number }) {
 // ── Step 0: choose amount ────────────────────────────────────────────────────
 
 function Step0({
-  amount, setAmount, onNext,
+  amount, setAmount, onNext, deriving,
   usdcBalance, mintUsdc, minting,
 }: {
   amount: number
   setAmount: (v: number) => void
   onNext: () => void
+  deriving: boolean
   usdcBalance: bigint
   mintUsdc: () => void
   minting: boolean
@@ -111,100 +114,28 @@ function Step0({
           <KV l="Anonymity set" v="1,842 wallets" />
           <KV l="Network fee" v="~$0.04 (Polygon)" />
           <KV l="Polyshield fee" v="$0.00" />
-          <KV l="Commitment" v="keccak(secret, balance, nonce)" />
+          <KV l="Key derivation" v="Poseidon4(wallet_sig_hash, …)" />
           {IS_DEV && <KV l="Mode" v="DEV — MockVerifier" />}
           <button
             className="btn btn-primary mt-4"
             style={{ width: '100%', justifyContent: 'center', padding: '14px 0', fontSize: 13 }}
             onClick={onNext}
-            disabled={amount <= 0 || insufficient}
+            disabled={amount <= 0 || insufficient || deriving}
           >
-            Generate note &amp; continue <Icon d={ICONS.arrow} size={12} />
+            {deriving ? 'Signing…' : <>Sign to derive key <Icon d={ICONS.arrow} size={12} /></>}
           </button>
-          <div className="small mt-2" style={{ textAlign: 'center', color: 'var(--text-3)', fontSize: 11 }}>Note generated in browser · never sent to server</div>
+          <div className="small mt-2" style={{ textAlign: 'center', color: 'var(--text-3)', fontSize: 11 }}>Key derived from wallet signature · never stored</div>
         </div>
       </div>
     </div>
   )
 }
 
-// ── Step 1: show generated note + backup warning ─────────────────────────────
-
-function Step1({
-  amount, secret, commitment, nullifier, onNext,
-}: {
-  amount: number
-  secret: string
-  commitment: string
-  nullifier: string
-  onNext: () => void
-}) {
-  const [confirmed, setConfirmed] = useState(false)
-
-  return (
-    <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 32 }}>
-      <div>
-        <div className="micro">NOTE · GENERATED LOCALLY</div>
-        <h3 className="h3 mt-3" style={{ margin: 0 }}>Your note is ready.</h3>
-        <p className="body mt-3">
-          The spending note is a <span className="mono">(secret, balance, nonce)</span> tuple. Its
-          commitment hash <span className="mono">C = keccak(s, v, n)</span> will be inserted into the Merkle tree.
-          The secret <strong>never leaves your browser.</strong>
-        </p>
-        <div className="panel mt-4" style={{ padding: 20 }}>
-          <div className="micro">COMMITMENT (PUBLIC)</div>
-          <div className="mono mt-2" style={{ fontSize: 10, wordBreak: 'break-all', color: 'var(--cyan)' }}>{commitment}</div>
-          <div className="micro mt-4">NULLIFIER (PRIVATE)</div>
-          <div className="mono mt-2" style={{ fontSize: 10, wordBreak: 'break-all', color: 'var(--text-2)' }}>{nullifier}</div>
-        </div>
-        <div className="row gap-2 mt-2" style={{ alignItems: 'flex-start' }}>
-          <input type="checkbox" id="backup-confirm" checked={confirmed} onChange={(e) => setConfirmed(e.target.checked)} style={{ marginTop: 3 }} />
-          <label htmlFor="backup-confirm" className="small" style={{ fontSize: 12, cursor: 'pointer' }}>
-            I have saved my secret. I understand I cannot recover it if lost.
-          </label>
-        </div>
-        <button className="btn btn-primary mt-4" disabled={!confirmed} onClick={onNext} style={{ justifyContent: 'center', padding: '12px 24px' }}>
-          Approve &amp; deposit <Icon d={ICONS.arrow} size={12} />
-        </button>
-      </div>
-      <div>
-        <div className="micro">SECRET KEY (PRIVATE)</div>
-        <div className="panel mt-3" style={{ padding: 20, borderColor: 'oklch(0.82 0.14 70 / 0.4)', background: 'oklch(0.82 0.14 70 / 0.03)' }}>
-          <div className="row gap-3">
-            <Icon d={ICONS.lock} size={18} style={{ color: 'oklch(0.82 0.14 70)', flexShrink: 0 }} />
-            <div>
-              <div className="h4" style={{ fontSize: 14 }}>Save your secret now.</div>
-              <p className="small mt-2" style={{ fontSize: 12 }}>This is the private key to your note. Polyshield does not store it. Lose it = lose your funds.</p>
-            </div>
-          </div>
-          <div className="mono mt-4" style={{ fontSize: 9, wordBreak: 'break-all', padding: 10, background: 'var(--bg-1)', borderRadius: 6, color: 'var(--text-2)' }}>
-            {secret}
-          </div>
-          <button className="btn btn-sm mt-3" onClick={() => {
-            const txt = `Polyshield Note\nsecret: ${secret}\ncommitment: ${commitment}\nnullifier: ${nullifier}\nbalance: ${amount} USDC\nnonce: 0\n`
-            const a = document.createElement('a')
-            a.href = URL.createObjectURL(new Blob([txt], { type: 'text/plain' }))
-            a.download = `polyshield-note-${short(commitment)}.txt`
-            a.click()
-          }}>
-            <Icon d={ICONS.copy} size={12} /> Download note backup
-          </button>
-        </div>
-        <div className="panel mt-3" style={{ padding: 20 }}>
-          <KV l="Amount" v={`$${amount.toLocaleString()} USDC`} />
-          <KV l="Commitment" v={short(commitment)} />
-          <KV l="State" v="PENDING_DEPOSIT" />
-        </div>
-      </div>
-    </div>
-  )
-}
-
-// ── Step 2: approve + deposit transactions ───────────────────────────────────
+// ── Step 1: approve + deposit transactions ───────────────────────────────────
 
 type TxPhase = 'approve' | 'wait-approve' | 'deposit' | 'wait-deposit' | 'done'
 
-function Step2({
+function Step1({
   amount, commitment, onDone,
   phase, setPhase, approveTx, depositTx, txError,
   doApprove, doDeposit,
@@ -217,8 +148,8 @@ function Step2({
   approveTx: string | undefined
   depositTx: string | undefined
   txError: string | null
-  doApprove: () => void
-  doDeposit: () => void
+  doApprove: () => void | Promise<void>
+  doDeposit: () => void | Promise<void>
 }) {
   const checks: [string, TxPhase[]][] = [
     ['USDC spend approved',       ['wait-approve', 'deposit', 'wait-deposit', 'done']],
@@ -230,9 +161,8 @@ function Step2({
 
   const pct = { approve: 0, 'wait-approve': 20, deposit: 40, 'wait-deposit': 65, done: 100 }[phase]
 
-  // Auto-trigger deposit after approval confirmed
   useEffect(() => {
-    if (phase === 'deposit') doDeposit()
+    if (phase === 'deposit') void doDeposit()
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [phase])
 
@@ -246,11 +176,11 @@ function Step2({
       <div>
         <div className="micro">VAULT SUBMIT · ON-CHAIN</div>
         <h3 className="h3 mt-3" style={{ margin: 0 }}>Submitting deposit on-chain.</h3>
-        <p className="body mt-3">The commitment hash is appended to the vault's Merkle tree. Deposit amount is public; the note contents are not.</p>
+        <p className="body mt-3">The commitment hash is appended to the vault&apos;s Merkle tree. Deposit amount is public; your balance details are not.</p>
         {txError && (
           <div className="panel mt-3" style={{ padding: 14, borderColor: 'var(--red)', background: 'oklch(0.70 0.18 25 / 0.06)' }}>
             <div className="small" style={{ color: 'var(--red)', fontSize: 12 }}>Transaction failed: {txError}</div>
-            <button className="btn btn-sm mt-2" onClick={() => phase === 'approve' || phase === 'wait-approve' ? doApprove() : doDeposit()}>Retry</button>
+            <button className="btn btn-sm mt-2" onClick={() => void (phase === 'approve' || phase === 'wait-approve' ? doApprove() : doDeposit())}>Retry</button>
           </div>
         )}
         <div className="panel mt-4" style={{ padding: 20 }}>
@@ -284,7 +214,7 @@ function Step2({
           )}
         </div>
         {phase === 'approve' && !txError && (
-          <button className="btn btn-primary mt-4" onClick={doApprove} style={{ justifyContent: 'center', padding: '12px 24px' }}>
+          <button className="btn btn-primary mt-4" onClick={() => void doApprove()} style={{ justifyContent: 'center', padding: '12px 24px' }}>
             Approve USDC spend <Icon d={ICONS.arrow} size={12} />
           </button>
         )}
@@ -299,9 +229,9 @@ function Step2({
   )
 }
 
-// ── Step 3: done ─────────────────────────────────────────────────────────────
+// ── Step 2: done ─────────────────────────────────────────────────────────────
 
-function Step3({ amount, commitment, txHash, onDone }: { amount: number; commitment: string; txHash: string; onDone: () => void }) {
+function Step2({ amount, commitment, txHash, onDone }: { amount: number; commitment: string; txHash: string; onDone: () => void }) {
   return (
     <div style={{ display: 'grid', gridTemplateColumns: '1.2fr 1fr', gap: 32 }}>
       <div>
@@ -314,15 +244,14 @@ function Step3({ amount, commitment, txHash, onDone }: { amount: number; commitm
             <h3 className="h3 mt-1" style={{ margin: 0 }}>You&apos;re in the pool.</h3>
           </div>
         </div>
-        <p className="body mt-4">${amount.toLocaleString()} USDC is now part of the shared anonymity set. Your spending note was generated locally and saved to this browser.</p>
+        <p className="body mt-4">${amount.toLocaleString()} USDC is now part of the shared anonymity set. Your deposit is tied to your wallet — you can always recover your balance by reconnecting.</p>
         <div className="panel mt-6" style={{ padding: 20 }}>
           <KV l="Amount deposited" v={`$${amount.toLocaleString()} USDC`} />
-          <KV l="Commitment" v={short(commitment)} />
           <KV l="Deposit tx" v={short(txHash)} />
-          <KV l="Anon set size" v="1,843 (you +1)" />
+          <KV l="Vault anonymity set" v="[live count coming soon]" />
         </div>
         <div className="row gap-3 mt-6">
-          <button className="btn btn-primary" onClick={onDone}>Back to vault <Icon d={ICONS.arrow} size={12} /></button>
+          <button className="btn btn-primary" onClick={onDone}>Back to portfolio <Icon d={ICONS.arrow} size={12} /></button>
         </div>
       </div>
       <div>
@@ -330,15 +259,15 @@ function Step3({ amount, commitment, txHash, onDone }: { amount: number; commitm
           <div className="row gap-3">
             <Icon d={ICONS.check} size={18} style={{ color: 'var(--green)', flexShrink: 0 }} />
             <div>
-              <div className="h4" style={{ fontSize: 14 }}>Note saved in this browser.</div>
-              <p className="small mt-2" style={{ fontSize: 12 }}>Your note is in localStorage. Export a backup if you haven&apos;t already — clearing browser data will erase it.</p>
+              <div className="h4" style={{ fontSize: 14 }}>Deposit saved in this browser.</div>
+              <p className="small mt-2" style={{ fontSize: 12 }}>Your deposit details are cached locally for performance. Your secret is <strong>not</strong> stored — it&apos;s re-derived from your wallet signature on demand. You cannot lose access as long as you have this wallet.</p>
             </div>
           </div>
         </div>
         <div className="panel mt-3" style={{ padding: 20 }}>
           <div className="micro">NEXT STEPS</div>
           <div className="col mt-3 gap-3">
-            {[['Browse markets', 'Find a market and place a private bet.'], ['Export your note', 'Recommended. Keep an offline backup.']].map(([t, s], i) => (
+            {[['Browse markets', 'Find a market and place a private bet.'], ['Authorize a bet', 'Prove ownership with a ZK proof.']].map(([t, s], i) => (
               <div key={i} className="row gap-3">
                 <span className="mono" style={{ fontSize: 11, color: 'var(--cyan)', minWidth: 22 }}>0{i + 1}</span>
                 <div>
@@ -359,19 +288,22 @@ function Step3({ amount, commitment, txHash, onDone }: { amount: number; commitm
 export default function DepositPage() {
   const router = useRouter()
   const { address } = useAccount()
+  const { signMessageAsync } = useSignMessage()
+  const publicClient = usePublicClient()
   const [step, setStep] = useState(0)
   const [amount, setAmount] = useState(25000)
+  const [deriving, setDeriving] = useState(false)
 
-  // Generated note fields (set in step 1)
-  const [secret, setSecret]         = useState<`0x${string}`>('0x')
-  const [commitment, setCommitment] = useState<`0x${string}`>('0x')
-  const [nullifier, setNullifier]   = useState<`0x${string}`>('0x')
+  // Derived note fields (computed during handleDeriveAndDeposit)
+  const [commitment, setCommitment]     = useState<`0x${string}`>('0x')
+  const [nullifier, setNullifier]       = useState<`0x${string}`>('0x')
+  const [depositIndex, setDepositIndex] = useState(0)
 
   // Tx state
-  const [phase, setPhase]   = useState<TxPhase>('approve')
+  const [phase, setPhase]         = useState<TxPhase>('approve')
   const [approveTx, setApproveTx] = useState<string | undefined>()
   const [depositTx, setDepositTx] = useState<string | undefined>()
-  const [txError, setTxError] = useState<string | null>(null)
+  const [txError, setTxError]     = useState<string | null>(null)
   const [finalTxHash, setFinalTxHash] = useState('')
 
   const amountMicro = parseUnits(String(amount), 6)
@@ -397,7 +329,6 @@ export default function DepositPage() {
   // ── MockUSDC mint (dev only) ──────────────────────────────────────────────
   const { writeContract: writeMint, isPending: minting } = useWriteContract()
   const mintUsdc = () => {
-    console.log('[deposit] minting 100k test USDC to', address)
     writeMint({ address: USDC_ADDRESS, abi: USDC_ABI, functionName: 'mint', args: [address!, parseUnits('100000', 6)] })
   }
 
@@ -407,43 +338,32 @@ export default function DepositPage() {
 
   // ── Vault deposit ─────────────────────────────────────────────────────────
   const { writeContract: writeDeposit, data: depositTxHash, error: depositError } = useWriteContract()
-  const { isSuccess: depositConfirmed } = useWaitForTransactionReceipt({ hash: depositTxHash })
+  const { isSuccess: depositConfirmed, isError: depositReverted } = useWaitForTransactionReceipt({ hash: depositTxHash })
+  // Guard against React Strict Mode double-invoking the deposit effect.
+  const depositSubmittedRef = useRef(false)
 
   // ── State machine ─────────────────────────────────────────────────────────
   useEffect(() => {
-    if (approveTxHash) {
-      setApproveTx(approveTxHash)
-      setPhase('wait-approve')
-      console.log('[deposit] approve tx sent:', approveTxHash)
-    }
+    if (approveTxHash) { setApproveTx(approveTxHash); setPhase('wait-approve') }
   }, [approveTxHash])
 
   useEffect(() => {
-    if (approveConfirmed) {
-      console.log('[deposit] approve confirmed — triggering deposit')
-      refetchAllowance()
-      setPhase('deposit')
-    }
+    if (approveConfirmed) { refetchAllowance(); setPhase('deposit') }
   }, [approveConfirmed, refetchAllowance])
 
   useEffect(() => {
-    if (depositTxHash) {
-      setDepositTx(depositTxHash)
-      setPhase('wait-deposit')
-      console.log('[deposit] deposit tx sent:', depositTxHash)
-    }
+    if (depositTxHash) { setDepositTx(depositTxHash); setPhase('wait-deposit') }
   }, [depositTxHash])
 
   useEffect(() => {
-    if (depositConfirmed && depositTxHash) {
-      console.log('[deposit] deposit confirmed — saving note')
-      // Save the note using the exact secret/commitment that was submitted on-chain.
-      // Do NOT call createDepositNote() here — it would generate a new secret,
-      // producing a commitment that doesn't exist in the Merkle tree.
+    if (depositConfirmed && depositTxHash && address) {
+      // Increment deposit index only after confirmed so re-derives on retry get the same index
+      incrementDepositIndex(address)
       addNote({
         id: commitment,
         kind: 'DEPOSIT',
-        secret,
+        owner_address: address,
+        depositIndex,
         balance: amountMicro,
         nonce: 0n,
         commitment,
@@ -452,78 +372,102 @@ export default function DepositPage() {
         createdAt: Date.now(),
         txHash: depositTxHash,
       })
+      recordWalletActivity({
+        id: `deposit-${depositTxHash}`,
+        wallet: address,
+        kind: 'deposit',
+        amount: amountMicro,
+        createdAt: Date.now(),
+        txHash: depositTxHash,
+      })
+      // Invalidate in-memory cache so the portfolio page reads fresh balance from localStorage
+      clearNoteCache()
       setFinalTxHash(depositTxHash)
       setPhase('done')
-      setStep(3)
+      setStep(2)
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [depositConfirmed])
 
   useEffect(() => {
-    if (approveError) {
-      console.error('[deposit] approve error:', approveError)
-      setTxError(approveError.message.split('\n')[0])
-      setPhase('approve')
-    }
+    if (approveError) { setTxError(approveError.message.split('\n')[0]); setPhase('approve') }
   }, [approveError])
 
   useEffect(() => {
     if (depositError) {
-      console.error('[deposit] deposit error:', depositError)
       setTxError(depositError.message.split('\n')[0])
+      depositSubmittedRef.current = false // allow retry
     }
   }, [depositError])
 
+  useEffect(() => {
+    if (depositReverted) {
+      setTxError('Deposit transaction reverted on-chain. Check your deposit cap or retry.')
+      depositSubmittedRef.current = false // allow retry
+    }
+  }, [depositReverted])
+
   // ── Handlers ──────────────────────────────────────────────────────────────
 
-  function handleGenerateNote() {
-    const s = generateSecret()
-    const c = computeCommitment(s, amountMicro, 0n)
-    const n = computeNullifier(s, 0n)
-    setSecret(s); setCommitment(c); setNullifier(n)
-    console.log('[deposit] note generated locally', { commitment: c, nullifier: n })
-    setStep(1)
-  }
+  async function handleDeriveAndDeposit() {
+    if (!address) return
+    setDeriving(true)
+    try {
+      const index = getNextDepositIndex(address)
+      const secret = await deriveSecret(signMessageAsync, address, index)
+      const c = computeCommitment(secret, amountMicro, 0n, address)
+      const n = computeNullifier(secret, 0n)
+      setCommitment(c); setNullifier(n); setDepositIndex(index)
+      console.log('[deposit] note derived from wallet signature', { commitment: c, index })
 
-  function handleStartDeposit() {
-    setTxError(null)
-    // Skip approve if allowance is already sufficient
-    if (allowance >= amountMicro) {
-      console.log('[deposit] allowance sufficient, skipping approve')
-      setPhase('deposit')
-      doDeposit()
-    } else {
-      console.log('[deposit] requesting USDC approval', { amount: amountMicro.toString(), vault: VAULT_ADDRESS })
+      setTxError(null)
+      depositSubmittedRef.current = false // reset for fresh attempt
       setPhase('approve')
-      setStep(2)
-      doApprove()
+      setStep(1)
+
+      if (allowance >= amountMicro) {
+        // Skip approve — let Step1's useEffect call doDeposit() as the single call site.
+        setPhase('deposit')
+      } else {
+        void doApprove()
+      }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err)
+      setTxError(msg.split('\n')[0])
+      console.error('[deposit] deriveSecret failed:', err)
+    } finally {
+      setDeriving(false)
     }
   }
 
-  function doApprove() {
+  async function doApprove() {
+    const nonce = await publicClient!.getTransactionCount({ address: address!, blockTag: 'latest' })
     writeApprove({
       address: USDC_ADDRESS,
       abi: USDC_ABI,
       functionName: 'approve',
-      args: [VAULT_ADDRESS, amountMicro * 2n], // approve 2x to avoid re-approval on retry
+      args: [VAULT_ADDRESS, amountMicro * 2n],
+      nonce,
     })
   }
 
-  function doDeposit() {
-    console.log('[deposit] calling Vault.deposit', { commitment, amount: amountMicro.toString() })
+  async function doDeposit() {
+    if (depositSubmittedRef.current) return
+    depositSubmittedRef.current = true // set synchronously before any await
+    const nonce = await publicClient!.getTransactionCount({ address: address!, blockTag: 'latest' })
     writeDeposit({
       address: VAULT_ADDRESS,
       abi: VAULT_ABI,
       functionName: 'deposit',
       args: [commitment, amountMicro],
+      nonce,
     })
   }
 
   const steps: [string, string, string][] = [
-    ['01', 'Amount',      'Choose deposit size.'],
-    ['02', 'Note',        'Local note generated. C = Poseidon(s, v, n).'],
-    ['03', 'On-chain',    'Approve + deposit tx submitted.'],
-    ['04', 'Done',        'Note saved. Ready to authorize bets.'],
+    ['01', 'Amount',   'Choose deposit size.'],
+    ['02', 'On-chain', 'Approve + deposit tx submitted.'],
+    ['03', 'Done',     'Deposit complete. Ready to authorize bets.'],
   ]
 
   return (
@@ -537,29 +481,23 @@ export default function DepositPage() {
     >
       {step === 0 && (
         <Step0
-          amount={amount} setAmount={setAmount} onNext={handleGenerateNote}
+          amount={amount} setAmount={setAmount} onNext={handleDeriveAndDeposit} deriving={deriving}
           usdcBalance={usdcBalance as bigint} mintUsdc={mintUsdc} minting={minting}
         />
       )}
       {step === 1 && (
         <Step1
-          amount={amount} secret={secret} commitment={commitment} nullifier={nullifier}
-          onNext={handleStartDeposit}
-        />
-      )}
-      {step === 2 && (
-        <Step2
           amount={amount} commitment={commitment}
-          onDone={(hash) => { setFinalTxHash(hash); setStep(3) }}
+          onDone={(hash) => { setFinalTxHash(hash); setStep(2) }}
           phase={phase} setPhase={setPhase}
           approveTx={approveTx} depositTx={depositTx} txError={txError}
           doApprove={doApprove} doDeposit={doDeposit}
         />
       )}
-      {step === 3 && (
-        <Step3
+      {step === 2 && (
+        <Step2
           amount={amount} commitment={commitment} txHash={finalTxHash}
-          onDone={() => router.push('/app/vault')}
+          onDone={() => router.push('/app/portfolio')}
         />
       )}
     </FlowShell>

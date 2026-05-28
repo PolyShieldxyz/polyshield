@@ -17,7 +17,7 @@ export async function GET(
 
   let relayRes: Response
   try {
-    relayRes = await fetch(target)
+    relayRes = await fetch(target, { cache: 'no-store' })
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err)
     console.error(`[api/merkle-path] proof-relay unreachable: ${msg}`)

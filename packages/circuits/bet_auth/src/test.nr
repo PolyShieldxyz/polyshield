@@ -2,7 +2,7 @@ use dep::std::hash::poseidon::bn254;
 use dep::merkle::merkle_verify;
 
 fn zero_leaf() -> Field {
-    bn254::hash_3([0, 0, 0])
+    0
 }
 
 fn build_zero_path() -> [Field; 32] {
@@ -33,15 +33,16 @@ fn test_bet_auth_valid() {
     //                 = 10_000_000_000_000_000 - 9_999_999_945_000_000
     //                 = 55_000_000
     let share_remainder: u64 = 55_000_000;
+    let owner_address: Field = 0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266;
 
-    let old_commitment = bn254::hash_3([secret, current_balance as Field, nonce as Field]);
+    let old_commitment = bn254::hash_4([secret, current_balance as Field, nonce as Field, owner_address]);
     let merkle_root = single_leaf_root(old_commitment);
     let merkle_path = build_zero_path();
     let merkle_path_indices: [u1; 32] = [0; 32];
 
     let nullifier = bn254::hash_2([secret, nonce as Field]);
     let new_balance = current_balance - bet_amount;
-    let new_commitment = bn254::hash_3([secret, new_balance as Field, (nonce + 1) as Field]);
+    let new_commitment = bn254::hash_4([secret, new_balance as Field, (nonce + 1) as Field, owner_address]);
 
     // Validate constraint logic (mirrors main() assertions)
     assert(merkle_verify(old_commitment, merkle_path, merkle_path_indices) == merkle_root);
@@ -54,7 +55,7 @@ fn test_bet_auth_valid() {
     assert(lhs == rhs);
     assert(share_remainder < price);
 
-    assert(bn254::hash_3([secret, new_balance as Field, (nonce + 1) as Field]) == new_commitment);
+    assert(bn254::hash_4([secret, new_balance as Field, (nonce + 1) as Field, owner_address]) == new_commitment);
 
     let _ = merkle_root;
 }
@@ -65,8 +66,9 @@ fn test_bet_auth_wrong_root() {
     let secret: Field = 42;
     let current_balance: u64 = 1_000_000_000;
     let nonce: u64 = 0;
+    let owner_address: Field = 0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266;
 
-    let old_commitment = bn254::hash_3([secret, current_balance as Field, nonce as Field]);
+    let old_commitment = bn254::hash_4([secret, current_balance as Field, nonce as Field, owner_address]);
     let merkle_path = build_zero_path();
     let merkle_path_indices: [u1; 32] = [0; 32];
 
@@ -121,17 +123,19 @@ fn test_print_bench_inputs() {
     let market_id: Field = 1;
     let outcome_side: u8 = 1;
     let position_id: Field = 2;
+    let owner_address: Field = 0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266;
 
-    let old_commitment = bn254::hash_3([secret, current_balance as Field, nonce as Field]);
+    let old_commitment = bn254::hash_4([secret, current_balance as Field, nonce as Field, owner_address]);
     let merkle_path = build_zero_path();
     let merkle_root = single_leaf_root(old_commitment);
     let nullifier = bn254::hash_2([secret, nonce as Field]);
     let new_balance = current_balance - bet_amount;
-    let new_commitment = bn254::hash_3([secret, new_balance as Field, (nonce + 1) as Field]);
+    let new_commitment = bn254::hash_4([secret, new_balance as Field, (nonce + 1) as Field, owner_address]);
 
     println(f"BENCH secret {secret}");
     println(f"BENCH current_balance {current_balance}");
     println(f"BENCH nonce {nonce}");
+    println(f"BENCH owner_address {owner_address}");
     println(f"BENCH bet_amount {bet_amount}");
     println(f"BENCH price {price}");
     println(f"BENCH expected_shares {expected_shares}");
@@ -156,9 +160,10 @@ fn test_bet_auth_wrong_new_commitment() {
     let current_balance: u64 = 1_000_000_000;
     let nonce: u64 = 0;
     let bet_amount: u64 = 100_000_000;
+    let owner_address: Field = 0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266;
 
     let new_balance = current_balance - bet_amount;
-    let correct = bn254::hash_3([secret, new_balance as Field, (nonce + 1) as Field]);
+    let correct = bn254::hash_4([secret, new_balance as Field, (nonce + 1) as Field, owner_address]);
     let wrong: Field = 0;
 
     assert(correct == wrong, "Invalid new_commitment");

@@ -16,7 +16,7 @@ const TREE_DEPTH = 32;
 // Precompute zero subtree hashes: zeros[0] = 0, zeros[i+1] = poseidon2(zeros[i], zeros[i])
 function buildZeros(): bigint[] {
   const zeros: bigint[] = [0n];
-  for (let i = 0; i < TREE_DEPTH - 1; i++) {
+  for (let i = 0; i < TREE_DEPTH; i++) {
     zeros.push(poseidon2([zeros[i], zeros[i]]));
   }
   return zeros;

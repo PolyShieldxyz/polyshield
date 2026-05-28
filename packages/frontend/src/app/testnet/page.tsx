@@ -3,16 +3,16 @@ import { useState } from 'react'
 import { KV } from '@/components/app/KV'
 
 const METRICS = [
-  { label: 'Test vaults active', value: '84' },
-  { label: 'Proofs generated', value: '2,412' },
-  { label: 'Markets tested', value: '18' },
-  { label: 'USDC settled (testnet)', value: '$1.4M' },
+  { label: 'Test vaults active', value: '—' },
+  { label: 'Proofs generated', value: '—' },
+  { label: 'Markets tested', value: '—' },
+  { label: 'USDC settled (testnet)', value: '—' },
 ]
 
 export default function TestnetPage() {
   const [email, setEmail] = useState('')
   const [submitted, setSubmitted] = useState(false)
-  const seats = 158
+  const seats = 0
   const totalSeats = 200
 
   return (
@@ -71,10 +71,11 @@ export default function TestnetPage() {
                 </div>
               ))}
             </div>
+            <div className="small mt-3" style={{ fontSize: 11, color: 'var(--text-3)' }}>Live metrics will populate once the testnet opens.</div>
             <div className="hairline-t mt-4" style={{ paddingTop: 14 }}>
               <KV l="Network" v="Polygon Amoy" />
-              <KV l="Vault contract" v="0x7a4f…c2b9" />
-              <KV l="USDC (test)" v="0x41E0…B2f7" />
+              <KV l="Vault contract" v={process.env.NEXT_PUBLIC_VAULT_ADDRESS ? `${process.env.NEXT_PUBLIC_VAULT_ADDRESS.slice(0, 6)}…${process.env.NEXT_PUBLIC_VAULT_ADDRESS.slice(-4)}` : 'TBD — pre-deployment'} />
+              <KV l="USDC (test)" v={process.env.NEXT_PUBLIC_USDC_ADDRESS ? `${process.env.NEXT_PUBLIC_USDC_ADDRESS.slice(0, 6)}…${process.env.NEXT_PUBLIC_USDC_ADDRESS.slice(-4)}` : 'TBD — pre-deployment'} />
               <KV l="Block explorer" v="amoy.polygonscan.com" />
             </div>
           </div>

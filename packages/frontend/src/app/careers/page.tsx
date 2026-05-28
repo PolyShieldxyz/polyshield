@@ -53,7 +53,8 @@ export default function CareersPage() {
             <div style={{ fontSize: 14, fontWeight: 500, marginBottom: 8 }}>{title}</div>
             <div className="body" style={{ fontSize: 13 }}>{desc}</div>
             <div className="mt-3">
-              <a href="mailto:jobs@polyshield.xyz" className="btn btn-sm" style={{ textDecoration: 'none', fontSize: 11 }}>Apply → jobs@polyshield.xyz</a>
+              {/* TODO: set up jobs@polyshield.xyz redirect before public launch */}
+              <a href="mailto:arianari97@gmail.com" className="btn btn-sm" style={{ textDecoration: 'none', fontSize: 11 }}>Apply → arianari97@gmail.com</a>
             </div>
           </div>
         ))}

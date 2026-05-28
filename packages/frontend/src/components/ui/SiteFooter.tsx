@@ -10,6 +10,8 @@ const FOOTER_COLS = [
 ]
 
 export function SiteFooter() {
+  const vaultAddr = process.env.NEXT_PUBLIC_VAULT_ADDRESS
+  const addrDisplay = vaultAddr ? `${vaultAddr.slice(0, 6)}…${vaultAddr.slice(-4)}` : 'VAULT TBD'
   return (
     <footer style={{ borderTop: '1px solid var(--line)', marginTop: 120, background: 'linear-gradient(180deg, transparent, rgba(255,255,255,0.012))' }}>
       <div className="container" style={{ padding: '72px 32px 32px' }}>
@@ -45,7 +47,7 @@ export function SiteFooter() {
         </div>
         <div className="row hairline-t mt-12" style={{ paddingTop: 24, justifyContent: 'space-between' }}>
           <div className="mono" style={{ fontSize: 11, color: 'var(--text-3)' }}>
-            POLYSHIELD LABS · 0x7a4f…c2b9 · MAINNET ALPHA · BUILD 2026.05.20
+            POLYSHIELD LABS · {addrDisplay} · POLYGON AMOY TESTNET · BUILD 2026.05.20
           </div>
           <div className="mono" style={{ fontSize: 11, color: 'var(--text-3)' }}>
             © 2026 · NOT INVESTMENT ADVICE

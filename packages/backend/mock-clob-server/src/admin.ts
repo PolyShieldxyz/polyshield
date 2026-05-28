@@ -13,6 +13,9 @@
  *     → calls MockCTF.setPayoutNumerators + setPayoutDenominator on Anvil,
  *       which emits ConditionResolution so the indexer detects settlement.
  *       Requires env: CTF_ADDRESS, DEPLOYER_PRIVATE_KEY (POLYGON_RPC_URL optional, defaults to http://127.0.0.1:8545)
+ *   POST /admin/report-filled     { nullifier: "0x..." }
+ *     → dev escape hatch: directly calls Vault.reportFilled(nullifier) via the operator key.
+ *       Use when the signing layer missed a BetAuthorized event and the bet is stuck ACTIVE.
  */
 
 import { Router, Request, Response } from "express";
@@ -25,6 +28,13 @@ export const adminRouter = Router();
 const MOCK_CTF_ABI = [
   "function setPayoutNumerators(bytes32 conditionId, uint256[] calldata numerators) external",
   "function setPayoutDenominator(bytes32 conditionId, uint256 denominator) external",
+];
+
+const VAULT_ABI = [
+  "function resolveMarket(bytes32 market_id) external",
+  "function pendingCredit(bytes32 market_id, uint8 outcome_side) view returns (uint64)",
+  "function reportFilled(bytes32 nullifier_of_bet) external",
+  "function reportFOKFailure(bytes32 nullifier_of_bet) external",
 ];
 
 adminRouter.post("/set-behavior", (req: Request, res: Response) => {
@@ -92,8 +102,10 @@ adminRouter.post("/settle-market", (async (req: Request, res: Response) => {
   }
 
   const ctfAddress = process.env["CTF_ADDRESS"];
+  const vaultAddress = process.env["VAULT_CONTRACT_ADDRESS"];
   const rpcUrl = process.env["POLYGON_RPC_URL"] ?? process.env["ANVIL_RPC_URL"] ?? "http://127.0.0.1:8545";
   const deployerKey = process.env["DEPLOYER_PRIVATE_KEY"];
+  const operatorKey = process.env["VAULT_EOA_PRIVATE_KEY"];
 
   if (!ctfAddress || !deployerKey) {
     res.status(500).json({
@@ -104,18 +116,16 @@ adminRouter.post("/settle-market", (async (req: Request, res: Response) => {
 
   try {
     const provider = new ethers.JsonRpcProvider(rpcUrl);
-    const signer = new ethers.Wallet(deployerKey, provider);
-    const ctf = new ethers.Contract(ctfAddress, MOCK_CTF_ABI, signer);
+    const deployer = new ethers.Wallet(deployerKey, provider);
+    const ctf = new ethers.Contract(ctfAddress, MOCK_CTF_ABI, deployer);
 
-    // Fetch nonce once and manually increment — prevents the race where ethers.js
-    // signs both transactions before the first one is mined and assigns both nonce N.
-    const nonce = await provider.getTransactionCount(signer.address);
+    // Fetch nonce once and manually increment to avoid both txs getting nonce N.
+    const nonce = await provider.getTransactionCount(deployer.address);
 
-    // Set denominator first (order doesn't matter on-chain but explicit is clearer)
+    // Set denominator first, then numerators (numerators emits ConditionResolution)
     await (await ctf.setPayoutDenominator(conditionId, payoutDenominator, { nonce })).wait();
-    // setPayoutNumerators emits ConditionResolution — indexer will pick this up
-    const tx = await ctf.setPayoutNumerators(conditionId, payoutNumerators, { nonce: nonce + 1 });
-    const receipt = await tx.wait();
+    const ctfTx = await ctf.setPayoutNumerators(conditionId, payoutNumerators, { nonce: nonce + 1 });
+    const ctfReceipt = await ctfTx.wait();
 
     // Determine outcome label
     let outcome: SettledMarket["outcome"] = "NA";
@@ -131,15 +141,75 @@ adminRouter.post("/settle-market", (async (req: Request, res: Response) => {
     };
     state.settledMarkets[conditionId.toLowerCase()] = settled;
 
+    // Directly call Vault.resolveMarket so pendingCredit is set immediately,
+    // without waiting for the signing layer to process the ConditionResolution event.
+    // This makes dev/test settlement reliable even if the signing layer is slow or crashed.
+    let resolveMarketTxHash: string | undefined;
+    if (vaultAddress && operatorKey && outcome !== "NA") {
+      try {
+        const operator = new ethers.Wallet(operatorKey, provider);
+        const vault = new ethers.Contract(vaultAddress, VAULT_ABI, operator);
+        const operatorNonce = await provider.getTransactionCount(operator.address);
+        const resolveTx = await vault.resolveMarket(conditionId, { nonce: operatorNonce });
+        const resolveReceipt = await resolveTx.wait();
+        resolveMarketTxHash = resolveReceipt?.hash;
+        console.log(
+          `[admin] Vault.resolveMarket confirmed: conditionId=${conditionId.slice(0, 10)}... ` +
+          `tx=${resolveMarketTxHash}`
+        );
+      } catch (vaultErr) {
+        const vaultMsg = vaultErr instanceof Error ? vaultErr.message : String(vaultErr);
+        console.warn(`[admin] Vault.resolveMarket failed (signing layer will retry via event): ${vaultMsg}`);
+      }
+    }
+
     console.log(
       `[admin] settled market ${conditionId.slice(0, 10)}... outcome=${outcome} ` +
-      `numerators=${JSON.stringify(payoutNumerators)} tx=${receipt?.hash}`
+      `numerators=${JSON.stringify(payoutNumerators)} ctfTx=${ctfReceipt?.hash}`
     );
 
-    res.json({ ok: true, settlement: settled, txHash: receipt?.hash });
+    res.json({ ok: true, settlement: settled, ctfTxHash: ctfReceipt?.hash, resolveMarketTxHash });
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     console.error(`[admin] settle-market failed: ${msg}`);
+    res.status(500).json({ error: msg });
+  }
+}) as (req: Request, res: Response) => void);
+
+/**
+ * POST /admin/report-filled
+ * Dev escape hatch: manually calls Vault.reportFilled(nullifier) using the operator key.
+ * Use this when the signing layer missed a BetAuthorized event and the bet is stuck ACTIVE.
+ *
+ * Body: { nullifier: "0x..." }
+ */
+adminRouter.post("/report-filled", (async (req: Request, res: Response) => {
+  const { nullifier } = req.body as { nullifier?: string };
+  if (!nullifier || !nullifier.startsWith("0x")) {
+    res.status(400).json({ error: "nullifier must be a 0x-prefixed hex string" });
+    return;
+  }
+
+  const vaultAddress = process.env["VAULT_CONTRACT_ADDRESS"];
+  const operatorKey = process.env["VAULT_EOA_PRIVATE_KEY"];
+  const rpcUrl = process.env["POLYGON_RPC_URL"] ?? "http://127.0.0.1:8545";
+
+  if (!vaultAddress || !operatorKey) {
+    res.status(500).json({ error: "VAULT_CONTRACT_ADDRESS and VAULT_EOA_PRIVATE_KEY required" });
+    return;
+  }
+
+  try {
+    const provider = new ethers.JsonRpcProvider(rpcUrl);
+    const operator = new ethers.Wallet(operatorKey, provider);
+    const vault = new ethers.Contract(vaultAddress, VAULT_ABI, operator);
+    const tx = await vault.reportFilled(nullifier);
+    const receipt = await tx.wait(1);
+    console.log(`[admin] reportFilled confirmed: nullifier=${nullifier.slice(0, 10)}... tx=${receipt?.hash}`);
+    res.json({ ok: true, txHash: receipt?.hash });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.error(`[admin] report-filled failed: ${msg}`);
     res.status(500).json({ error: msg });
   }
 }) as (req: Request, res: Response) => void);

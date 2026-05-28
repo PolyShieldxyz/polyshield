@@ -10,6 +10,8 @@
     "test": "pnpm -r test",
     "circuits:test": "cd packages/circuits && nargo test",
     "circuits:compile": "cd packages/circuits && nargo compile",
+    "circuits:deploy": "cd packages/circuits && nargo compile && cp target/bet_auth.json target/withdrawal.json target/settlement_credit.json target/bet_cancel.json target/cancel_credit.json ../frontend/public/circuits/",
+    "circuits:verifiers": "bash packages/circuits/regen-verifiers.sh",
     "groth16:build": "cd packages/groth16 && npm run build",
     "groth16:test": "cd packages/groth16 && npm test",
     "groth16:generate": "cd packages/groth16 && npm run generate:all",
