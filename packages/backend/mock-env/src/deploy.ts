@@ -53,7 +53,28 @@ export function deployContracts(rpcUrl = "http://127.0.0.1:8545"): DeployedAddre
   ).toString();
   console.log(`[deploy] done in ${((Date.now() - started) / 1000).toFixed(1)}s`);
 
-  return parseAddresses(output);
+  const addresses = parseAddresses(output);
+
+  // Advance Anvil's clock past the 48-hour verifier timelock, then accept all verifiers.
+  // vm.warp/vm.rpc inside a Forge script cannot reliably do this because vm.rpc fires
+  // during the dry-run simulation (before broadcast), pushing verifierUpdateAt further out.
+  console.log("[deploy] advancing Anvil time past 48-hour verifier timelock...");
+  const rpc = (method: string, params: string) =>
+    execSync(
+      `curl -sf -X POST ${rpcUrl} -H 'Content-Type: application/json' ` +
+        `-d '{"jsonrpc":"2.0","method":"${method}","params":${params},"id":1}'`,
+      { stdio: "ignore" }
+    );
+  rpc("evm_increaseTime", "[172801]"); // 48 h + 1 s
+  rpc("evm_mine", "[]");
+
+  console.log("[deploy] accepting verifiers...");
+  execSync(
+    `${forge} script script/MockAcceptVerifiers.s.sol --rpc-url ${rpcUrl} --broadcast`,
+    { cwd: CONTRACTS_DIR, env: { ...process.env, VAULT_ADDRESS: addresses.VAULT_ADDRESS }, stdio: "inherit" }
+  );
+
+  return addresses;
 }
 
 function parseAddresses(output: string): DeployedAddresses {

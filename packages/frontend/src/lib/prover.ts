@@ -58,6 +58,9 @@ export interface SettlementInputs {
   secret: string
   balance_before_credit: bigint
   nonce: bigint
+  /** Nonce of the note that was spent at bet auth time. Private input — allows settling
+   *  any open bet regardless of how many subsequent note actions have occurred. */
+  bet_nonce: bigint
   merkle_path: string[]
   merkle_path_indices: number[]
   owner_address: string
@@ -113,9 +116,15 @@ let _isReady = false
 const _readyCallbacks: Array<() => void> = []
 
 async function fetchAsset(url: string): Promise<Uint8Array> {
-  const r = await fetch(url)
-  if (!r.ok) throw new Error(`[prover] Failed to fetch ${url}: HTTP ${r.status}`)
-  return new Uint8Array(await r.arrayBuffer())
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), 30_000)
+  try {
+    const r = await fetch(url, { signal: controller.signal })
+    if (!r.ok) throw new Error(`[prover] Failed to fetch ${url}: HTTP ${r.status}`)
+    return new Uint8Array(await r.arrayBuffer())
+  } finally {
+    clearTimeout(timer)
+  }
 }
 
 function ensurePreloaded(name: CircuitName): void {
@@ -245,6 +254,7 @@ export async function generateSettlementProof(inputs: SettlementInputs): Promise
     secret:                inputs.secret,
     balance_before_credit: inputs.balance_before_credit.toString(),
     nonce:                 inputs.nonce.toString(),
+    bet_nonce:             inputs.bet_nonce.toString(),
     merkle_path:           inputs.merkle_path,
     merkle_path_indices:   inputs.merkle_path_indices.map(String),
     owner_address:         inputs.owner_address,
@@ -328,6 +338,9 @@ export function generateProofInWorker(message: ProverWorkerMessage): Promise<Pro
     worker.onerror = () => {
       clearTimeout(timeout)
       worker.terminate()
+      if (typeof window !== 'undefined') {
+        window.dispatchEvent(new CustomEvent('polyshield:prover-fallback'))
+      }
       console.warn('[prover] Worker failed, falling back to main thread')
       runProofMainThread(message).then(resolve, reject)
     }

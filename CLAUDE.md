@@ -47,10 +47,11 @@ README.md              Project overview and quick start
 - **Note structure:** `(secret: Field, balance: u64, nonce: u64, owner_address: Field)`. This is a 4-field note. `owner_address` is the depositing wallet address cast to a BN254 field element (`uint256(uint160(address))`). Do not revert to the old 3-field structure.
 - **Commitment formula:** `Poseidon4(secret, balance, nonce, owner_address)`. Uses `bn254::hash_4`. This is a protocol constant — changing it invalidates all existing commitments.
 - **Nullifier formula:** `Poseidon2(secret, nonce)`. Does NOT include owner_address or balance.
-- **Secret derivation:** Secrets are derived from wallet signatures, never randomly generated. Formula: `keccak256(wallet.signMessage("PolyShield deposit derivation\nAddress: {W}\nIndex: {i}\nVersion: 1")) mod p`. The message string is a protocol constant — never change it after mainnet deployment. Users never need to back up a secret. See `docs/zk-design.md` §3.
+- **Secret derivation (P1/P2 — random):** Secrets are generated via `crypto.getRandomValues()`. Users must download an ECIES-encrypted backup (encrypted to their wallet public key) immediately after deposit. There is no server-side recovery in P1/P2.
+- **Secret derivation (P3+ — wallet-derived):** Secrets are derived deterministically from wallet signatures. Formula: `keccak256(wallet.signMessage("PolyShield deposit derivation\nAddress: {W}\nIndex: {i}\nVersion: 1")) mod p`. The message string is a protocol constant — never change it after mainnet deployment. Users never need to back up a secret in P3+. See `docs/zk-design.md` §3.
 - **Merkle tree:** Poseidon-hashed, depth 32, append-only. Rolling 30-root history window.
-- **ZK language:** Noir (Aztec). Do not implement circuits in Circom or use another system without explicit approval.
-- **ZK backend:** UltraPLONK for dev/testing. Mainnet proving backend is **under active evaluation** — UltraPLONK and Groth16 are both on the table. UltraHonk remains dropped. Do not treat the mainnet backend as decided; see Q16 in `docs/open-questions.md`. The benchmarking data comparing both backends is in `docs/Q16-proving-backend-comparison.md`. Do not introduce UltraHonk verifiers anywhere.
+- **ZK language:** Circom + snarkjs (BN254 / Groth16). The Noir circuit files in `packages/circuits/` exist as a specification reference only and are not compiled or used for proof generation. Do not add new Circom circuits without approval.
+- **ZK backend:** Groth16 (snarkjs) for both dev/testnet and mainnet. The frontend generates proofs via `snarkjs.groth16.fullProve()` using WASM artifacts compiled from Circom. On-chain verification uses snarkjs-generated Solidity verifier contracts. UltraHonk and UltraPLONK have been evaluated (see `docs/Q16-proving-backend-comparison.md`) and are not used. Do not introduce UltraPLONK or UltraHonk verifiers anywhere.
 - **Chain:** Polygon mainnet (Polymarket runs here). Testnet target: Polygon Amoy.
 - **Collateral token:** Vault accepts and pays out in USDC only. pUSD conversion (via CollateralOnramp/Offramp) is internal to the Vault contract. Do not expose pUSD to users or circuits.
 - **Per-address deposit cap:** $50,000 USDC maximum cumulative deposit per address in MVP. Enforced in `deposit()` via `cumulativeDeposits[msg.sender]`. Do not remove without Project Agent approval.
@@ -59,11 +60,10 @@ README.md              Project overview and quick start
 - **Withdrawal is W-to-W only:** Users can only withdraw to their own depositing address. This is enforced cryptographically inside the withdrawal circuit: `owner_address` is part of the note commitment, and the circuit constrains `Poseidon2(owner_address, 0) == recipient_hash`. The Vault also independently verifies `recipient_hash` against the passed `recipientAddress`. There is no mixer path.
 - **Operator-driven settlement:** When a market resolves, the Signing Layer calls `Vault.resolveMarket(market_id, payout_per_share)`. The Vault verifies `payout_per_share` against `ctf.payoutNumerators` and stores it in `pendingCredit[market_id]`. Users' settlement credit proofs do not require `payout_per_share` or `shares_held` as witness inputs — those are injected by the Vault from on-chain storage.
 - **Auto-settlement permission:** Users may optionally send an ECIES-encrypted blob `(secret, nonce_after_bet)` to the operator's API at bet authorization time. The blob is stored in the operator's private database keyed by `nullifier_of_bet`. It is never stored on-chain. The operator uses it to generate the settlement proof on the user's behalf when the market resolves. Opting in links W to bet B at the operator level but does not affect future bet privacy.
-- **Fee model — all rates are governance-mutable Vault storage slots, not hardcoded in circuits.** The circuit reads fee values as Vault-injected public inputs so governance can update any rate without redeploying circuits. All fees accumulate in `Vault.feeAccumulator` and are withdrawable by `feeRecipient` (also governance-mutable). Fee parameters are owner-controlled initially; the owner role is transferable to a governance contract if the protocol decentralizes. Four fee types:
-  - **Bet authorization fee (MVP / P1):** `betFeeBps` (basis points, target <0.2%). Deducted inside BET_AUTH circuit: `fee = (bet_amount * betFeeBps / 10000) + relayGasFeeUSDC`. The resulting `new_balance = current_balance - bet_amount - fee`. Exact rate is TBD and not yet set; circuit must accept it as a variable input.
-  - **Relay gas fee (MVP / P1, bundled with bet auth fee):** `relayGasFeeUSDC` — a flat USDC amount covering the relay EOA's Polygon gas per transaction. Added to the bet auth deduction above. Not surfaced to users as a separate line item. Should be kept negligible relative to the percentage fee.
-  - **Auto-settlement fee (P2):** `autoSettleFeeUSDC` — 20x the estimated Polygon gas cost for a settlement transaction, stored in Vault and updated by the operator to reflect current gas conditions. Deducted from the settlement credit inside the SETTLE_CRED circuit when the auto-settle flag is set. Circuit design for this conditional deduction is a P2 task.
-  - **Withdrawal fee (P3):** `withdrawalFeeUSDC` — fixed at $10 USDC (= 10,000,000 in 6-decimal units) initially. Enforced by the Vault contract in `withdraw()` directly (no circuit change needed): `transfer(recipient, withdrawal_amount - withdrawalFeeUSDC)`. Purpose: discourages micro-withdrawals.
+- **Fee model — P1 ships with no fees.** Fee infrastructure is introduced in P2. All rates are governance-mutable Vault storage slots, not hardcoded in circuits. The circuit reads fee values as Vault-injected public inputs so governance can update any rate without redeploying circuits. All fees accumulate in `Vault.feeAccumulator` and are withdrawable by `feeRecipient` (also governance-mutable). Fee parameters are owner-controlled initially; the owner role is transferable to a governance contract in P4. Three fee types across phases:
+  - **Bet authorization fee (P2):** `betFeeBps` (basis points, rate TBD). Deducted inside BET_AUTH circuit: `fee = (bet_amount * betFeeBps / 10000) + relayGasFeeUSDC`. The resulting `new_balance = current_balance - bet_amount - fee`. Exact rate is TBD and not yet set; circuit must accept it as a variable input.
+  - **Relay gas fee (P2, bundled with bet auth fee):** `relayGasFeeUSDC` — a flat USDC amount covering the relay EOA's Polygon gas per transaction. Added to the bet auth deduction above. Not surfaced to users as a separate line item.
+  - **Withdrawal fee (P4):** `withdrawalFeeUSDC` — fixed USDC amount per withdrawal, rate TBD. Enforced by the Vault contract in `withdraw()` directly (no circuit change needed): `transfer(recipient, withdrawal_amount - withdrawalFeeUSDC)`. Purpose: discourages micro-withdrawals.
 
 ---
 
@@ -140,11 +140,12 @@ Lives in `packages/backend/`. This is a centralized Node.js service for the v1 p
 Lives in `packages/frontend/`. Next.js app with Wagmi for wallet connection.
 
 **Note management (critical UX):**
-- Secrets are derived from wallet signatures — never generated randomly. Call `deriveSecret(wallet, depositIndex)` which signs the canonical EIP-191 message and reduces mod p. Never call `generateSecret()` or `crypto.getRandomValues()` for note secrets.
-- Do NOT show the user a raw secret or ask them to back anything up. Their wallet is their backup.
-- localStorage stores the note cache for performance only: `(kind, balance, nonce, commitment, nullifier, spent, owner_address, createdAt, txHash, marketId, expectedShares)`. The secret is NOT persisted to localStorage — it is re-derived on demand.
-- On recovery (new device or cleared storage): call `recoverNotes(wallet)` which scans `Deposited(W, ...)` events, re-derives secrets by index, matches commitments, and replays state transitions from on-chain events.
-- The deposit index counter `(wallet_address → count)` is stored in localStorage and is the only thing that must be preserved for performance. It is recoverable by scanning chain events if lost.
+- **P1/P2 (random secrets):** Call `generateSecret()` which uses `crypto.getRandomValues()`. Immediately after note creation, prompt the user to download their ECIES-encrypted backup file (encrypted to their wallet public key). Note loss is permanent in P1/P2 — there is no server-side recovery. Show a prominent warning if the user skips the backup step.
+- **P3+ (wallet-derived secrets):** Call `deriveSecret(wallet, depositIndex)` which signs the canonical EIP-191 message and reduces mod p. Do NOT ask the user to back anything up — their wallet is their backup. Never use `crypto.getRandomValues()` for note secrets in P3+.
+- localStorage stores the note cache for performance only: `(kind, balance, nonce, commitment, nullifier, spent, owner_address, createdAt, txHash, marketId, expectedShares)`. The secret is NOT persisted to localStorage.
+- **P1/P2 recovery:** User must import their encrypted backup file and decrypt it with their wallet.
+- **P3+ recovery:** Call `recoverNotes(wallet)` which scans `Deposited(W, ...)` events, re-derives secrets by index, matches commitments, and replays state transitions from on-chain events.
+- The deposit index counter `(wallet_address → count)` is stored in localStorage. In P3+, it is recoverable by scanning chain events if lost.
 
 **Proof generation:**
 - WASM prover runs client-side via the `@noir-lang/noir_wasm` package
@@ -249,10 +250,10 @@ pnpm build:wasm
 **Logging:** All services write structured JSON (pino) to stdout, tee'd to `logs/session-<timestamp>.jsonl`. Frontend events go to `logs/frontend.jsonl`. Run `tail -f logs/*.jsonl | jq .` to watch everything live.
 
 **Real vs mock components:**
-- Real: Vault, CommitmentMerkleTree, NullifierRegistry, all 5 UltraPLONK verifiers, PoseidonT3Hasher (BN254), Proof Relay, Indexer, Signing Layer, MockUSDC, MockCTF
+- Real: Vault, CommitmentMerkleTree, NullifierRegistry, all 5 Groth16 verifiers, PoseidonT3Hasher (BN254), Proof Relay, Indexer, Signing Layer, MockUSDC, MockCTF
 - Mock (intentional): mockClobServer only — mimics the Polymarket CLOB API
 
-**Known limitation:** Frontend currently uses MOCK_PROOF (64 zero bytes) and keccak256 for hashing. Real proof verification will reject these — the WASM prover and Poseidon hashing are the next items to wire up.
+**Known limitation:** Frontend proof generation uses snarkjs Groth16 via WASM (`.wasm`) and proving key (`.zkey`) files served from `/circuits/` and `/zkeys/`. If these files are absent, proof generation fails. Run `pnpm setup:circuits` to regenerate them.
 
 ---
 
