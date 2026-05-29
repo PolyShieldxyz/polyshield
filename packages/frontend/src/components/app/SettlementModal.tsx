@@ -12,6 +12,7 @@ import {
   deriveSecret,
   formatUsdc,
   getCurrentCashNote,
+  getFreeNoteForDeposit,
   markBetReceiptSpent,
   markNoteSpent,
   recordWalletActivity,
@@ -110,7 +111,15 @@ export function SettlementModal({
     setProgressIndex(previouslyCompleted.length)
     setError(null)
 
-    let currentFreeNote = getCurrentCashNote(address)
+    // Settlement proofs require Poseidon(secret, nonce−1) === nullifier_of_bet.
+    // The note must come from the same deposit chain as the receipt so that the
+    // same secret is used. getCurrentCashNote (highest balance) is wrong when
+    // multiple deposits exist — it may return a note from a different deposit,
+    // causing a different secret and a circuit assertion failure at line 67.
+    const firstReceipt = betsToProcess[0].receipt
+    let currentFreeNote =
+      getFreeNoteForDeposit(address, firstReceipt.depositIndex) ??
+      getCurrentCashNote(address)
     if (!currentFreeNote) {
       setPhase('error')
       setError('No cash balance is available to receive settlement credit.')
@@ -144,6 +153,11 @@ export function SettlementModal({
           secret,
           balance_before_credit: currentFreeNote.balance,
           nonce: currentFreeNote.nonce,
+          // bet_nonce is the nonce of the note that was spent at bet auth time.
+          // Stored on the BET_RECEIPT as receipt.nonce. Using this instead of
+          // hardcoded (nonce-1) allows settling any open bet regardless of
+          // how many subsequent actions have occurred on the deposit chain.
+          bet_nonce: receipt.nonce,
           merkle_path: merkle.path,
           merkle_path_indices: merkle.pathIndices,
           owner_address: address,

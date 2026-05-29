@@ -36,7 +36,7 @@ User wallet
         │
         ├── CommitmentMerkleTree.sol  — Poseidon depth-32 append-only tree
         ├── NullifierRegistry.sol     — spent nullifier deduplication
-        └── 5× UltraPLONK Verifiers  — one per proof type
+        └── 5× Groth16 Verifiers      — one per proof type (snarkjs / BN254)
               │
               └── Signing Layer  (Node.js, centralized v1)
                     Listens for BetAuthorized events.
@@ -51,15 +51,17 @@ User wallet
 
 ## ZK Circuits
 
-Five Noir circuits, all using UltraPLONK with Poseidon (BN254):
+Five Circom circuits compiled with Groth16 (snarkjs, BN254). Proofs are generated client-side in the browser via WASM and verified on-chain by Groth16 adapter contracts:
 
 | Circuit | File | What it proves |
 |---|---|---|
-| **BET_AUTH** | `circuits/bet_auth/` | Note has sufficient balance; nullifier is valid; new note is correctly formed after spend |
-| **SETTLE_CRED** | `circuits/settlement_credit/` | Depositor held a winning position; settlement credit is correct |
-| **WITHDRAW** | `circuits/withdrawal/` | Depositor knows note secret; withdrawal goes to their own depositing address |
-| **BET_CANCEL** | `circuits/bet_cancel/` | Restores note balance for a failed FOK bet |
-| **CANCEL_CRED** | `circuits/cancel_credit/` | N/A market resolution — all CTF payout numerators are zero |
+| **BET_AUTH** | `circuits/groth16/bet_auth.circom` | Note has sufficient balance; nullifier is valid; new note is correctly formed after spend |
+| **SETTLE_CRED** | `circuits/groth16/settlement_credit.circom` | Depositor held a winning position; settlement credit is correct |
+| **WITHDRAW** | `circuits/groth16/withdrawal.circom` | Depositor knows note secret; withdrawal goes to their own depositing address |
+| **BET_CANCEL** | `circuits/groth16/bet_cancel.circom` | Restores note balance for a failed FOK bet |
+| **CANCEL_CRED** | `circuits/groth16/cancel_credit.circom` | N/A market resolution — all CTF payout numerators are zero |
+
+> The Noir circuits in `circuits/bet_auth/`, `circuits/withdrawal/`, etc. are kept as a specification reference only. They are not compiled or used for proof generation. See [`packages/circuits/README.md`](packages/circuits/README.md) for details.
 
 ### Note structure
 
@@ -86,7 +88,11 @@ Withdrawal is wallet-to-wallet only. The `owner_address` field is inside the com
 ```
 packages/
   contracts/     Vault.sol, CommitmentMerkleTree, NullifierRegistry, verifiers (Foundry)
-  circuits/      Noir circuits — bet_auth, settlement_credit, withdrawal, bet_cancel, cancel_credit
+  circuits/
+    groth16/     Active Circom circuits (Groth16/snarkjs) — bet_auth, settlement_credit, withdrawal, bet_cancel, cancel_credit
+    bet_auth/    Noir source — reference only, not compiled or used
+    withdrawal/  Noir source — reference only, not compiled or used
+    (…other Noir dirs)  see packages/circuits/README.md
   backend/
     signing-layer/     Node.js — listens for BetAuthorized, submits FOK orders to CLOB
     proof-relay/       Stateless Express — 5 relay endpoints, relayer EOA pays gas
@@ -111,7 +117,7 @@ docs/
 
 ## Local dev setup
 
-**Prerequisites:** Node.js 20+, pnpm 9+, Foundry, Noir (`nargo`) 0.39+, Barretenberg (`bb`) 0.82+
+**Prerequisites:** Node.js 20+, pnpm 9+, Foundry, `circom` 2.1.6+, `snarkjs` (for circuit rebuilds only — not needed for running the app)
 
 ```bash
 # Install all dependencies
@@ -159,11 +165,15 @@ pnpm contracts:build        # forge build
 pnpm contracts:test         # forge test
 pnpm contracts:coverage     # forge coverage
 
-# ── Circuits ─────────────────────────────────────────────────────────────────
-pnpm circuits:test          # nargo test (all circuits)
-pnpm circuits:compile       # nargo compile (all circuits)
-pnpm circuits:deploy        # compile + copy artifacts to frontend/public/circuits/
-pnpm circuits:verifiers     # regenerate Solidity verifier contracts from artifacts
+# ── Circuits (Groth16 / Circom — run from Benchmarking/groth16/) ─────────────
+pnpm compile:circuits       # circom → r1cs + wasm artifacts
+pnpm setup:circuits         # snarkjs groth16 setup → .zkey proving keys
+pnpm generate:verifiers     # generate Solidity verifier contracts
+pnpm generate:test-proofs   # generate + verify test proofs
+# After rebuild, copy assets to frontend:
+#   cp artifacts/<c>/<c>_js/<c>.wasm ../../packages/frontend/public/circuits/
+#   cp setup/<c>.zkey ../../packages/frontend/public/zkeys/
+# (The Noir commands — nargo compile/test — only apply to the reference circuits)
 
 # ── Frontend ─────────────────────────────────────────────────────────────────
 cd packages/frontend
@@ -180,7 +190,7 @@ pnpm dev                    # all backend services
 
 ## Proof generation
 
-Proofs run entirely in the browser via WASM (Barretenberg UltraPLONK). Expect **30 seconds to 2 minutes** per proof depending on device and circuit. The frontend shows a progress indicator and prevents navigation during proving.
+Proofs run entirely in the browser via WASM (snarkjs Groth16). The `.wasm` circuit files (~2.4 MB each) and `.zkey` proving keys (~8.7 MB each) are fetched from `/circuits/` and `/zkeys/` and cached in memory when the app loads. Expect **30 seconds to 2 minutes** per proof depending on device. The frontend shows a progress indicator and prevents navigation during proving.
 
 Proof witness data (secret, balance, nonce) is never sent to any server. Secret derivation, proof generation, and note management are all client-side only.
 

@@ -127,11 +127,12 @@ function trackReceipt(label: string, tx: ethers.TransactionResponse, startMs: nu
 
 export async function relayAuthorizeBet(proof: string, inputs: unknown): Promise<string> {
   const start = Date.now();
+  const inp = inputs as Record<string, unknown>;
   logger.info({
     event: "relay:authorizeBet:start",
     proof_bytes: proofBytes(proof),
     proof_fingerprint: fingerprint(proof),
-    inputs,
+    nullifier_prefix: typeof inp["nullifier"] === "string" ? (inp["nullifier"] as string).slice(0, 10) : undefined,
   }, "relay:authorizeBet:start");
 
   const tx = await sendWithNonce((nonce) =>
@@ -147,11 +148,12 @@ export async function relayAuthorizeBet(proof: string, inputs: unknown): Promise
 
 export async function relayCreditSettlement(proof: string, inputs: unknown): Promise<string> {
   const start = Date.now();
+  const inp = inputs as Record<string, unknown>;
   logger.info({
     event: "relay:creditSettlement:start",
     proof_bytes: proofBytes(proof),
     proof_fingerprint: fingerprint(proof),
-    inputs,
+    nullifier_prefix: typeof inp["nullifier"] === "string" ? (inp["nullifier"] as string).slice(0, 10) : undefined,
   }, "relay:creditSettlement:start");
 
   const tx = await sendWithNonce((nonce) =>
@@ -167,12 +169,13 @@ export async function relayCreditSettlement(proof: string, inputs: unknown): Pro
 
 export async function relayWithdraw(proof: string, inputs: unknown, recipientAddress: string): Promise<string> {
   const start = Date.now();
+  const inp = inputs as Record<string, unknown>;
   logger.info({
     event: "relay:withdraw:start",
     proof_bytes: proofBytes(proof),
     proof_fingerprint: fingerprint(proof),
-    recipientAddress,
-    inputs,
+    nullifier_prefix: typeof inp["nullifier"] === "string" ? (inp["nullifier"] as string).slice(0, 10) : undefined,
+    recipient_prefix: recipientAddress.slice(0, 10),
   }, "relay:withdraw:start");
 
   const tx = await sendWithNonce((nonce) =>
@@ -188,11 +191,12 @@ export async function relayWithdraw(proof: string, inputs: unknown, recipientAdd
 
 export async function relayBetCancellationCredit(proof: string, inputs: unknown): Promise<string> {
   const start = Date.now();
+  const inp = inputs as Record<string, unknown>;
   logger.info({
     event: "relay:betCancellationCredit:start",
     proof_bytes: proofBytes(proof),
     proof_fingerprint: fingerprint(proof),
-    inputs,
+    nullifier_prefix: typeof inp["nullifier"] === "string" ? (inp["nullifier"] as string).slice(0, 10) : undefined,
   }, "relay:betCancellationCredit:start");
 
   const tx = await sendWithNonce((nonce) =>
@@ -208,11 +212,12 @@ export async function relayBetCancellationCredit(proof: string, inputs: unknown)
 
 export async function relayNACancellationCredit(proof: string, inputs: unknown): Promise<string> {
   const start = Date.now();
+  const inp = inputs as Record<string, unknown>;
   logger.info({
     event: "relay:naCancellationCredit:start",
     proof_bytes: proofBytes(proof),
     proof_fingerprint: fingerprint(proof),
-    inputs,
+    nullifier_prefix: typeof inp["nullifier"] === "string" ? (inp["nullifier"] as string).slice(0, 10) : undefined,
   }, "relay:naCancellationCredit:start");
 
   const tx = await sendWithNonce((nonce) =>

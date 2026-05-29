@@ -2,9 +2,14 @@
  * Frontend API client — calls Next.js API proxy routes.
  * The proxy routes forward to the backend services without exposing their ports to the browser.
  *
- * All functions log to the browser console for full traceability.
+ * Detailed logging (paths, bodies, nullifiers) is only active in dev mode
+ * (NEXT_PUBLIC_DEV_MODE=true) to avoid leaking pseudonymous identifiers in production.
  * Never pass proof witness data (secret, balance, nonce) through these functions.
  */
+
+const devLog = process.env.NEXT_PUBLIC_DEV_MODE === 'true'
+  ? (...args: unknown[]) => console.log(...args)
+  : (..._args: unknown[]) => undefined
 
 export interface DevStatus {
   anvil: boolean
@@ -69,7 +74,7 @@ export interface MerkleProof {
 }
 
 async function post(path: string, body: unknown): Promise<unknown> {
-  console.log(`[polyshield:api] POST ${path}`, body)
+  devLog(`[polyshield:api] POST ${path}`, body)
   const res = await fetch(path, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -77,22 +82,22 @@ async function post(path: string, body: unknown): Promise<unknown> {
   })
   const data = await res.json()
   if (!res.ok) {
-    console.error(`[polyshield:api] POST ${path} failed`, res.status, data)
+    console.error(`[polyshield:api] POST ${path} failed`, res.status)
     throw new Error((data as { error?: string }).error ?? `HTTP ${res.status}`)
   }
-  console.log(`[polyshield:api] POST ${path} →`, data)
+  devLog(`[polyshield:api] POST ${path} →`, data)
   return data
 }
 
 async function get(path: string): Promise<unknown> {
-  console.log(`[polyshield:api] GET ${path}`)
+  devLog(`[polyshield:api] GET ${path}`)
   const res = await fetch(path)
   const data = await res.json()
   if (!res.ok) {
-    console.error(`[polyshield:api] GET ${path} failed`, res.status, data)
+    console.error(`[polyshield:api] GET ${path} failed`, res.status)
     throw new Error((data as { error?: string }).error ?? `HTTP ${res.status}`)
   }
-  console.log(`[polyshield:api] GET ${path} →`, data)
+  devLog(`[polyshield:api] GET ${path} →`, data)
   return data
 }
 
@@ -100,7 +105,7 @@ export async function relayBet(
   proof: `0x${string}`,
   inputs: RelayBetInputs,
 ): Promise<{ txHash: string }> {
-  console.log('[polyshield:api] relaying BET_AUTH proof', { nullifier: inputs.nullifier })
+  devLog('[polyshield:api] relaying BET_AUTH proof', { nullifier: inputs.nullifier })
   return post('/api/relay/bet', { proof, inputs }) as Promise<{ txHash: string }>
 }
 
@@ -108,7 +113,7 @@ export async function relaySettlement(
   proof: `0x${string}`,
   inputs: RelaySettlementInputs,
 ): Promise<{ txHash: string }> {
-  console.log('[polyshield:api] relaying SETTLE_CRED proof', { nullifier: inputs.nullifier })
+  devLog('[polyshield:api] relaying SETTLE_CRED proof', { nullifier: inputs.nullifier })
   return post('/api/relay/settlement', { proof, inputs }) as Promise<{ txHash: string }>
 }
 
@@ -117,7 +122,7 @@ export async function relayWithdrawal(
   inputs: RelayWithdrawalInputs,
   recipientAddress: string,
 ): Promise<{ txHash: string }> {
-  console.log('[polyshield:api] relaying WITHDRAWAL proof', { recipient: recipientAddress })
+  devLog('[polyshield:api] relaying WITHDRAWAL proof', { recipient: recipientAddress })
   return post('/api/relay/withdrawal', { proof, inputs, recipientAddress }) as Promise<{ txHash: string }>
 }
 
@@ -125,12 +130,12 @@ export async function relayBetCancel(
   proof: `0x${string}`,
   inputs: RelayBetCancelInputs,
 ): Promise<{ txHash: string }> {
-  console.log('[polyshield:api] relaying BET_CANCEL proof', { nullifier: inputs.nullifier })
+  devLog('[polyshield:api] relaying BET_CANCEL proof', { nullifier: inputs.nullifier })
   return post('/api/relay/bet-cancel', { proof, inputs }) as Promise<{ txHash: string }>
 }
 
 export async function fetchSettlement(marketId: string): Promise<SettlementRecord | null> {
-  console.log('[polyshield:api] fetching settlement for', marketId)
+  devLog('[polyshield:api] fetching settlement for', marketId)
   try {
     return await get(`/api/settlement/${encodeURIComponent(marketId)}`) as SettlementRecord
   } catch {
@@ -152,7 +157,7 @@ export async function fetchDevStatus(): Promise<DevStatus> {
 // Fetch the Merkle inclusion proof for a commitment leaf.
 // The proof-relay backend reconstructs the tree from on-chain LeafInserted events.
 export async function fetchMerklePath(commitment: `0x${string}`): Promise<MerkleProof> {
-  console.log('[polyshield:api] fetching merkle path for', commitment)
+  devLog('[polyshield:api] fetching merkle path for', commitment)
   return get(`/api/merkle-path/${commitment}`) as Promise<MerkleProof>
 }
 
@@ -265,6 +270,6 @@ export async function fetchCurrentMerkleRoot(
   const indexHex = index.toString(16).padStart(64, '0')
   const root = await call(treeAddress, `0xd539857a${indexHex}`) as `0x${string}`
 
-  console.log('[polyshield:api] fetchCurrentMerkleRoot →', root)
+  devLog('[polyshield:api] fetchCurrentMerkleRoot →', root)
   return root
 }

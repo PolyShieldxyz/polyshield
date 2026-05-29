@@ -186,6 +186,19 @@ export function getCurrentCashNote(wallet: `0x${string}`): Note | null {
   return freeNotes.sort((a, b) => (a.balance > b.balance ? -1 : 1))[0] ?? null
 }
 
+/**
+ * Return the current free note for a specific deposit index — i.e., the
+ * highest-nonce unspent note in that deposit's chain. Used by settlement to
+ * ensure the correct secret is derived; settlement proofs require
+ * Poseidon(secret, nonce−1) === nullifier_of_bet, which only holds when the
+ * note comes from the same deposit chain as the bet receipt.
+ */
+export function getFreeNoteForDeposit(wallet: `0x${string}`, depositIndex: number): Note | null {
+  const notes = getSpendableNotes(wallet).filter((n) => n.depositIndex === depositIndex)
+  if (notes.length === 0) return null
+  return notes.sort((a, b) => (a.nonce > b.nonce ? -1 : 1))[0] ?? null
+}
+
 export function getOpenBetReceipts(wallet: `0x${string}`): Note[] {
   return loadAll().filter(
     (n) =>
@@ -287,7 +300,7 @@ const depositedEvent = parseAbiItem(
   'event Deposited(address indexed depositor, bytes32 commitment, uint256 amount)',
 )
 const betAuthorizedEvent = parseAbiItem(
-  'event BetAuthorized(bytes32 indexed nullifier, bytes32 market_id, bytes32 position_id, uint64 expected_shares, uint256 bet_amount, uint64 price, bytes32 new_commitment)',
+  'event BetAuthorized(bytes32 indexed nullifier, bytes32 market_id, bytes32 position_id, uint64 expected_shares, uint256 bet_amount, uint64 price, uint8 outcome_side, bytes32 new_commitment)',
 )
 const settlementCreditedEvent = parseAbiItem(
   'event SettlementCredited(bytes32 indexed nullifier, bytes32 nullifier_of_bet, bytes32 new_commitment)',
@@ -449,9 +462,9 @@ export async function recoverNotesWithClient(
           try {
             const payout = await client.readContract({
               address: vaultAddress,
-              abi: [{ type: 'function', name: 'pendingCredit', inputs: [{ type: 'bytes32' }], outputs: [{ type: 'uint64' }], stateMutability: 'view' }],
+              abi: [{ type: 'function', name: 'pendingCredit', inputs: [{ type: 'bytes32' }, { type: 'uint8' }], outputs: [{ type: 'uint64' }], stateMutability: 'view' }],
               functionName: 'pendingCredit',
-              args: [receipt.condition_id!],
+              args: [receipt.condition_id!, receipt.side === 'NO' ? 1 : 0],
             }) as bigint
             newBalance = oldBalance + receipt.expectedShares * payout
           } catch {
@@ -519,17 +532,14 @@ export async function recoverNotesWithClient(
 }
 
 function inferBalanceFromCommitment(
-  secret: `0x${string}`,
-  nonce: bigint,
-  owner: `0x${string}`,
-  commitment: `0x${string}`,
+  _secret: `0x${string}`,
+  _nonce: bigint,
+  _owner: `0x${string}`,
+  _commitment: `0x${string}`,
 ): bigint | null {
-  const step = 1_000_000n
-  const max = 50_000_000_000n
-  for (let bal = 0n; bal <= max; bal += step) {
-    const c = computeCommitment(secret, bal, nonce, owner)
-    if (c.toLowerCase() === commitment.toLowerCase()) return bal
-  }
+  // Balance cannot be inferred by brute-force: non-integer-USDC balances (e.g. after
+  // fee deductions) would never be found, and the 50k-iteration loop freezes the UI.
+  // Callers should recover balance from on-chain event data instead.
   return null
 }
 

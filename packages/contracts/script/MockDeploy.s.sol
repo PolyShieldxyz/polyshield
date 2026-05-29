@@ -129,12 +129,14 @@ contract MockDeploy is Script {
         s_betCancel    = new BetCancelVerifier();
         s_cancelCredit = new CancelCreditVerifier();
 
-        s_vault.setVerifier(s_vault.BET_AUTH(),          address(s_betAuth));
-        s_vault.setVerifier(s_vault.SETTLEMENT_CREDIT(), address(s_settlement));
-        s_vault.setVerifier(s_vault.WITHDRAWAL(),        address(s_withdrawal));
-        s_vault.setVerifier(s_vault.BET_CANCEL(),        address(s_betCancel));
-        s_vault.setVerifier(s_vault.CANCEL_CREDIT(),     address(s_cancelCredit));
+        s_vault.proposeVerifier(s_vault.BET_AUTH(),          address(s_betAuth));
+        s_vault.proposeVerifier(s_vault.SETTLEMENT_CREDIT(), address(s_settlement));
+        s_vault.proposeVerifier(s_vault.WITHDRAWAL(),        address(s_withdrawal));
+        s_vault.proposeVerifier(s_vault.BET_CANCEL(),        address(s_betCancel));
+        s_vault.proposeVerifier(s_vault.CANCEL_CREDIT(),     address(s_cancelCredit));
         vm.stopBroadcast();
+        // acceptVerifier calls happen in a second pass after Node.js advances Anvil's
+        // clock past the 48-hour timelock. See MockAcceptVerifiers.s.sol + deploy.ts.
     }
 
     // ── Step 4: configure CTF market resolutions ──────────────────────────────

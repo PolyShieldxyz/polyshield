@@ -1,7 +1,26 @@
+import fs from "fs";
+import path from "path";
 import { ethers } from "ethers";
 import pino from "pino";
 import { submitFOKOrder } from "./orderBuilder";
 import { config } from "./config";
+
+const STATE_FILE = path.join(process.cwd(), "data", "event-listener-state.json");
+const SAFETY_BUFFER = 100;
+
+function loadLastBlock(): number {
+  try {
+    const data = JSON.parse(fs.readFileSync(STATE_FILE, "utf8")) as { lastBlock?: unknown };
+    return typeof data.lastBlock === "number" ? data.lastBlock : 0;
+  } catch {
+    return 0;
+  }
+}
+
+function saveLastBlock(blockNumber: number): void {
+  fs.mkdirSync(path.dirname(STATE_FILE), { recursive: true });
+  fs.writeFileSync(STATE_FILE, JSON.stringify({ lastBlock: blockNumber }));
+}
 
 const logger = pino({ name: "event-listener" });
 
@@ -44,11 +63,18 @@ async function catchUpMissedBets(
 ): Promise<void> {
   logger.info("event-listener: scanning for missed BetAuthorized events...");
   try {
+    const lastBlock = loadLastBlock();
+    const fromBlock = Math.max(0, lastBlock - SAFETY_BUFFER);
+    logger.info({ fromBlock, lastBlock }, "event-listener: catchup scan range");
+
     const filter = vault.filters.BetAuthorized();
-    const logs = await vault.queryFilter(filter, 0, "latest");
+    const logs = await vault.queryFilter(filter, fromBlock, "latest");
     logger.info({ count: logs.length }, "event-listener: historical BetAuthorized events found");
 
+    let maxBlock = lastBlock;
     for (const log of logs) {
+      if (log.blockNumber > maxBlock) maxBlock = log.blockNumber;
+
       const parsed = vault.interface.parseLog({ topics: log.topics as string[], data: log.data });
       if (!parsed) continue;
 
@@ -75,6 +101,8 @@ async function catchUpMissedBets(
         logger.error({ err, nullifier }, "event-listener: catchup failed for bet");
       }
     }
+
+    if (maxBlock > lastBlock) saveLastBlock(maxBlock);
   } catch (err) {
     logger.error({ err }, "event-listener: catchup scan failed");
   }
@@ -115,6 +143,7 @@ export function startEventListener(
         // The Signing Layer reads public event data only.
         // User note preimage (secret, balance, nonce) is never received here.
         await processBetEvent(nullifier, market_id, position_id, expected_shares, bet_amount, price, new_commitment, wallet, provider);
+        saveLastBlock(event.log.blockNumber);
       } catch (err) {
         logger.error({ err, nullifier }, "Failed to process BetAuthorized event");
       }

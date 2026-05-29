@@ -10,6 +10,8 @@ import {MockPoseidonT3} from "../src/mocks/MockPoseidonT3.sol";
 import {MockUSDC} from "../src/mocks/MockUSDC.sol";
 import {MockCTF} from "../src/mocks/MockCTF.sol";
 import {MockPUSD} from "../src/mocks/MockPUSD.sol";
+import {MockCollateralOnramp} from "../src/mocks/MockCollateralOnramp.sol";
+import {MockCollateralOfframp} from "../src/mocks/MockCollateralOfframp.sol";
 
 contract VaultTest is Test {
     Vault public vault;
@@ -23,6 +25,8 @@ contract VaultTest is Test {
     MockPoseidonT3 public poseidon;
     MockUSDC public usdc;
     MockCTF public ctf;
+    MockCollateralOnramp public onramp;
+    MockCollateralOfframp public offramp;
 
     address public owner = address(0x1111);
     address public operator = address(0x2222);
@@ -49,6 +53,9 @@ contract VaultTest is Test {
         poseidon = new MockPoseidonT3();
         usdc = new MockUSDC();
         ctf = new MockCTF(address(new MockPUSD()));
+        MockPUSD pusd = new MockPUSD();
+        onramp = new MockCollateralOnramp(address(usdc), address(pusd));
+        offramp = new MockCollateralOfframp(address(usdc), address(pusd));
 
         // Deploy infrastructure with vault address = this contract initially,
         // then we re-deploy with the actual vault address
@@ -61,8 +68,8 @@ contract VaultTest is Test {
             address(usdc),
             address(tree),
             address(registry),
-            address(0), // onramp (not tested)
-            address(0), // offramp (not tested)
+            address(onramp),
+            address(offramp),
             address(ctf),
             operator,
             depositWallet,
@@ -76,13 +83,21 @@ contract VaultTest is Test {
         betCancelVerifier = new MockVerifier(true);
         cancelCreditVerifier = new MockVerifier(true);
 
-        // Wire verifiers
+        // Wire verifiers — propose then accept after timelock
         vm.startPrank(owner);
-        vault.setVerifier(vault.BET_AUTH(), address(betAuthVerifier));
-        vault.setVerifier(vault.SETTLEMENT_CREDIT(), address(settlementVerifier));
-        vault.setVerifier(vault.WITHDRAWAL(), address(withdrawalVerifier));
-        vault.setVerifier(vault.BET_CANCEL(), address(betCancelVerifier));
-        vault.setVerifier(vault.CANCEL_CREDIT(), address(cancelCreditVerifier));
+        vault.proposeVerifier(vault.BET_AUTH(), address(betAuthVerifier));
+        vault.proposeVerifier(vault.SETTLEMENT_CREDIT(), address(settlementVerifier));
+        vault.proposeVerifier(vault.WITHDRAWAL(), address(withdrawalVerifier));
+        vault.proposeVerifier(vault.BET_CANCEL(), address(betCancelVerifier));
+        vault.proposeVerifier(vault.CANCEL_CREDIT(), address(cancelCreditVerifier));
+        vm.stopPrank();
+        vm.warp(block.timestamp + 48 hours + 1);
+        vm.startPrank(owner);
+        vault.acceptVerifier(vault.BET_AUTH());
+        vault.acceptVerifier(vault.SETTLEMENT_CREDIT());
+        vault.acceptVerifier(vault.WITHDRAWAL());
+        vault.acceptVerifier(vault.BET_CANCEL());
+        vault.acceptVerifier(vault.CANCEL_CREDIT());
         vm.stopPrank();
 
         // Fund Alice with USDC
@@ -389,6 +404,54 @@ contract VaultTest is Test {
         vault.creditSettlement(DUMMY_PROOF, inputs2);
     }
 
+    function test_creditSettlement_succeeds_marketIdAboveBN254P() public {
+        // Exercise the BN254 reduction path: when market_id >= BN254_P,
+        // resolveMarket writes pendingCredit at the reduced key, so creditSettlement
+        // must read from the same reduced key or it always reverts MarketNotResolved.
+        uint256 BN254_P = 21888242871839275222246405745257275088548364400416034343698204186575808495617;
+        bytes32 large_market_id = bytes32(BN254_P + 1);
+
+        vm.prank(alice);
+        vault.deposit(COMMITMENT_1, DEPOSIT_AMOUNT);
+        bytes32 root = _currentRoot();
+
+        vault.authorizeBet(DUMMY_PROOF, Vault.BetAuthPublicInputs({
+            merkle_root: root,
+            nullifier: NULLIFIER_1,
+            new_commitment: COMMITMENT_2,
+            bet_amount: 100 * 1e6,
+            price: 50_000_000,
+            expected_shares: 200_000_000,
+            market_id: large_market_id,
+            outcome_side: 0,
+            position_id: POSITION_ID
+        }));
+
+        vm.prank(operator);
+        vault.reportFilled(NULLIFIER_1);
+
+        uint256[] memory numerators = new uint256[](2);
+        numerators[0] = 1_000_000;
+        numerators[1] = 0;
+        ctf.setPayoutNumerators(large_market_id, numerators);
+        ctf.setPayoutDenominator(large_market_id, 1_000_000);
+        vm.prank(operator);
+        vault.resolveMarket(large_market_id);
+
+        bytes32 root2 = _currentRoot();
+        vault.creditSettlement(DUMMY_PROOF, Vault.SettlementPublicInputs({
+            merkle_root: root2,
+            nullifier: NULLIFIER_2,
+            new_commitment: COMMITMENT_3,
+            nullifier_of_bet: NULLIFIER_1,
+            market_id: large_market_id,
+            total_credit: 200_000_000
+        }));
+
+        (,,,,,, Vault.BetStatus status) = vault.betRecords(NULLIFIER_1);
+        assertEq(uint8(status), uint8(Vault.BetStatus.CREDITED));
+    }
+
     // =========================================================================
     // resolveMarket
     // =========================================================================
@@ -397,7 +460,7 @@ contract VaultTest is Test {
         _setupResolvableMarket();
         vm.prank(operator);
         vm.expectEmit(true, false, false, true);
-        emit Vault.MarketResolved(MARKET_ID, 1, uint64(block.timestamp));
+        emit Vault.MarketResolved(MARKET_ID, uint64(block.timestamp));
         vault.resolveMarket(MARKET_ID);
         assertEq(vault.pendingCredit(MARKET_ID, 0), 1); // YES side payout = 1
         assertEq(vault.pendingCredit(MARKET_ID, 1), 0); // NO side payout = 0
@@ -765,10 +828,25 @@ contract VaultTest is Test {
     // Admin
     // =========================================================================
 
-    function test_setVerifier_onlyOwner() public {
+    function test_proposeVerifier_onlyOwner() public {
         vm.prank(attacker);
         vm.expectRevert();
-        vault.setVerifier(0, address(0)); // 0 == BET_AUTH; avoid consuming prank on view call
+        vault.proposeVerifier(0, address(betAuthVerifier));
+    }
+
+    function test_proposeVerifier_rejectsZeroAddress() public {
+        vm.prank(owner);
+        vm.expectRevert(Vault.ZeroAddress.selector);
+        vault.proposeVerifier(0, address(0));
+    }
+
+    function test_acceptVerifier_rejectsBeforeTimelock() public {
+        address newVerifier = address(new MockVerifier(true));
+        vm.prank(owner);
+        vault.proposeVerifier(0, newVerifier);
+        vm.prank(owner);
+        vm.expectRevert(Vault.VerifierTimelockActive.selector);
+        vault.acceptVerifier(0);
     }
 
     function test_setSigningLayerOperator_onlyOwner() public {

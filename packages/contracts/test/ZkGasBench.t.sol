@@ -97,6 +97,7 @@ contract ZkGasBenchTest is Test {
     // if the files don't exist (requires running pnpm generate:test-proofs first).
 
     function test_gasBench_Groth16_betAuth() public {
+        vm.skip(true); // Requires Benchmarking/groth16/bench_out/ artifacts — run pnpm bench:groth16 first
         string memory path = string.concat(BENCH, "bet_auth_proof.bin");
         bytes memory proof = vm.readFileBinary(path);
         bool ok = v_bet_auth.verify(proof, _betAuthInputs());
@@ -104,6 +105,7 @@ contract ZkGasBenchTest is Test {
     }
 
     function test_gasBench_Groth16_settlement() public {
+        vm.skip(true); // Requires Benchmarking/groth16/bench_out/ artifacts — run pnpm bench:groth16 first
         string memory path = string.concat(BENCH, "settlement_credit_proof.bin");
         bytes memory proof = vm.readFileBinary(path);
         bool ok = v_settlement.verify(proof, _settlementInputs());
@@ -111,6 +113,7 @@ contract ZkGasBenchTest is Test {
     }
 
     function test_gasBench_Groth16_withdrawal() public {
+        vm.skip(true); // Requires Benchmarking/groth16/bench_out/ artifacts — run pnpm bench:groth16 first
         string memory path = string.concat(BENCH, "withdrawal_proof.bin");
         bytes memory proof = vm.readFileBinary(path);
         bool ok = v_withdrawal.verify(proof, _withdrawalInputs());
@@ -118,6 +121,7 @@ contract ZkGasBenchTest is Test {
     }
 
     function test_gasBench_Groth16_betCancel() public {
+        vm.skip(true); // Requires Benchmarking/groth16/bench_out/ artifacts — run pnpm bench:groth16 first
         string memory path = string.concat(BENCH, "bet_cancel_proof.bin");
         bytes memory proof = vm.readFileBinary(path);
         bool ok = v_bet_cancel.verify(proof, _betCancelInputs());
@@ -125,6 +129,7 @@ contract ZkGasBenchTest is Test {
     }
 
     function test_gasBench_Groth16_cancelCredit() public {
+        vm.skip(true); // Requires Benchmarking/groth16/bench_out/ artifacts — run pnpm bench:groth16 first
         string memory path = string.concat(BENCH, "cancel_credit_proof.bin");
         bytes memory proof = vm.readFileBinary(path);
         bool ok = v_cancel_credit.verify(proof, _cancelCreditInputs());
