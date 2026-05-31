@@ -2,7 +2,8 @@ import fs from "fs";
 import path from "path";
 import { ethers } from "ethers";
 import pino from "pino";
-import { submitFOKOrder } from "./orderBuilder";
+import { submitFOKOrder, submitLimitOrder } from "./orderBuilder";
+import { getLimitOrder } from "./limitOrderStore";
 import { config } from "./config";
 
 const STATE_FILE = path.join(process.cwd(), "data", "event-listener-state.json");
@@ -44,11 +45,18 @@ async function processBetEvent(
   wallet: ethers.Wallet,
   provider: ethers.JsonRpcProvider
 ): Promise<void> {
-  await submitFOKOrder(
-    { nullifier, market_id, position_id, expected_shares, bet_amount, price, new_commitment },
-    wallet,
-    provider
-  );
+  const orderEvent = { nullifier, market_id, position_id, expected_shares, bet_amount, price, new_commitment };
+
+  // FC-4: if the frontend registered a limit-order intent for this nullifier, submit
+  // a resting GTC/GTD order; otherwise default to FOK (unchanged behavior).
+  const intent = getLimitOrder(nullifier);
+  if (intent) {
+    logger.info({ nullifier, order_type: intent.order_type }, "limit-order intent found — submitting resting order");
+    await submitLimitOrder(orderEvent, { orderType: intent.order_type, expiration: intent.expiration }, wallet, provider);
+    return;
+  }
+
+  await submitFOKOrder(orderEvent, wallet, provider);
 }
 
 /**

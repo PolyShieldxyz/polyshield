@@ -34,14 +34,14 @@ Polyshield's privacy guarantee is: **which depositor authorized which bet is hid
 
 ## 2. Signing Layer Attacks
 
-### T4 — Signing Layer Front-Running (v1 Critical)
-**Severity:** CRITICAL (for v1)
-**Description:** In v1, the centralized signing operator receives bet parameters before executing the Polymarket order. The operator can read the bet (market, side, amount) and place their own order first, then execute the user's order, profiting from the price impact of the user's bet.
-**Mitigation (v1):** Implement a commit-reveal scheme: the user publishes a commitment to the bet parameters on-chain first (a hash of the plaintext bet descriptor). After N blocks, the plaintext parameters are revealed and the operator executes. This makes front-running futile (the price has already moved after the commit).
-  - Risk: this adds latency (block time * N, approximately 2-6 seconds on Polygon) and an additional transaction.
-  - Alternative: accept front-running risk in v1 prototype (not acceptable for production).
-**Status:** OPEN (commit-reveal mechanism not yet designed)
-**Note:** This attack is eliminated in v2 (TEE sees parameters only inside the enclave) and v3 (threshold signers see parameters but cannot individually act on them without threshold cooperation).
+### T4 — Signing Layer Front-Running (v1)
+**Severity:** MEDIUM (for v1; reassessed 2026-05-31, see Q26)
+**Description:** In v1, the centralized signing operator receives bet parameters (market, side, amount, price) before executing the Polymarket order. Two sub-risks must be separated:
+  - **Degraded-fill front-running (mitigated by design):** bets are FOK at a user-set limit price (Q4/Q7). If the operator trades ahead and moves the price, the user's FOK simply fails to fill (`FOK_ORDER_NOT_FILLED_ERROR`) and the bet_amount is reclaimed via Bet Cancellation Credit. The operator cannot make the user overpay or fill them worse than their limit, so this form is already capped by the FOK/limit-price design.
+  - **Information leak / copy-trading (residual):** the operator must read the plaintext bet to construct and sign the order, so it learns the user's directional view and can trade it on a side account. This is the alpha-leak Polyshield exists to kill, relocated from the public chain to the operator.
+**Mitigation (v1):** Accept the information-leak residual under operational policy (project-run operator; no proprietary trading on vault markets; documented). Commit-reveal is rejected: it defends against third parties racing a revealed mempool tx, not against the *executor itself*, which by definition reads the plaintext at execution time. You cannot have the operator sign an order it cannot read, so commit-reveal adds latency and a transaction without addressing the residual.
+**Status:** ACCEPTED RISK (v1 info-leak); degraded-fill capped by FOK/limit price; resolved cryptographically in v2. See Q26.
+**Note:** The residual is eliminated in v2 (TEE sees parameters only inside the enclave). v3/threshold signing has been dropped from the roadmap (Q3).
 
 ### T5 — Signing Layer Censorship
 **Severity:** HIGH (for v1)
@@ -52,8 +52,8 @@ Polyshield's privacy guarantee is: **which depositor authorized which bet is hid
 ### T6 — Vault EOA Private Key Compromise
 **Severity:** CRITICAL
 **Description:** If the Polymarket signing EOA's private key is compromised, an attacker can drain the vault's Polymarket balance (place bets they control, or transfer USDC out of the Polymarket account). The Vault contract's USDC holdings (not yet sent to Polymarket) are unaffected.
-**Mitigation:** Key stored in hardware HSM or secrets manager. Periodic key rotation with governance. Circuit breaker: if an unexpected Polymarket transaction originates from the vault EOA without a corresponding on-chain `BetAuthorized` event, halt all operations and alert.
-**Status:** OPEN (key management design not finalized)
+**Mitigation:** The blast radius is bounded to whatever sits in the Polymarket Deposit Wallet at the moment of compromise, NOT the whole pool: the Vault contract releases USDC only against ZK-verified proofs, so the EOA key alone cannot pull the at-rest majority. The primary lever is therefore bounding the in-flight float; FC-6's governance-set `maxInFlight` ceiling caps both this blast radius and T13's stuck-capital exposure. Secondary hardening (travels with the same collateral-model decision): KMS/HSM-backed signing so the raw key is never extractable (CLAUDE.md's "env var only" is acceptable for local dev only), plus an Indexer circuit breaker that halts signing on any EOA / Deposit-Wallet action lacking a matching on-chain event. EOA rotation is Q12 (v2).
+**Status:** PARKED on FC-6 (bounded working-buffer collateral model) pending Arya's manager's decision on the USDC/pUSD deposit algorithm. No separate question.
 
 ---
 
@@ -67,9 +67,15 @@ Polyshield's privacy guarantee is: **which depositor authorized which bet is hid
 
 ### T8 — Stale Merkle Root
 **Severity:** HIGH
-**Description:** Between when a user generates their ZK proof (using the current Merkle root) and when they submit the proof on-chain, other users may have made deposits or state transitions, changing the Merkle root. The proof will reference an outdated root and be rejected.
-**Mitigation:** The Vault contract maintains a rolling window of the last 30 Merkle roots (`recentRoots[30]`). The proof is valid if its `merkle_root` matches any root in the window. This is the same approach as Tornado Cash's `MerkleTreeWithHistory`.
-**Status:** DESIGN LEVEL
+**Description:** Between when a user generates their ZK proof (using a Merkle root) and when they submit the proof on-chain, other users may have made deposits or state transitions, each of which inserts a leaf and produces a new root. If the referenced root has been evicted from the history window by the time the tx executes, the proof is rejected (`UnknownRoot`).
+**Mitigation:** The Vault contract maintains a rolling window of the last 30 Merkle roots (`recentRoots[30]`). The proof is valid if its `merkle_root` matches any root in the window (`CommitmentMerkleTree.isKnownRoot`). This is the same approach as Tornado Cash's `MerkleTreeWithHistory`.
+
+**Clarification (2026-05-30): this does NOT serialize state changes to one transaction per block.** The root changes on every `tree.insert` and `merkle_root` is a public input to every proof, but concurrency is safe for two reasons: (1) membership is monotonic, a leaf present under root R is present under every later root; (2) an old root plus its old path verify together, because the circuit checks `computed_root == merkle_root` and the contract accepts R as long as it is within the last 30 roots, so users never refresh their path mid-flight. Many state-changing transactions can therefore land in the same block, each carrying whatever recent root it was built against. The only true serialization point is per-note nullifier double-spend (T7), which is intended.
+
+**Real constraint:** the referenced root must still be among the last `HISTORY_SIZE` (currently 30) roots when the tx executes. Each successful state transition inserts exactly one leaf = one new root, so if more than 30 inserts land between proof-build and inclusion, the root is stale. With 30s-2min client proving times, 30 inserts under load is plausible and would cause stale-root reverts and forced rebuilds.
+
+**Scaling plan (FC-3 in `docs/future-changes.md`):** bump `HISTORY_SIZE` to a much larger value (e.g. 256) and switch `isKnownRoot` from the O(HISTORY_SIZE) array scan to a `mapping(bytes32 => bool)` lookup with a ring buffer for eviction, making a large window O(1) per verify. No circuit changes required.
+**Status:** DESIGN LEVEL (mitigation correct; window-scaling tracked as FC-3)
 
 ### T9 — Withdrawal Front-Running
 **Severity:** HIGH
@@ -86,8 +92,12 @@ Polyshield's privacy guarantee is: **which depositor authorized which bet is hid
 ### T11 — Circuit Upgrade Breaking Existing Commitments
 **Severity:** HIGH
 **Description:** If a bug is found in a ZK circuit and the verifier contract must be upgraded, existing commitments generated under the old circuit may be invalidated (if the new circuit has different public inputs) or remain vulnerable (if old proofs can still be generated against the old verifier).
-**Mitigation:** Commitment structure must include a circuit version tag. The Vault maintains a registry of (circuit_version => verifier_address). A commitment is always redeemable against the verifier it was created under. New commitments use the newest circuit version.
-**Status:** DESIGN LEVEL (circuit versioning not yet formally specified)
+**Mitigation (corrected 2026-05-31, see Q27):** The note format `Poseidon4(secret, balance, nonce, owner_address)` is frozen (a protocol constant), and commitments are bare hashes in the tree, not bound to any circuit; only *proofs* bind to a verifier. So three upgrade cases must be handled differently, and the previous "always redeemable against the verifier it was created under" guidance is wrong for the common case:
+  - **Soundness bug, public inputs unchanged (common):** the buggy verifier must be REVOKED, not kept live. Because the note format is frozen, a fixed verifier with identical public inputs spends the exact same existing notes, so revoke-and-replace loses nothing. Keeping the old verifier enabled (as the prior text implied) is the actual danger.
+  - **Public-input change (e.g. Q4 adding `price`):** treat as a new circuit version; the contract may accept both during a transition window. Notes are unaffected because the format did not change.
+  - **Note-format change:** the only case that truly invalidates commitments. Forbidden without sign-off; if ever forced, needs leaf-level version tags and a dual-tree migration with old notes still spendable via the old (sound) circuit.
+  Implement a `mapping(circuitId => mapping(version => address))` verifier registry with an active-version pointer and a per-verifier enable/disable flag, plus an emergency pause that can halt a specific verifier the instant unsoundness is found.
+**Status:** DESIGN LEVEL. Registry + emergency-pause design captured in Q27.
 
 ---
 
@@ -102,8 +112,8 @@ Polyshield's privacy guarantee is: **which depositor authorized which bet is hid
 ### T13 — Vault Undercollateralization
 **Severity:** HIGH
 **Description:** Users' USDC is partially held in the Vault contract and partially held in the Polymarket account (as active bet collateral). If users submit simultaneous Withdrawal proofs while the Vault's liquid USDC is low (most of it is in active Polymarket positions), withdrawals will revert.
-**Mitigation:** The Vault must reserve each depositor's initial deposit amount separately from trading capital. Specifically: the Vault contract holds `sum(all deposits)` in USDC. Funds flow to Polymarket only when bets are placed and return when markets settle. The Vault should track the total amount "in flight" (in active Polymarket positions) and enforce that `vault_usdc_balance >= sum(committed_deposits) - sum(in_flight_amounts)` before accepting new bet authorizations.
-**Status:** OPEN (in-flight tracking mechanism not yet designed)
+**Mitigation:** In the as-built model (FC-6, `collateral-flow-audit.md`) deposits rest as USDC in the Vault; capital reaches Polymarket only through a separate bulk operator call (`fundPolymarketWallet`), not per-deposit or per-bet. The note is debited at `authorizeBet` in the same step the funds are earmarked, so the bet leg is self-balancing (`liquid_USDC == sum(unspent note balances)` through the bet). The real exposure is bounded by how much capital is ever deployed to Polymarket at once, which FC-6's governance-set `maxInFlight` ceiling caps. The remaining ordering rule (settlement must not credit a note before the redeemed pUSD has offramped back to the Vault) is part of the same collateral-model work. `InsufficientLiquidity` in `withdraw` is the backstop.
+**Status:** PARKED on FC-6 (bounded working-buffer collateral model) pending Arya's manager's decision on the USDC/pUSD deposit algorithm. No separate question.
 
 ### T14 — Protocol Fee Claiming Bypass
 **Severity:** MEDIUM
@@ -155,26 +165,37 @@ Polyshield's privacy guarantee is: **which depositor authorized which bet is hid
 
 ---
 
-## 6. Attack Surface Summary
+## 6. Soundness Attacks
+
+### T20: Deposit Balance Forgery (Committed Balance != Deposited Amount)
+**Severity:** CRITICAL
+**Description:** `Vault.deposit(bytes32 commitment, uint256 amount)` transfers `amount` USDC and inserts `commitment` into the tree, but it cannot read the `balance` field inside the commitment (the commitment hides it), and there is no deposit-time ZK proof. Every spending circuit checks balance only relatively (`bet_auth`: `current_balance >= bet_amount`; `withdrawal`: `withdrawal_amount <= final_balance`). Nothing ties the committed `balance` to the deposited `amount`. A depositor can call `deposit(Poseidon4(secret, 200e6, 0, owner), amount = 100e6)`: the contract pulls 100 USDC but inserts a commitment that opens to a 200 USDC balance. A later valid withdrawal for 200 USDC passes every assertion (the note really is in the tree; `200 <= 200`) and pays out 200, stealing 100 from the shared pool. The `InsufficientLiquidity` guard in `withdraw` only makes the loss surface later (the pool drains and honest users cannot withdraw); it is not a defense. `owner_address` is likewise unbound at deposit, so W-to-W is unenforced at the entry point.
+**Mitigation (SOLVED, direction approved, see FC-2 in `docs/future-changes.md`):** Re-instate the deposit proof as MANDATORY (prior docs wrongly classed it optional/trivial). Add a small `deposit` circuit: private `secret`; public `(commitment, amount, owner_address)`; constraint `commitment == Poseidon4(secret, amount, 0, owner_address)`. `Vault.deposit` becomes `deposit(proof, commitment, amount)` and calls the verifier with public inputs `(commitment, amount, uint256(uint160(msg.sender)))`, forcing `balance == amount`, `nonce == 0`, and `owner_address == msg.sender`, with `secret` still private. No change to the Poseidon4 commitment formula or the four existing circuits; one new verifier slot (`DEPOSIT = 5`). A global "total committed == total deposited" invariant is uncheckable per-note without revealing balances and only fails after the theft, so it is not an acceptable substitute.
+**Status:** SOLVED at design level (mandatory deposit proof). Treat as a blocker for any deposit-handling code until implemented.
+
+---
+
+## 7. Attack Surface Summary
 
 | # | Attack | Severity | Mitigation Status |
 |---|---|---|---|
 | T1 | Bet descriptor visibility | LOW | Closed (not a deanonymization vector) |
 | T2 | Merkle leaf timing correlation | MEDIUM | Partial |
 | T3 | Small anonymity set at launch | HIGH | Open |
-| T4 | Signing layer front-running (v1) | CRITICAL | Open (commit-reveal needed) |
+| T4 | Signing layer front-running (v1) | MEDIUM | Accepted v1 (FOK/limit cap; info-leak); v2 TEE (Q26) |
 | T5 | Signing layer censorship (v1) | HIGH | Accepted (v1) |
-| T6 | Vault EOA key compromise | CRITICAL | Open |
+| T6 | Vault EOA key compromise | CRITICAL | Parked on FC-6 (maxInFlight blast-radius cap) |
 | T7 | Nullifier double-spend | CRITICAL | Design correct |
 | T8 | Stale Merkle root | HIGH | Design correct |
 | T9 | Withdrawal front-running | HIGH | Design correct (private recipient) |
 | T10 | Invalid proof spam | LOW | Accepted |
-| T11 | Circuit upgrade breaks commitments | HIGH | Design level |
+| T11 | Circuit upgrade breaks commitments | HIGH | Design level (registry + pause, Q27) |
 | T12 | Note grinding | HIGH | Design level |
-| T13 | Vault undercollateralization | HIGH | Open |
+| T13 | Vault undercollateralization | HIGH | Parked on FC-6 |
 | T14 | Fee bypass | MEDIUM | Open |
 | T15 | Polymarket account ban | HIGH | Open |
 | T16 | API downtime during bet window | MEDIUM | Open |
 | T17 | Note preimage loss | HIGH | Open |
 | T18 | Proof Relay IP/timing correlation | HIGH | Open |
 | T19 | Frontend direct transaction (impl risk) | CRITICAL | Design level |
+| T20 | Deposit balance forgery (committed != deposited) | CRITICAL | Solved (mandatory deposit proof, FC-2) |

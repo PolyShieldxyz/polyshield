@@ -21,51 +21,53 @@ const MOCK_CTF_ABI = [
 ];
 
 /**
- * When a FOK order fills, mint CTF shares to the deposit wallet so that the
- * signing layer's redemption pipeline finds actual shares and exercises the real
- * pUSD → USDC → Vault path instead of the mockInfuseVaultUsdc shortcut.
- *
- * sharesAmount ≈ makerAmount / price (both in USDC, converted to 1e6 units).
+ * Mint `shares1e6` CTF shares (1e6-scaled) of `tokenId` to the deposit wallet so
+ * that the signing layer's redemption pipeline finds actual shares and exercises
+ * the real pUSD → USDC → Vault path. Exported so the FC-4 limit-order admin
+ * endpoint can mint exactly the partially/fully filled share count.
  */
-async function mintCTFSharesOnFill(
-  tokenId: string,
-  makerAmountStr: string,
-  priceStr: string
-): Promise<void> {
+export async function mintCTFShares(tokenId: string, shares1e6: number): Promise<void> {
   const ctfAddress = process.env["CTF_ADDRESS"];
   const depositWallet = process.env["DEPOSIT_WALLET_ADDRESS"];
   const deployerKey = process.env["DEPLOYER_PRIVATE_KEY"];
   const rpcUrl = process.env["POLYGON_RPC_URL"] ?? process.env["ANVIL_RPC_URL"] ?? "http://127.0.0.1:8545";
 
   if (!ctfAddress || !depositWallet || !deployerKey) {
-    console.warn("[clob] mintCTFSharesOnFill: missing CTF_ADDRESS / DEPOSIT_WALLET_ADDRESS / DEPLOYER_PRIVATE_KEY — skipping");
+    console.warn("[clob] mintCTFShares: missing CTF_ADDRESS / DEPOSIT_WALLET_ADDRESS / DEPLOYER_PRIVATE_KEY — skipping");
     return;
   }
+  if (shares1e6 <= 0) return;
 
   try {
     const provider = new ethers.JsonRpcProvider(rpcUrl);
     const signer = new ethers.Wallet(deployerKey, provider);
     const ctf = new ethers.Contract(ctfAddress, MOCK_CTF_ABI, signer);
+    const positionId = BigInt(tokenId); // tokenId is the position id (uint256 as hex string)
 
-    // Convert decimal USDC amounts to micro-USDC (1e6 units).
-    const betAmount = Math.floor(parseFloat(makerAmountStr) * 1e6);
-    const price = parseFloat(priceStr);
-    const sharesAmount = price > 0 ? Math.floor(betAmount / price) : betAmount;
-    const sharesAmountBigInt = BigInt(sharesAmount);
-
-    // tokenId is the position id (uint256 as hex string).
-    const positionId = BigInt(tokenId);
-
-    const tx = await ctf.mintShares(depositWallet, positionId, sharesAmountBigInt);
+    const tx = await ctf.mintShares(depositWallet, positionId, BigInt(Math.floor(shares1e6)));
     await tx.wait(1);
     console.log(
       `[clob] mintShares: depositWallet=${depositWallet.slice(0, 8)}... ` +
-      `positionId=${tokenId.slice(0, 10)}... shares=${sharesAmount}`
+      `positionId=${tokenId.slice(0, 10)}... shares=${Math.floor(shares1e6)}`
     );
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     console.warn(`[clob] mintShares failed (non-fatal): ${msg}`);
   }
+}
+
+/**
+ * When a FOK order fills, mint CTF shares ≈ makerAmount / price (both 1e6 units).
+ */
+async function mintCTFSharesOnFill(
+  tokenId: string,
+  makerAmountStr: string,
+  priceStr: string
+): Promise<void> {
+  const betAmount = Math.floor(parseFloat(makerAmountStr) * 1e6);
+  const price = parseFloat(priceStr);
+  const sharesAmount = price > 0 ? Math.floor(betAmount / price) : betAmount;
+  await mintCTFShares(tokenId, sharesAmount);
 }
 
 ordersRouter.post("/", (req: Request, res: Response) => {
@@ -89,8 +91,29 @@ ordersRouter.post("/", (req: Request, res: Response) => {
   console.log(
     `[clob] POST /order #${state.ordersReceived.length}` +
     ` tokenId=${received.tokenId.slice(0, 10)}...` +
-    ` behavior=${state.fillBehavior}`
+    ` type=${received.orderType} behavior=${state.fillBehavior}`
   );
+
+  // FC-4: GTC/GTD limit orders rest on the book. Return status "live" and record
+  // the resting order; a fill is driven later via POST /admin/limit-fill and the
+  // signing layer polls GET /order/:id for the terminal state. FOK is unchanged.
+  const orderTypeUpper = received.orderType.toUpperCase();
+  if (orderTypeUpper === "GTC" || orderTypeUpper === "GTD") {
+    state.restingOrders[orderId] = {
+      orderID: orderId,
+      tokenId: received.tokenId,
+      side: received.side.toUpperCase(),
+      orderType: orderTypeUpper,
+      price: received.price,
+      size: received.size,
+      createdAt: now,
+      status: "live",
+      filledShares: 0,
+      spentAmount: 0,
+    };
+    res.json({ success: true, errorMsg: "", orderID: orderId, transactTime: now, status: "live" });
+    return;
+  }
 
   // Timeout: hang and never respond (the signing layer must have its own timeout)
   if (state.fillBehavior === "timeout") {
@@ -102,7 +125,11 @@ ordersRouter.post("/", (req: Request, res: Response) => {
     switch (state.fillBehavior) {
       case "fill":
         // Mint CTF shares asynchronously — fire-and-forget, does not block the response.
-        void mintCTFSharesOnFill(received.tokenId, received.size, received.price);
+        // Only BUY orders acquire shares; a SELL (FC-1 position close) realizes proceeds
+        // and must not mint, so the signing layer's reportSold reflects the sale.
+        if (received.side.toUpperCase() !== "SELL") {
+          void mintCTFSharesOnFill(received.tokenId, received.size, received.price);
+        }
         res.json({
           success: true,
           errorMsg: "",
@@ -142,4 +169,19 @@ ordersRouter.post("/", (req: Request, res: Response) => {
   } else {
     respond();
   }
+});
+
+/**
+ * GET /order/:id  (FC-4)
+ * Returns the current lifecycle state of a resting GTC/GTD limit order. The
+ * signing layer polls this until the order reaches a terminal status
+ * (matched / partial / cancelled) and then maps it to one operator report.
+ */
+ordersRouter.get("/:id", (req: Request, res: Response) => {
+  const order = state.restingOrders[req.params.id];
+  if (!order) {
+    res.status(404).json({ error: "order not found" });
+    return;
+  }
+  res.json(order);
 });

@@ -4,7 +4,7 @@ pragma solidity ^0.8.24;
 import {Script} from "forge-std/Script.sol";
 import {Vault} from "../src/Vault.sol";
 
-/// @notice Second pass of the mock deploy: accept all five verifiers after the
+/// @notice Second pass of the mock deploy: accept all verifiers after the
 /// 48-hour timelock has been advanced by deploy.ts via evm_increaseTime + evm_mine.
 ///
 /// Usage (called by deploy.ts, never run manually):
@@ -23,6 +23,9 @@ contract MockAcceptVerifiers is Script {
         vault.acceptVerifier(vault.WITHDRAWAL());
         vault.acceptVerifier(vault.BET_CANCEL());
         vault.acceptVerifier(vault.CANCEL_CREDIT());
+        vault.acceptVerifier(vault.DEPOSIT());
+        vault.acceptVerifier(vault.POSITION_CLOSE());
+        vault.acceptVerifier(vault.PARTIAL_CREDIT());
         vm.stopBroadcast();
     }
 }

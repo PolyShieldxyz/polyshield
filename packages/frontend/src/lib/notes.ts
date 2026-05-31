@@ -43,6 +43,8 @@ export interface Note {
   expectedShares?: bigint
   /** Nullifier of the note spent at bet auth (Vault betRecords key). */
   nullifier_of_bet?: `0x${string}`
+  /** CTF position/token id for the bet (FC-1: needed to submit a FOK SELL to close). */
+  position_id?: `0x${string}`
   /** CTF conditionId reduced to BN254 field — the circuit_key used by the Vault. */
   condition_id?: `0x${string}`
   /** Raw unreduced conditionId (keccak256). Use this to recompute circuit_key with correct BN254_P. */
@@ -294,6 +296,7 @@ type ChainNoteState = {
   nullifier: `0x${string}`
   kind: NoteKind
   spent: boolean
+  createdAt: number // block timestamp of when this note state was produced
 }
 
 const depositedEvent = parseAbiItem(
@@ -314,6 +317,13 @@ const naCancelEvent = parseAbiItem(
 const withdrawnEvent = parseAbiItem(
   'event Withdrawn(bytes32 indexed nullifier, address recipient, uint256 amount, bytes32 new_commitment)',
 )
+// FC-1: position close events.
+const betSoldEvent = parseAbiItem(
+  'event BetSold(bytes32 indexed nullifier_of_bet, uint64 sold_shares, uint64 proceeds)',
+)
+const positionClosedEvent = parseAbiItem(
+  'event PositionClosed(bytes32 indexed nullifier, bytes32 nullifier_of_bet, bytes32 new_commitment, bool fullClose)',
+)
 
 /**
  * Reconstruct notes by scanning on-chain Vault events and replaying state per deposit index.
@@ -323,10 +333,10 @@ export async function recoverNotes(
   signMessageAsync: (args: { message: string }) => Promise<`0x${string}`>,
   vaultAddress: `0x${string}`,
   rpcUrl = process.env.NEXT_PUBLIC_CHAIN_RPC ?? 'http://127.0.0.1:8545',
-  maxIndex = 10,
+  gapLimit = 5,
 ): Promise<Note[]> {
   const client = createPublicClient({ transport: http(rpcUrl) })
-  return recoverNotesWithClient(address, signMessageAsync, client, vaultAddress, maxIndex)
+  return recoverNotesWithClient(address, signMessageAsync, client, vaultAddress, gapLimit)
 }
 
 export async function recoverNotesWithClient(
@@ -334,29 +344,76 @@ export async function recoverNotesWithClient(
   signMessageAsync: (args: { message: string }) => Promise<`0x${string}`>,
   client: PublicClient,
   vaultAddress: `0x${string}`,
-  maxIndex = 10,
+  // FC-5 gap 2: stop after this many CONSECUTIVE deposit indices with no matching
+  // deposit, rather than a fixed cap. `hardCap` bounds the scan defensively.
+  gapLimit = 5,
+  hardCap = 1000,
 ): Promise<Note[]> {
   const fromBlock = 0n
-  const [deposits, bets, settlements, betCancels, naCancels, withdrawals] = await Promise.all([
-    client.getLogs({ address: vaultAddress, event: depositedEvent, args: { depositor: address }, fromBlock }),
-    client.getLogs({ address: vaultAddress, event: betAuthorizedEvent, fromBlock }),
-    client.getLogs({ address: vaultAddress, event: settlementCreditedEvent, fromBlock }),
-    client.getLogs({ address: vaultAddress, event: betCancelEvent, fromBlock }),
-    client.getLogs({ address: vaultAddress, event: naCancelEvent, fromBlock }),
-    client.getLogs({ address: vaultAddress, event: withdrawnEvent, fromBlock }),
-  ])
+  const [deposits, bets, settlements, betCancels, naCancels, withdrawals, betSolds, positionCloseds] =
+    await Promise.all([
+      client.getLogs({ address: vaultAddress, event: depositedEvent, args: { depositor: address }, fromBlock }),
+      client.getLogs({ address: vaultAddress, event: betAuthorizedEvent, fromBlock }),
+      client.getLogs({ address: vaultAddress, event: settlementCreditedEvent, fromBlock }),
+      client.getLogs({ address: vaultAddress, event: betCancelEvent, fromBlock }),
+      client.getLogs({ address: vaultAddress, event: naCancelEvent, fromBlock }),
+      client.getLogs({ address: vaultAddress, event: withdrawnEvent, fromBlock }),
+      client.getLogs({ address: vaultAddress, event: betSoldEvent, fromBlock }),
+      client.getLogs({ address: vaultAddress, event: positionClosedEvent, fromBlock }),
+    ])
+
+  // FC-5 gap 4: real timestamps. Prefetch the block timestamp for every referenced
+  // block once, so recovered notes/activity carry true on-chain times (not Date.now()).
+  const blockNums = new Set<bigint>()
+  for (const e of [...deposits, ...bets, ...settlements, ...betCancels, ...naCancels, ...withdrawals, ...positionCloseds]) {
+    if (e.blockNumber != null) blockNums.add(e.blockNumber)
+  }
+  const tsByBlock = new Map<bigint, number>()
+  await Promise.all([...blockNums].map(async (bn) => {
+    try {
+      const blk = await client.getBlock({ blockNumber: bn })
+      tsByBlock.set(bn, Number(blk.timestamp) * 1000)
+    } catch {
+      /* leave unset → falls back to Date.now() below */
+    }
+  }))
+  const tsOf = (bn?: bigint): number => (bn != null ? tsByBlock.get(bn) ?? Date.now() : Date.now())
+
+  // FC-1: queue of operator-reported sale proceeds per bet, consumed in block order
+  // by each PositionClosed (handles repeated partial closes against the same bet).
+  const soldByBet = new Map<string, Array<{ proceeds: bigint; soldShares: bigint }>>()
+  for (const s of [...betSolds].sort((a, b) => Number((a.blockNumber ?? 0n) - (b.blockNumber ?? 0n)))) {
+    const k = (s.args.nullifier_of_bet as string).toLowerCase()
+    const arr = soldByBet.get(k) ?? []
+    arr.push({ proceeds: s.args.proceeds as bigint, soldShares: s.args.sold_shares as bigint })
+    soldByBet.set(k, arr)
+  }
 
   const recovered: Note[] = []
   const receiptByBetNullifier = new Map<string, Note>()
+  // FC-5 gap 1: rebuild the activity log from chain so realized P&L / history survive a wipe.
+  const activity: WalletActivityEvent[] = []
 
-  for (let index = 0; index < maxIndex; index++) {
+  let consecutiveEmpty = 0
+  for (let index = 0; index < hardCap && consecutiveEmpty < gapLimit; index++) {
     const secret = await deriveSecret(signMessageAsync, address, index)
     const deposit = deposits.find((d) => {
       const amt = d.args.amount!
       const c = computeCommitment(secret, amt, 0n, address)
       return c.toLowerCase() === d.args.commitment!.toLowerCase()
     })
-    if (!deposit) continue
+    if (!deposit) { consecutiveEmpty++; continue }
+    consecutiveEmpty = 0
+
+    const depositTs = tsOf(deposit.blockNumber ?? undefined)
+    activity.push({
+      id: `deposit-${deposit.transactionHash}-${index}`,
+      wallet: address,
+      kind: 'deposit',
+      amount: deposit.args.amount!,
+      createdAt: depositTs,
+      txHash: deposit.transactionHash,
+    })
 
     let state: ChainNoteState = {
       secret,
@@ -367,6 +424,7 @@ export async function recoverNotesWithClient(
       nullifier: computeNullifier(secret, 0n),
       kind: 'DEPOSIT',
       spent: false,
+      createdAt: depositTs,
     }
 
     const pushFree = (s: ChainNoteState, txHash?: string) => {
@@ -380,7 +438,7 @@ export async function recoverNotesWithClient(
         commitment: s.commitment,
         nullifier: s.nullifier,
         spent: s.spent,
-        createdAt: Date.now(),
+        createdAt: s.createdAt,
         txHash,
       })
     }
@@ -390,6 +448,7 @@ export async function recoverNotesWithClient(
       ...settlements.map((e) => ({ type: 'settle' as const, block: e.blockNumber!, tx: e.transactionHash, args: e.args })),
       ...betCancels.map((e) => ({ type: 'betCancel' as const, block: e.blockNumber!, tx: e.transactionHash, args: e.args })),
       ...naCancels.map((e) => ({ type: 'naCancel' as const, block: e.blockNumber!, tx: e.transactionHash, args: e.args })),
+      ...positionCloseds.map((e) => ({ type: 'close' as const, block: e.blockNumber!, tx: e.transactionHash, args: e.args })),
       ...withdrawals
         .filter((e) => sameAddress(e.args.recipient!, address))
         .map((e) => ({ type: 'withdraw' as const, block: e.blockNumber!, tx: e.transactionHash, args: e.args })),
@@ -399,6 +458,7 @@ export async function recoverNotesWithClient(
     })
 
     for (const ev of events) {
+      const evTs = tsOf(ev.block)
       if (ev.type === 'bet') {
         const betNull = ev.args.nullifier! as `0x${string}`
         if (betNull.toLowerCase() !== state.nullifier.toLowerCase() || state.spent) continue
@@ -422,15 +482,28 @@ export async function recoverNotesWithClient(
           commitment: receiptId,
           nullifier: betNull,
           nullifier_of_bet: betNull,
+          position_id: ev.args.position_id as `0x${string}` | undefined,
           condition_id: ev.args.market_id! as `0x${string}`,
+          marketId: ev.args.market_id as string | undefined,
           bet_amount: betAmount,
           expectedShares: ev.args.expected_shares,
           spent: false,
-          createdAt: Date.now(),
+          createdAt: evTs,
           txHash: ev.tx,
         }
         recovered.push(receipt)
         receiptByBetNullifier.set(betNull.toLowerCase(), receipt)
+        activity.push({
+          id: `bet-${ev.tx}-${betNull}`,
+          wallet: address,
+          kind: 'bet',
+          amount: betAmount,
+          createdAt: evTs,
+          txHash: ev.tx,
+          marketId: ev.args.market_id as `0x${string}` | undefined,
+          receiptId,
+          receiptNullifier: betNull,
+        })
 
         state = {
           secret,
@@ -441,6 +514,7 @@ export async function recoverNotesWithClient(
           nullifier: computeNullifier(secret, newNonce),
           kind: 'BET_OUTPUT',
           spent: false,
+          createdAt: evTs,
         }
       } else if (ev.type === 'settle' || ev.type === 'betCancel' || ev.type === 'naCancel') {
         const spentNull = ev.args.nullifier! as `0x${string}`
@@ -476,6 +550,20 @@ export async function recoverNotesWithClient(
           newBalance = inferBalanceFromCommitment(secret, newNonce, address, newCommitment) ?? oldBalance
         }
 
+        const credited = newBalance - oldBalance
+        activity.push({
+          id: `${ev.type}-${ev.tx}-${betNull}`,
+          wallet: address,
+          kind: ev.type === 'settle' ? 'settlement' : 'refund',
+          amount: credited,
+          createdAt: evTs,
+          txHash: ev.tx,
+          marketId: receipt?.marketId as `0x${string}` | undefined,
+          receiptId: receipt?.id,
+          receiptNullifier: betNull as `0x${string}`,
+          payout: credited,
+        })
+
         state = {
           secret,
           depositIndex: index,
@@ -485,6 +573,58 @@ export async function recoverNotesWithClient(
           nullifier: computeNullifier(secret, newNonce),
           kind: ev.type === 'settle' ? 'SETTLE_CREDIT' : 'CANCEL_CREDIT',
           spent: false,
+          createdAt: evTs,
+        }
+      } else if (ev.type === 'close') {
+        // FC-1: position close credit. proceeds come from the matching BetSold report.
+        const spentNull = ev.args.nullifier! as `0x${string}`
+        if (spentNull.toLowerCase() !== state.nullifier.toLowerCase() || state.spent) continue
+
+        const betNull = ev.args.nullifier_of_bet! as string
+        const fullClose = ev.args.fullClose as boolean
+        const sale = soldByBet.get(betNull.toLowerCase())?.shift()
+        const proceeds = sale?.proceeds ?? 0n
+
+        const receipt = receiptByBetNullifier.get(betNull.toLowerCase())
+        if (receipt) {
+          if (fullClose) {
+            receipt.spent = true
+          } else if (sale?.soldShares != null && receipt.expectedShares != null) {
+            receipt.expectedShares = receipt.expectedShares - sale.soldShares
+          }
+        }
+
+        const oldBalance = state.balance
+        state.spent = true
+        pushFree(state, ev.tx)
+
+        const newNonce = state.nonce + 1n
+        const newCommitment = ev.args.new_commitment! as `0x${string}`
+        const newBalance = oldBalance + proceeds
+
+        activity.push({
+          id: `close-${ev.tx}-${betNull}`,
+          wallet: address,
+          kind: 'settlement',
+          amount: proceeds,
+          createdAt: evTs,
+          txHash: ev.tx,
+          marketId: receipt?.marketId as `0x${string}` | undefined,
+          receiptId: receipt?.id,
+          receiptNullifier: betNull as `0x${string}`,
+          payout: proceeds,
+        })
+
+        state = {
+          secret,
+          depositIndex: index,
+          balance: newBalance,
+          nonce: newNonce,
+          commitment: newCommitment,
+          nullifier: computeNullifier(secret, newNonce),
+          kind: 'SETTLE_CREDIT',
+          spent: false,
+          createdAt: evTs,
         }
       } else if (ev.type === 'withdraw') {
         const spentNull = ev.args.nullifier! as `0x${string}`
@@ -497,12 +637,17 @@ export async function recoverNotesWithClient(
         const newCommitment = ev.args.new_commitment! as `0x${string}`
         const hasRemainder = newCommitment !== (`0x${'00'.repeat(32)}` as `0x${string}`)
 
+        activity.push({
+          id: `withdrawal-${ev.tx}`,
+          wallet: address,
+          kind: 'withdrawal',
+          amount: withdrawalAmount,
+          createdAt: evTs,
+          txHash: ev.tx,
+        })
+
         if (!hasRemainder) {
-          state = {
-            ...state,
-            balance: 0n,
-            spent: true,
-          }
+          state = { ...state, balance: 0n, spent: true }
           continue
         }
 
@@ -518,16 +663,20 @@ export async function recoverNotesWithClient(
           nullifier: computeNullifier(secret, newNonce),
           kind: 'BET_OUTPUT',
           spent: false,
+          createdAt: evTs,
         }
       }
     }
 
     if (!state.spent && state.balance > 0n) {
-      pushFree(state)
+      pushFree(state, undefined)
     }
   }
 
   saveAll(recovered)
+  // FC-5 gap 1: replace this wallet's activity with the chain-derived log; keep other wallets'.
+  const otherWallets = loadActivity().filter((e) => !sameAddress(e.wallet, address))
+  saveActivity([...otherWallets, ...activity])
   return recovered
 }
 

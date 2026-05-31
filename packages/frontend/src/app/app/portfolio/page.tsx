@@ -5,10 +5,16 @@ import { useEffect, useMemo, useState } from 'react'
 import { useAccount } from 'wagmi'
 import { useRouter, useSearchParams } from 'next/navigation'
 import { SettlementModal } from '@/components/app/SettlementModal'
+import { ClosePositionModal } from '@/components/app/ClosePositionModal'
+import { PartialFillCreditModal } from '@/components/app/PartialFillCreditModal'
 import { Icon, ICONS } from '@/components/ui/Icon'
 import { log } from '@/lib/logger'
-import { formatUsdc } from '@/lib/notes'
+import { formatUsdc, type Note } from '@/lib/notes'
+import { BET_STATUS, fetchBetStatus } from '@/lib/api'
 import { portfolioSummaryRows, usePortfolioState } from '@/lib/accountState'
+
+const VAULT_ADDRESS = (process.env.NEXT_PUBLIC_VAULT_ADDRESS ??
+  '0x0000000000000000000000000000000000000000') as `0x${string}`
 
 function formatDate(timestamp: number): string {
   return new Date(timestamp).toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' })
@@ -20,6 +26,10 @@ export default function PortfolioPage() {
   const searchParams = useSearchParams()
   const [modalOpen, setModalOpen] = useState(false)
   const [closeLostOpen, setCloseLostOpen] = useState(false)
+  const [closeReceipt, setCloseReceipt] = useState<Note | null>(null)
+  const [partialReceipt, setPartialReceipt] = useState<Note | null>(null)
+  // nullifier_of_bet → on-chain BetStatus, for surfacing RESTING / PARTIAL_FILLED actions.
+  const [betStatuses, setBetStatuses] = useState<Record<string, number>>({})
   const { state, loading, refresh } = usePortfolioState(address)
 
   useEffect(() => {
@@ -31,6 +41,33 @@ export default function PortfolioPage() {
       setModalOpen(true)
     }
   }, [searchParams])
+
+  // FC-4: poll each open receipt's on-chain BetStatus so we can surface RESTING
+  // (limit order live) and PARTIAL_FILLED (refund available) states/actions.
+  const openReceiptKey = useMemo(
+    () => (state?.openReceipts ?? []).map((r) => r.nullifier_of_bet ?? r.nullifier).join(','),
+    [state],
+  )
+  useEffect(() => {
+    const receipts = state?.openReceipts ?? []
+    if (receipts.length === 0) { setBetStatuses({}); return }
+    let cancelled = false
+    void (async () => {
+      const entries = await Promise.all(
+        receipts.map(async (r) => {
+          const n = (r.nullifier_of_bet ?? r.nullifier) as `0x${string}`
+          try {
+            return [r.id, await fetchBetStatus(VAULT_ADDRESS, n)] as const
+          } catch {
+            return [r.id, -1] as const
+          }
+        }),
+      )
+      if (!cancelled) setBetStatuses(Object.fromEntries(entries))
+    })()
+    return () => { cancelled = true }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [openReceiptKey])
 
   const summaryRows = useMemo(() => (state ? portfolioSummaryRows(state) : []), [state])
   const readyByReceiptId = useMemo(() => {
@@ -121,26 +158,46 @@ export default function PortfolioPage() {
                       </td>
                     </tr>
                   )}
-                  {state.openReceipts.filter((r) => !lostBetIds.has(r.id)).map((receipt) => (
+                  {state.openReceipts.filter((r) => !lostBetIds.has(r.id)).map((receipt) => {
+                    const ready = readyByReceiptId.has(receipt.id)
+                    const status = betStatuses[receipt.id]
+                    const isPartial = status === BET_STATUS.PARTIAL_FILLED
+                    const isResting = status === BET_STATUS.RESTING
+                    const label = ready ? 'READY TO SETTLE'
+                      : isPartial ? 'PARTIAL FILL'
+                      : isResting ? 'RESTING'
+                      : 'OPEN'
+                    const pillClass = ready ? 'pill-green' : isPartial ? 'pill-amber' : 'pill-soft'
+                    return (
                     <tr key={receipt.id}>
                       <td>{receipt.marketId ?? receipt.id}</td>
                       <td>{receipt.side ?? '—'}</td>
                       <td className="num" style={{ textAlign: 'right' }}>${formatUsdc(receipt.bet_amount ?? receipt.balance)}</td>
                       <td className="num" style={{ textAlign: 'right' }}>{receipt.expectedShares?.toString() ?? '—'}</td>
                       <td>
-                        <span className={`pill ${readyByReceiptId.has(receipt.id) ? 'pill-green' : 'pill-soft'}`} style={{ fontSize: 10 }}>
-                          {readyByReceiptId.has(receipt.id) ? 'READY TO SETTLE' : 'OPEN'}
+                        <span className={`pill ${pillClass}`} style={{ fontSize: 10 }}>
+                          {label}
                         </span>
                       </td>
                       <td style={{ textAlign: 'right' }}>
-                        {readyByReceiptId.has(receipt.id) && (
+                        {ready ? (
                           <button className="btn btn-sm btn-primary" onClick={() => setModalOpen(true)}>
                             Settle
                           </button>
-                        )}
+                        ) : isPartial ? (
+                          <button className="btn btn-sm btn-primary" onClick={() => setPartialReceipt(receipt)}>
+                            Claim refund
+                          </button>
+                        ) : isResting ? (
+                          <span className="small" style={{ color: 'var(--text-3)', fontSize: 11 }}>Limit order live</span>
+                        ) : receipt.position_id ? (
+                          <button className="btn btn-sm" onClick={() => setCloseReceipt(receipt)}>
+                            Close
+                          </button>
+                        ) : null}
                       </td>
                     </tr>
-                  ))}
+                  )})}
                 </tbody>
               </table>
             </div>
@@ -327,6 +384,26 @@ export default function PortfolioPage() {
           mode="close-losses"
           onClose={() => setCloseLostOpen(false)}
           onComplete={async () => { setCloseLostOpen(false); await refresh() }}
+        />
+      )}
+      {address && closeReceipt && (
+        <ClosePositionModal
+          open={!!closeReceipt}
+          address={address}
+          receipt={closeReceipt}
+          vaultAddress={VAULT_ADDRESS}
+          onClose={() => setCloseReceipt(null)}
+          onComplete={async () => { setCloseReceipt(null); await refresh() }}
+        />
+      )}
+      {address && partialReceipt && (
+        <PartialFillCreditModal
+          open={!!partialReceipt}
+          address={address}
+          receipt={partialReceipt}
+          vaultAddress={VAULT_ADDRESS}
+          onClose={() => setPartialReceipt(null)}
+          onComplete={async () => { setPartialReceipt(null); await refresh() }}
         />
       )}
     </div>

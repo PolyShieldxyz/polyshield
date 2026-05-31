@@ -9,6 +9,8 @@ const VAULT_ABI = [
   "function withdraw(bytes calldata proof, tuple(bytes32 merkle_root, bytes32 nullifier, uint64 withdrawal_amount, bytes32 recipient_hash, bytes32 new_commitment) calldata inputs, address recipientAddress)",
   "function betCancellationCredit(bytes calldata proof, tuple(bytes32 merkle_root, bytes32 nullifier, bytes32 new_commitment, bytes32 nullifier_of_bet) calldata inputs)",
   "function naCancellationCredit(bytes calldata proof, tuple(bytes32 merkle_root, bytes32 nullifier, bytes32 new_commitment, bytes32 nullifier_of_bet, bytes32 market_id) calldata inputs)",
+  "function closePosition(bytes calldata proof, tuple(bytes32 merkle_root, bytes32 nullifier, bytes32 new_commitment, bytes32 nullifier_of_bet) calldata inputs)",
+  "function partialFillCredit(bytes calldata proof, tuple(bytes32 merkle_root, bytes32 nullifier, bytes32 new_commitment, bytes32 nullifier_of_bet) calldata inputs)",
 ];
 
 // ── Nonce manager ─────────────────────────────────────────────────────────────
@@ -228,5 +230,52 @@ export async function relayNACancellationCredit(proof: string, inputs: unknown):
 
   logger.info({ event: "relay:naCancellationCredit:tx_sent", txHash: tx.hash, nonce: tx.nonce, elapsed_ms: Date.now() - start }, "relay:naCancellationCredit:tx_sent");
   trackReceipt("relay:naCancellationCredit", tx, start);
+  return tx.hash;
+}
+
+// FC-1: relay a position-close credit proof. sell_proceeds is Vault-injected from
+// the operator's reportSold, so the relay only forwards proof + the 4 public inputs.
+export async function relayClosePosition(proof: string, inputs: unknown): Promise<string> {
+  const start = Date.now();
+  const inp = inputs as Record<string, unknown>;
+  logger.info({
+    event: "relay:closePosition:start",
+    proof_bytes: proofBytes(proof),
+    proof_fingerprint: fingerprint(proof),
+    nullifier_prefix: typeof inp["nullifier"] === "string" ? (inp["nullifier"] as string).slice(0, 10) : undefined,
+  }, "relay:closePosition:start");
+
+  const tx = await sendWithNonce((nonce) =>
+    (vault as ethers.Contract & {
+      closePosition: (p: string, i: unknown, o: ethers.Overrides) => Promise<ethers.TransactionResponse>
+    }).closePosition(proof, inputs, { nonce }),
+  );
+
+  logger.info({ event: "relay:closePosition:tx_sent", txHash: tx.hash, nonce: tx.nonce, elapsed_ms: Date.now() - start }, "relay:closePosition:tx_sent");
+  trackReceipt("relay:closePosition", tx, start);
+  return tx.hash;
+}
+
+// FC-4: relay a partial-fill credit proof. refund_amount (bet_amount - spent_amount)
+// is Vault-injected from the operator's reportPartialFill, so the relay only forwards
+// the proof + the 4 public inputs (same shape as betCancellationCredit).
+export async function relayPartialFillCredit(proof: string, inputs: unknown): Promise<string> {
+  const start = Date.now();
+  const inp = inputs as Record<string, unknown>;
+  logger.info({
+    event: "relay:partialFillCredit:start",
+    proof_bytes: proofBytes(proof),
+    proof_fingerprint: fingerprint(proof),
+    nullifier_prefix: typeof inp["nullifier"] === "string" ? (inp["nullifier"] as string).slice(0, 10) : undefined,
+  }, "relay:partialFillCredit:start");
+
+  const tx = await sendWithNonce((nonce) =>
+    (vault as ethers.Contract & {
+      partialFillCredit: (p: string, i: unknown, o: ethers.Overrides) => Promise<ethers.TransactionResponse>
+    }).partialFillCredit(proof, inputs, { nonce }),
+  );
+
+  logger.info({ event: "relay:partialFillCredit:tx_sent", txHash: tx.hash, nonce: tx.nonce, elapsed_ms: Date.now() - start }, "relay:partialFillCredit:tx_sent");
+  trackReceipt("relay:partialFillCredit", tx, start);
   return tx.hash;
 }
