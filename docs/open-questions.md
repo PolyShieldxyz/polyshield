@@ -373,9 +373,14 @@ These items emerged from the Claude Design prototype. They are not blockers for 
 
 ### Q20 — Sparse Merkle Tree (SMT) for nullifier set
 
-**Status:** Open — design decision needed before NullifierRegistry v2
+**Status:** RESOLVED (2026-05-31)
+**Resolution:** Keep the `mapping(bytes32 => bool)` nullifier registry. No SMT for v1 or v2.
 **Impact:** NullifierRegistry.sol, ZK circuits (nullifier membership proofs)
 **Source:** Design prototype (Docs page shows `nullifierRoot: bytes32 // SMT root over spent nullifiers`)
+
+**Resolution rationale:** None of the eight active circuits (bet_auth, settlement_credit, withdrawal, bet_cancel, cancel_credit, deposit, position_close, partial_credit) proves nullifier *non-membership* inside a proof. Each proves note ownership plus correct nullifier *derivation*; the "already spent?" check is performed on-chain by the contract reading the registry, exactly the Tornado/Zcash split. The contract is the authority, so a mapping is sufficient. Two further points reinforce this: (1) gas: an SMT insert is O(log n) Poseidon hashes on-chain added to every state transition (authorizeBet/withdraw/credit), versus a single SSTORE for the mapping, a recurring cost for zero v1 benefit; (2) the prototype's `nullifierRoot` and `marketRoot` are speculative UI-doc fields, not derived requirements, and `marketRoot` in particular is redundant because `ctf.payoutNumerators`/`payoutDenominator` is already the on-chain authority that `resolveMarket` reads.
+
+**Single reopen trigger:** a future batch/aggregated proof circuit that verifies many nullifiers in one off-chain proof with no per-nullifier on-chain check (or an L3/stateless redesign). Neither is on the roadmap. If such a circuit is ever specified, revisit with an SMT at that time.
 
 **Question:** The current NullifierRegistry is a simple `mapping(bytes32 => bool)`. The design prototype's documentation page shows a `nullifierRoot` in the VaultState struct, implying a Sparse Merkle Tree. Does the protocol need a SMT for nullifiers, or is the mapping sufficient?
 
@@ -429,18 +434,16 @@ These items emerged from the Claude Design prototype. They are not blockers for 
 
 ### Q23 — Encrypted note backup file format
 
-**Status:** Open — SDK design needed
+**Status:** RESOLVED (2026-05-31)
+**Resolution:** Obviated by wallet-derived secrets. No encrypted note backup file is required.
 **Impact:** SDK, frontend
 **Source:** Design prototype (DepositStep3 "Download encrypted backup", "Export encrypted backup" buttons)
 
-**Question:** Q10 resolved that notes should be backed up via ECIES with the user's wallet key. But the backup file format is unspecified. What is the structure of the exported backup file?
+**Resolution rationale:** Secrets are now wallet-derived deterministically by deposit index (the P3+ model, implemented in FC-5). A wallet with zero local state reconstructs every note (balances, open positions, deposits, withdrawals, P&L) from on-chain events plus a wallet signature via `recoverNotes()` (`frontend/src/lib/notes.ts`). The wallet *is* the backup, so there is no per-deposit random secret to preserve and therefore no backup-file format to specify. The localStorage note cache holds no secret and is a performance convenience only; if wiped it is rebuilt by `recoverNotes`. The deposit-index counter is likewise recoverable by scanning `Deposited(W, ...)` events.
 
-**Questions to resolve:**
-- File format: JSON (human-readable), binary, or base64-encoded ciphertext?
-- What metadata is included alongside the ciphertext (version, vault address, deposit block number, note index in Merkle tree)?
-- Can multiple notes be exported in one file?
-- How does the import flow work: connect wallet → decrypt file → restore notes to local state?
-- Should the backup also be pinnable to IPFS (as Q10 mentions) automatically, or only if the user opts in?
+**Downstream reconciliation (flagged, not yet applied):** with wallet-derived secrets as the model, the P1/P2 random-secret + ECIES-backup path is legacy. Q10 (note loss recovery via ECIES), T17 (note preimage loss), and the P1/P2 vs P3+ split in `CLAUDE.md` should be reconciled to the wallet-derived-default model. The encrypted backup survives only as an optional fallback for any residual P1/P2 notes, not a v1 deliverable. See FC-5.
+
+**Original open question (now moot):** Q10 had resolved that notes should be backed up via ECIES with the user's wallet key; the file format was left unspecified. Wallet-derived secrets remove the need entirely.
 
 ---
 
@@ -498,3 +501,37 @@ The mid-market sell price is set by the off-chain CLOB fill and is NOT derivable
 - Privacy-Pools association sets: answers "is W clean?", not "what did W bet?"; adjacent tool, different question.
 
 **Decision required from Arya:** confirm Option C parameters and whether it is mandatory or deployment-gated. This is a privacy-model change and requires explicit trade-off acceptance.
+
+---
+
+## Threat-Derived Questions (added 2026-05-31)
+
+These questions formalize the design of threats that were tracked only in `threat-model.md` and had no home in this tracker. Closing the gap between the two documents.
+
+---
+
+### Q26: Signing-layer front-running mitigation (v1)
+
+**Status:** RESOLVED (2026-05-31)
+**Resolution:** Accept the information-leak residual in v1 under operational policy; rely on v2 TEE for the cryptographic fix. Commit-reveal rejected. Driver: T4.
+**Impact:** Signing Layer v1, threat-model T4
+
+**Resolution rationale:** Split T4 into two sub-risks. (1) **Degraded-fill front-running is already capped by design** (Q4/Q7): bets are FOK at a user-set limit price, so if the operator trades ahead and moves the price, the user's FOK fails (`FOK_ORDER_NOT_FILLED_ERROR`) and the bet_amount is reclaimed via Bet Cancellation Credit. The operator can never make the user overpay or fill worse than their limit. (2) **The residual is information leakage / copy-trading:** the operator must read the plaintext bet to construct and sign the order, so it learns the user's directional view and can trade it on a side account. Commit-reveal does NOT address this, because it defends only against third parties racing a revealed mempool tx, not against the executor, which reads plaintext at execution time; you cannot have the operator sign an order it cannot read. So commit-reveal is dropped (it adds latency and a transaction for no benefit).
+
+**v1 acceptance (Arya, 2026-05-31):** the operator is project-run, under a documented policy of no proprietary trading on vault markets. T4 reassessed CRITICAL → MEDIUM for v1. The residual is eliminated cryptographically in v2 when the TEE sees bet parameters only inside the enclave. v3/threshold signing remains dropped (Q3).
+
+---
+
+### Q27: Circuit/verifier upgrade and revocation model
+
+**Status:** RESOLVED at design level (2026-05-31)
+**Resolution:** Versioned verifier registry with enable/disable + emergency pause; note format stays frozen; correct the prior "redeemable against creation-time verifier" guidance. Driver: T11.
+**Impact:** `Vault.sol` verifier registry, circuit upgrade process, threat-model T11
+
+**Resolution rationale:** The note `Poseidon4(secret, balance, nonce, owner_address)` is a frozen protocol constant and commitments are bare hashes in the tree, not bound to any circuit; only *proofs* bind to a verifier. Three upgrade cases must be handled differently, and the previous "always redeemable against the verifier it was created under" guidance is wrong for the common case:
+
+- **Soundness bug, public inputs unchanged (common):** REVOKE the buggy verifier and deploy a fixed one with identical public inputs. Because the note format is frozen, it spends the exact same existing notes, so nothing is lost. Keeping the old verifier live (the prior guidance) is the actual exploit window.
+- **Public-input change (e.g. Q4 adding `price`):** treat as a new circuit version; the contract may accept both across a transition window; notes are unaffected because the format did not change.
+- **Note-format change:** the only case that truly invalidates commitments; forbidden without sign-off; if ever forced, use leaf-level version tags + a dual-tree migration with old notes still spendable via the old (sound) circuit.
+
+**Adopted design:** a `mapping(circuitId => mapping(version => address))` verifier registry + an active-version pointer + a per-verifier enable/disable flag + an emergency pause that can halt a specific verifier the instant unsoundness is found. The emergency pause is a deliberate centralization trade-off, accepted because a circuit bug is a fund-loss event. Keep Poseidon4 frozen so circuit fixes never touch commitments.

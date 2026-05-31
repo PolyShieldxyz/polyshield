@@ -34,14 +34,14 @@ Polyshield's privacy guarantee is: **which depositor authorized which bet is hid
 
 ## 2. Signing Layer Attacks
 
-### T4 — Signing Layer Front-Running (v1 Critical)
-**Severity:** CRITICAL (for v1)
-**Description:** In v1, the centralized signing operator receives bet parameters before executing the Polymarket order. The operator can read the bet (market, side, amount) and place their own order first, then execute the user's order, profiting from the price impact of the user's bet.
-**Mitigation (v1):** Implement a commit-reveal scheme: the user publishes a commitment to the bet parameters on-chain first (a hash of the plaintext bet descriptor). After N blocks, the plaintext parameters are revealed and the operator executes. This makes front-running futile (the price has already moved after the commit).
-  - Risk: this adds latency (block time * N, approximately 2-6 seconds on Polygon) and an additional transaction.
-  - Alternative: accept front-running risk in v1 prototype (not acceptable for production).
-**Status:** OPEN (commit-reveal mechanism not yet designed)
-**Note:** This attack is eliminated in v2 (TEE sees parameters only inside the enclave) and v3 (threshold signers see parameters but cannot individually act on them without threshold cooperation).
+### T4 — Signing Layer Front-Running (v1)
+**Severity:** MEDIUM (for v1; reassessed 2026-05-31, see Q26)
+**Description:** In v1, the centralized signing operator receives bet parameters (market, side, amount, price) before executing the Polymarket order. Two sub-risks must be separated:
+  - **Degraded-fill front-running (mitigated by design):** bets are FOK at a user-set limit price (Q4/Q7). If the operator trades ahead and moves the price, the user's FOK simply fails to fill (`FOK_ORDER_NOT_FILLED_ERROR`) and the bet_amount is reclaimed via Bet Cancellation Credit. The operator cannot make the user overpay or fill them worse than their limit, so this form is already capped by the FOK/limit-price design.
+  - **Information leak / copy-trading (residual):** the operator must read the plaintext bet to construct and sign the order, so it learns the user's directional view and can trade it on a side account. This is the alpha-leak Polyshield exists to kill, relocated from the public chain to the operator.
+**Mitigation (v1):** Accept the information-leak residual under operational policy (project-run operator; no proprietary trading on vault markets; documented). Commit-reveal is rejected: it defends against third parties racing a revealed mempool tx, not against the *executor itself*, which by definition reads the plaintext at execution time. You cannot have the operator sign an order it cannot read, so commit-reveal adds latency and a transaction without addressing the residual.
+**Status:** ACCEPTED RISK (v1 info-leak); degraded-fill capped by FOK/limit price; resolved cryptographically in v2. See Q26.
+**Note:** The residual is eliminated in v2 (TEE sees parameters only inside the enclave). v3/threshold signing has been dropped from the roadmap (Q3).
 
 ### T5 — Signing Layer Censorship
 **Severity:** HIGH (for v1)
@@ -52,8 +52,8 @@ Polyshield's privacy guarantee is: **which depositor authorized which bet is hid
 ### T6 — Vault EOA Private Key Compromise
 **Severity:** CRITICAL
 **Description:** If the Polymarket signing EOA's private key is compromised, an attacker can drain the vault's Polymarket balance (place bets they control, or transfer USDC out of the Polymarket account). The Vault contract's USDC holdings (not yet sent to Polymarket) are unaffected.
-**Mitigation:** Key stored in hardware HSM or secrets manager. Periodic key rotation with governance. Circuit breaker: if an unexpected Polymarket transaction originates from the vault EOA without a corresponding on-chain `BetAuthorized` event, halt all operations and alert.
-**Status:** OPEN (key management design not finalized)
+**Mitigation:** The blast radius is bounded to whatever sits in the Polymarket Deposit Wallet at the moment of compromise, NOT the whole pool: the Vault contract releases USDC only against ZK-verified proofs, so the EOA key alone cannot pull the at-rest majority. The primary lever is therefore bounding the in-flight float; FC-6's governance-set `maxInFlight` ceiling caps both this blast radius and T13's stuck-capital exposure. Secondary hardening (travels with the same collateral-model decision): KMS/HSM-backed signing so the raw key is never extractable (CLAUDE.md's "env var only" is acceptable for local dev only), plus an Indexer circuit breaker that halts signing on any EOA / Deposit-Wallet action lacking a matching on-chain event. EOA rotation is Q12 (v2).
+**Status:** PARKED on FC-6 (bounded working-buffer collateral model) pending Arya's manager's decision on the USDC/pUSD deposit algorithm. No separate question.
 
 ---
 
@@ -92,8 +92,12 @@ Polyshield's privacy guarantee is: **which depositor authorized which bet is hid
 ### T11 — Circuit Upgrade Breaking Existing Commitments
 **Severity:** HIGH
 **Description:** If a bug is found in a ZK circuit and the verifier contract must be upgraded, existing commitments generated under the old circuit may be invalidated (if the new circuit has different public inputs) or remain vulnerable (if old proofs can still be generated against the old verifier).
-**Mitigation:** Commitment structure must include a circuit version tag. The Vault maintains a registry of (circuit_version => verifier_address). A commitment is always redeemable against the verifier it was created under. New commitments use the newest circuit version.
-**Status:** DESIGN LEVEL (circuit versioning not yet formally specified)
+**Mitigation (corrected 2026-05-31, see Q27):** The note format `Poseidon4(secret, balance, nonce, owner_address)` is frozen (a protocol constant), and commitments are bare hashes in the tree, not bound to any circuit; only *proofs* bind to a verifier. So three upgrade cases must be handled differently, and the previous "always redeemable against the verifier it was created under" guidance is wrong for the common case:
+  - **Soundness bug, public inputs unchanged (common):** the buggy verifier must be REVOKED, not kept live. Because the note format is frozen, a fixed verifier with identical public inputs spends the exact same existing notes, so revoke-and-replace loses nothing. Keeping the old verifier enabled (as the prior text implied) is the actual danger.
+  - **Public-input change (e.g. Q4 adding `price`):** treat as a new circuit version; the contract may accept both during a transition window. Notes are unaffected because the format did not change.
+  - **Note-format change:** the only case that truly invalidates commitments. Forbidden without sign-off; if ever forced, needs leaf-level version tags and a dual-tree migration with old notes still spendable via the old (sound) circuit.
+  Implement a `mapping(circuitId => mapping(version => address))` verifier registry with an active-version pointer and a per-verifier enable/disable flag, plus an emergency pause that can halt a specific verifier the instant unsoundness is found.
+**Status:** DESIGN LEVEL. Registry + emergency-pause design captured in Q27.
 
 ---
 
@@ -108,8 +112,8 @@ Polyshield's privacy guarantee is: **which depositor authorized which bet is hid
 ### T13 — Vault Undercollateralization
 **Severity:** HIGH
 **Description:** Users' USDC is partially held in the Vault contract and partially held in the Polymarket account (as active bet collateral). If users submit simultaneous Withdrawal proofs while the Vault's liquid USDC is low (most of it is in active Polymarket positions), withdrawals will revert.
-**Mitigation:** The Vault must reserve each depositor's initial deposit amount separately from trading capital. Specifically: the Vault contract holds `sum(all deposits)` in USDC. Funds flow to Polymarket only when bets are placed and return when markets settle. The Vault should track the total amount "in flight" (in active Polymarket positions) and enforce that `vault_usdc_balance >= sum(committed_deposits) - sum(in_flight_amounts)` before accepting new bet authorizations.
-**Status:** OPEN (in-flight tracking mechanism not yet designed)
+**Mitigation:** In the as-built model (FC-6, `collateral-flow-audit.md`) deposits rest as USDC in the Vault; capital reaches Polymarket only through a separate bulk operator call (`fundPolymarketWallet`), not per-deposit or per-bet. The note is debited at `authorizeBet` in the same step the funds are earmarked, so the bet leg is self-balancing (`liquid_USDC == sum(unspent note balances)` through the bet). The real exposure is bounded by how much capital is ever deployed to Polymarket at once, which FC-6's governance-set `maxInFlight` ceiling caps. The remaining ordering rule (settlement must not credit a note before the redeemed pUSD has offramped back to the Vault) is part of the same collateral-model work. `InsufficientLiquidity` in `withdraw` is the backstop.
+**Status:** PARKED on FC-6 (bounded working-buffer collateral model) pending Arya's manager's decision on the USDC/pUSD deposit algorithm. No separate question.
 
 ### T14 — Protocol Fee Claiming Bypass
 **Severity:** MEDIUM
@@ -178,16 +182,16 @@ Polyshield's privacy guarantee is: **which depositor authorized which bet is hid
 | T1 | Bet descriptor visibility | LOW | Closed (not a deanonymization vector) |
 | T2 | Merkle leaf timing correlation | MEDIUM | Partial |
 | T3 | Small anonymity set at launch | HIGH | Open |
-| T4 | Signing layer front-running (v1) | CRITICAL | Open (commit-reveal needed) |
+| T4 | Signing layer front-running (v1) | MEDIUM | Accepted v1 (FOK/limit cap; info-leak); v2 TEE (Q26) |
 | T5 | Signing layer censorship (v1) | HIGH | Accepted (v1) |
-| T6 | Vault EOA key compromise | CRITICAL | Open |
+| T6 | Vault EOA key compromise | CRITICAL | Parked on FC-6 (maxInFlight blast-radius cap) |
 | T7 | Nullifier double-spend | CRITICAL | Design correct |
 | T8 | Stale Merkle root | HIGH | Design correct |
 | T9 | Withdrawal front-running | HIGH | Design correct (private recipient) |
 | T10 | Invalid proof spam | LOW | Accepted |
-| T11 | Circuit upgrade breaks commitments | HIGH | Design level |
+| T11 | Circuit upgrade breaks commitments | HIGH | Design level (registry + pause, Q27) |
 | T12 | Note grinding | HIGH | Design level |
-| T13 | Vault undercollateralization | HIGH | Open |
+| T13 | Vault undercollateralization | HIGH | Parked on FC-6 |
 | T14 | Fee bypass | MEDIUM | Open |
 | T15 | Polymarket account ban | HIGH | Open |
 | T16 | API downtime during bet window | MEDIUM | Open |
