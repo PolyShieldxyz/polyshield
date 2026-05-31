@@ -28,6 +28,9 @@ contract Vault is ReentrancyGuard, Ownable2Step, Pausable {
     uint8 public constant WITHDRAWAL = 2;
     uint8 public constant BET_CANCEL = 3;
     uint8 public constant CANCEL_CREDIT = 4;
+    uint8 public constant DEPOSIT = 5;        // FC-2: mandatory deposit binding proof
+    uint8 public constant POSITION_CLOSE = 6; // FC-1: secondary-sale position close
+    uint8 public constant PARTIAL_CREDIT = 7; // FC-4: limit-order partial-fill refund
 
     // -------------------------------------------------------------------------
     // Types
@@ -37,7 +40,11 @@ contract Vault is ReentrancyGuard, Ownable2Step, Pausable {
         FILLED,
         FAILED,
         CREDITED,
-        CANCELLED_CREDITED
+        CANCELLED_CREDITED,
+        CLOSING,          // FC-1: operator reported a FOK SELL fill; awaiting close proof
+        CLOSED_CREDITED,  // FC-1: fully sold and credited (terminal)
+        PARTIAL_FILLED,   // FC-4: limit order partially filled then terminated; awaiting partial-credit proof
+        RESTING           // FC-4: operator confirmed a live (resting) GTC/GTD limit order
     }
 
     struct BetRecord {
@@ -48,6 +55,10 @@ contract Vault is ReentrancyGuard, Ownable2Step, Pausable {
         uint64 bet_amount;
         uint8 outcome_side;  // 0 = YES, 1 = NO
         BetStatus status;
+        uint64 sell_proceeds; // FC-1: operator-reported proceeds of the pending close (Vault-injected)
+        uint64 sold_shares;   // FC-1: shares sold in the pending close (full vs partial accounting)
+        uint64 filled_shares; // FC-4: shares actually filled on a partial limit-order fill (Vault-injected)
+        uint64 spent_amount;  // FC-4: bet_amount portion consumed by the partial fill (Vault-injected)
     }
 
     // Public input structs — mirror the Noir circuit's `pub` parameters in order.
@@ -97,6 +108,22 @@ contract Vault is ReentrancyGuard, Ownable2Step, Pausable {
         bytes32 nullifier_of_bet;
         bytes32 market_id;
         // bet_amount is NOT here — it is injected from betRecords[nullifier_of_bet]
+    }
+
+    struct ClosePublicInputs {
+        bytes32 merkle_root;
+        bytes32 nullifier;
+        bytes32 new_commitment;
+        bytes32 nullifier_of_bet;
+        // sell_proceeds is NOT here — injected from betRecords[nullifier_of_bet].sell_proceeds (FC-1)
+    }
+
+    struct PartialFillPublicInputs {
+        bytes32 merkle_root;
+        bytes32 nullifier;
+        bytes32 new_commitment;
+        bytes32 nullifier_of_bet;
+        // refund_amount is NOT here — injected as (bet_amount - spent_amount) from betRecords (FC-4)
     }
 
     // -------------------------------------------------------------------------
@@ -160,6 +187,13 @@ contract Vault is ReentrancyGuard, Ownable2Step, Pausable {
     error ZeroAddress();
     error VerifierTimelockActive();
     error PayoutRoundsToZero();
+    error BetNotClosing();          // FC-1: closePosition requires status CLOSING
+    error InvalidSoldShares();      // FC-1: sold_shares must be > 0 and <= expected_shares
+    error CannotCloseResolvedMarket(); // FC-1: resolved markets settle, they do not close
+    error BetNotPartialFillable();  // FC-4: reportPartialFill requires status ACTIVE or RESTING
+    error BetNotPartialFilled();    // FC-4: partialFillCredit requires status PARTIAL_FILLED
+    error InvalidFilledShares();    // FC-4: filled_shares must be > 0 and <= expected_shares
+    error InvalidSpentAmount();     // FC-4: spent_amount must be > 0 and <= bet_amount
 
     // -------------------------------------------------------------------------
     // Events
@@ -187,6 +221,11 @@ contract Vault is ReentrancyGuard, Ownable2Step, Pausable {
     event BetCancellationCredited(bytes32 indexed nullifier, bytes32 nullifier_of_bet, bytes32 new_commitment);
     event NACancellationCredited(bytes32 indexed nullifier, bytes32 nullifier_of_bet, bytes32 new_commitment);
     event AdminBetCancelled(bytes32 indexed nullifier_of_bet);
+    event BetSold(bytes32 indexed nullifier_of_bet, uint64 sold_shares, uint64 proceeds);
+    event PositionClosed(bytes32 indexed nullifier, bytes32 nullifier_of_bet, bytes32 new_commitment, bool fullClose);
+    event BetResting(bytes32 indexed nullifier_of_bet);
+    event BetPartialFilled(bytes32 indexed nullifier_of_bet, uint64 filled_shares, uint64 spent_amount);
+    event PartialFillCredited(bytes32 indexed nullifier, bytes32 nullifier_of_bet, bytes32 new_commitment);
 
     // -------------------------------------------------------------------------
     // Constructor
@@ -281,11 +320,22 @@ contract Vault is ReentrancyGuard, Ownable2Step, Pausable {
     // -------------------------------------------------------------------------
 
     /// @notice Deposit USDC and insert a commitment leaf.
-    /// The commitment must equal Poseidon4(secret, initial_balance, 0, owner_address)
-    /// computed client-side (see docs/zk-design.md §2). The vault does not verify
-    /// the preimage on-chain; the depositor is bound by the commitment they submit.
-    function deposit(bytes32 commitment, uint256 amount) external nonReentrant whenNotPaused {
+    /// @dev The commitment must equal Poseidon4(secret, amount, 0, owner_address),
+    /// computed client-side (see docs/zk-design.md §2). The MANDATORY deposit
+    /// binding proof (FC-2 / T20) ties the hidden note `balance` and `owner_address`
+    /// to the publicly transferred `amount` and `msg.sender`: the Vault verifies the
+    /// proof against public inputs (commitment, amount, uint256(uint160(msg.sender))),
+    /// forcing balance == amount, nonce == 0, owner == msg.sender. Without this proof a
+    /// depositor could commit a larger balance than they paid and drain the pool.
+    function deposit(bytes calldata proof, bytes32 commitment, uint256 amount)
+        external
+        nonReentrant
+        whenNotPaused
+    {
         if (cumulativeDeposits[msg.sender] + amount > DEPOSIT_CAP) revert DepositCapExceeded();
+        if (!IVerifier(verifiers[DEPOSIT]).verify(proof, _depositPublicInputs(commitment, amount, msg.sender)))
+            revert InvalidProof();
+
         cumulativeDeposits[msg.sender] += amount;
         usdc.safeTransferFrom(msg.sender, address(this), amount);
         tree.insert(commitment);
@@ -318,7 +368,11 @@ contract Vault is ReentrancyGuard, Ownable2Step, Pausable {
             expected_shares: inputs.expected_shares,
             bet_amount: inputs.bet_amount,
             outcome_side: inputs.outcome_side,
-            status: BetStatus.ACTIVE
+            status: BetStatus.ACTIVE,
+            sell_proceeds: 0,
+            sold_shares: 0,
+            filled_shares: 0,
+            spent_amount: 0
         });
         betCreatedAt[inputs.nullifier] = uint64(block.timestamp);
 
@@ -370,6 +424,14 @@ contract Vault is ReentrancyGuard, Ownable2Step, Pausable {
     /// timelock (adminCancelTimelock) prevents the owner from cancelling bets
     /// before the signing layer has had a reasonable chance to submit or report.
     /// See docs/open-questions.md Q14.
+    ///
+    /// FC-4: RESTING limit orders are intentionally NOT cancellable here. A healthy
+    /// resting GTC/GTD is legitimately long-lived (status RESTING, not ACTIVE), so it
+    /// must not be force-failed. Residual risk: if the operator dies entirely while an
+    /// order rests, Polymarket's ~10s heartbeat lapse auto-cancels the order on their
+    /// side, but the on-chain record stays RESTING with no on-chain rescue path; this
+    /// is the accepted v1 trade-off (a malicious/absent operator can already grief by
+    /// never reporting, and the worst case is locked-then-eventually-refundable funds).
     function adminCancelBet(bytes32 nullifier_of_bet) external onlyOwner {
         BetRecord storage rec = betRecords[nullifier_of_bet];
         if (rec.market_id == bytes32(0)) revert BetNotFound();
@@ -378,6 +440,69 @@ contract Vault is ReentrancyGuard, Ownable2Step, Pausable {
             revert BetTimeoutNotElapsed();
         rec.status = BetStatus.FAILED;
         emit AdminBetCancelled(nullifier_of_bet);
+    }
+
+    /// @notice FC-1: report a FOK SELL fill for a pre-settlement position close.
+    /// Operator-only and called only AFTER the SELL actually fills, so `proceeds`
+    /// is real (same trust class as reportFilled / acknowledgePolymarketReturn). A
+    /// false report would let a user credit funds that were never realized. Sets the
+    /// record to CLOSING; the depositor then calls closePosition to credit the note.
+    /// Not gated by whenNotPaused for the same reason as reportFilled: in-flight
+    /// positions must remain resolvable during an emergency pause.
+    /// @param sold_shares shares sold (<= expected_shares; full vs partial accounting)
+    /// @param proceeds USDC proceeds (6dp) returned to the pool via the offramp
+    function reportSold(bytes32 nullifier_of_bet, uint64 sold_shares, uint64 proceeds) external {
+        if (msg.sender != signingLayerOperator) revert OnlyOperator();
+        BetRecord storage rec = betRecords[nullifier_of_bet];
+        if (rec.market_id == bytes32(0)) revert BetNotFound();
+        if (rec.status != BetStatus.FILLED) revert BetNotFilled();
+        if (sold_shares == 0 || sold_shares > rec.expected_shares) revert InvalidSoldShares();
+        // Resolved markets settle (creditSettlement); they do not close.
+        bytes32 circuit_key = bytes32(uint256(rec.market_id) % BN254_P);
+        if (marketResolvedAt[circuit_key] != 0) revert CannotCloseResolvedMarket();
+
+        rec.sell_proceeds = proceeds;
+        rec.sold_shares = sold_shares;
+        rec.status = BetStatus.CLOSING;
+        emit BetSold(nullifier_of_bet, sold_shares, proceeds);
+    }
+
+    /// @notice FC-4: mark a GTC/GTD limit order as resting (live on the book).
+    /// Operator-only, called once the CLOB confirms the order is live. RESTING is
+    /// intentionally exempt from adminCancelBet (a healthy resting order is not
+    /// "stuck"). Not gated by whenNotPaused — in-flight orders stay resolvable
+    /// during an emergency pause, same rationale as reportFilled.
+    function reportResting(bytes32 nullifier_of_bet) external {
+        if (msg.sender != signingLayerOperator) revert OnlyOperator();
+        BetRecord storage rec = betRecords[nullifier_of_bet];
+        if (rec.market_id == bytes32(0)) revert BetNotFound();
+        if (rec.status != BetStatus.ACTIVE) revert BetNotActive();
+        rec.status = BetStatus.RESTING;
+        emit BetResting(nullifier_of_bet);
+    }
+
+    /// @notice FC-4: report a partial fill of a GTC/GTD limit order that then
+    /// terminated (expired/cancelled) with shares still unfilled. Operator-only and
+    /// called only AFTER the real fill, so `filled_shares`/`spent_amount` are real
+    /// (same trust class as reportFilled / reportSold). A false report could refund
+    /// more than the truly unfilled remainder or credit shares not held. Sets the
+    /// record to PARTIAL_FILLED; the depositor then calls partialFillCredit to refund
+    /// the remainder and normalize the record to a clean FILLED state.
+    /// Not gated by whenNotPaused for the same reason as reportFilled.
+    /// @param filled_shares shares actually bought (> 0 and <= expected_shares)
+    /// @param spent_amount  bet_amount portion consumed (> 0 and <= bet_amount)
+    function reportPartialFill(bytes32 nullifier_of_bet, uint64 filled_shares, uint64 spent_amount) external {
+        if (msg.sender != signingLayerOperator) revert OnlyOperator();
+        BetRecord storage rec = betRecords[nullifier_of_bet];
+        if (rec.market_id == bytes32(0)) revert BetNotFound();
+        if (rec.status != BetStatus.ACTIVE && rec.status != BetStatus.RESTING) revert BetNotPartialFillable();
+        if (filled_shares == 0 || filled_shares > rec.expected_shares) revert InvalidFilledShares();
+        if (spent_amount == 0 || spent_amount > rec.bet_amount) revert InvalidSpentAmount();
+
+        rec.filled_shares = filled_shares;
+        rec.spent_amount = spent_amount;
+        rec.status = BetStatus.PARTIAL_FILLED;
+        emit BetPartialFilled(nullifier_of_bet, filled_shares, spent_amount);
     }
 
     // -------------------------------------------------------------------------
@@ -564,9 +689,114 @@ contract Vault is ReentrancyGuard, Ownable2Step, Pausable {
     }
 
     // -------------------------------------------------------------------------
+    // Position Close (FC-1: secondary sale before settlement)
+    // -------------------------------------------------------------------------
+
+    /// @notice Credit operator-reported FOK SELL proceeds back into the user's note.
+    /// Mirrors creditSettlement: the user spends the post-bet note, proves membership,
+    /// and recommits balance + sell_proceeds. The Vault injects sell_proceeds from
+    /// betRecords (set by reportSold) so the user cannot inflate it in the proof.
+    ///
+    /// Requires status == CLOSING (set by reportSold), which blocks both a settlement
+    /// race (creditSettlement requires FILLED) and a double-close (after crediting the
+    /// status becomes CLOSED_CREDITED for a full sell, or returns to FILLED with reduced
+    /// expected_shares for a partial sell — a further close needs a fresh reportSold).
+    function closePosition(
+        bytes calldata proof,
+        ClosePublicInputs calldata inputs
+    ) external nonReentrant whenNotPaused {
+        if (nullifiers.isSpent(inputs.nullifier)) revert NullifierSpent();
+        if (!tree.isKnownRoot(inputs.merkle_root)) revert UnknownRoot();
+
+        BetRecord storage rec = betRecords[inputs.nullifier_of_bet];
+        if (rec.market_id == bytes32(0)) revert BetNotFound();
+        if (rec.status != BetStatus.CLOSING) revert BetNotClosing();
+
+        bytes32[] memory pubInputs = _closePublicInputs(inputs, rec.sell_proceeds);
+        if (!IVerifier(verifiers[POSITION_CLOSE]).verify(proof, pubInputs)) revert InvalidProof();
+
+        nullifiers.markSpent(inputs.nullifier);
+        tree.insert(inputs.new_commitment);
+
+        bool fullClose = rec.sold_shares >= rec.expected_shares;
+        if (fullClose) {
+            rec.status = BetStatus.CLOSED_CREDITED;
+        } else {
+            // Partial sell: the remainder stays open against fewer shares and settles
+            // (or closes again) later. expected_shares is reduced by the sold portion.
+            rec.expected_shares -= rec.sold_shares;
+            rec.status = BetStatus.FILLED;
+        }
+        rec.sell_proceeds = 0;
+        rec.sold_shares = 0;
+
+        emit PositionClosed(inputs.nullifier, inputs.nullifier_of_bet, inputs.new_commitment, fullClose);
+    }
+
+    // -------------------------------------------------------------------------
+    // Partial-fill credit (FC-4: limit order partially filled then terminated)
+    // -------------------------------------------------------------------------
+
+    /// @notice Refund the unfilled remainder of a partially-filled limit order and
+    /// normalize the bet record to a clean FILLED state. Constraint-identical to
+    /// betCancellationCredit: the user spends the post-bet note, proves membership,
+    /// and recommits balance + refund_amount. The Vault injects
+    /// refund_amount = bet_amount - spent_amount from betRecords (set by
+    /// reportPartialFill) so the user cannot inflate it in the proof.
+    ///
+    /// Requires status == PARTIAL_FILLED. After crediting, the record is normalized
+    /// (expected_shares := filled_shares, bet_amount := spent_amount, status := FILLED)
+    /// so creditSettlement / naCancellationCredit / closePosition all operate on a
+    /// normal FILLED record afterward.
+    function partialFillCredit(
+        bytes calldata proof,
+        PartialFillPublicInputs calldata inputs
+    ) external nonReentrant whenNotPaused {
+        if (nullifiers.isSpent(inputs.nullifier)) revert NullifierSpent();
+        if (!tree.isKnownRoot(inputs.merkle_root)) revert UnknownRoot();
+
+        BetRecord storage rec = betRecords[inputs.nullifier_of_bet];
+        if (rec.market_id == bytes32(0)) revert BetNotFound();
+        if (rec.status != BetStatus.PARTIAL_FILLED) revert BetNotPartialFilled();
+
+        // spent_amount <= bet_amount is enforced in reportPartialFill, so this cannot underflow.
+        uint64 refund_amount = rec.bet_amount - rec.spent_amount;
+
+        bytes32[] memory pubInputs = _partialCreditPublicInputs(inputs, refund_amount);
+        if (!IVerifier(verifiers[PARTIAL_CREDIT]).verify(proof, pubInputs)) revert InvalidProof();
+
+        nullifiers.markSpent(inputs.nullifier);
+        tree.insert(inputs.new_commitment);
+
+        // Normalize to a clean FILLED record reflecting only the shares actually bought.
+        rec.expected_shares = rec.filled_shares;
+        rec.bet_amount = rec.spent_amount;
+        rec.status = BetStatus.FILLED;
+        rec.filled_shares = 0;
+        rec.spent_amount = 0;
+
+        emit PartialFillCredited(inputs.nullifier, inputs.nullifier_of_bet, inputs.new_commitment);
+    }
+
+    // -------------------------------------------------------------------------
     // Public input assembly helpers
     // Each function packs the circuit's `pub` parameters in declaration order.
     // -------------------------------------------------------------------------
+
+    /// @dev Deposit binding proof public inputs (FC-2): [commitment, amount, owner_address].
+    /// owner_address is msg.sender cast to a BN254 field element, matching the note's
+    /// owner_address = uint256(uint160(address)).
+    function _depositPublicInputs(bytes32 commitment, uint256 amount, address owner)
+        internal
+        pure
+        returns (bytes32[] memory)
+    {
+        bytes32[] memory p = new bytes32[](3);
+        p[0] = commitment;
+        p[1] = bytes32(amount);
+        p[2] = bytes32(uint256(uint160(owner)));
+        return p;
+    }
 
     function _betAuthPublicInputs(BetAuthPublicInputs calldata i) internal pure returns (bytes32[] memory) {
         bytes32[] memory p = new bytes32[](9);
@@ -633,6 +863,34 @@ contract Vault is ReentrancyGuard, Ownable2Step, Pausable {
         p[3] = i.nullifier_of_bet;
         p[4] = i.market_id;
         p[5] = bytes32(uint256(bet_amount)); // Vault-injected; uint64 → uint256 → bytes32
+        return p;
+    }
+
+    function _closePublicInputs(ClosePublicInputs calldata i, uint64 sell_proceeds)
+        internal
+        pure
+        returns (bytes32[] memory)
+    {
+        bytes32[] memory p = new bytes32[](5);
+        p[0] = i.merkle_root;
+        p[1] = i.nullifier;
+        p[2] = i.new_commitment;
+        p[3] = i.nullifier_of_bet;
+        p[4] = bytes32(uint256(sell_proceeds)); // Vault-injected; uint64 → uint256 → bytes32
+        return p;
+    }
+
+    function _partialCreditPublicInputs(PartialFillPublicInputs calldata i, uint64 refund_amount)
+        internal
+        pure
+        returns (bytes32[] memory)
+    {
+        bytes32[] memory p = new bytes32[](5);
+        p[0] = i.merkle_root;
+        p[1] = i.nullifier;
+        p[2] = i.new_commitment;
+        p[3] = i.nullifier_of_bet;
+        p[4] = bytes32(uint256(refund_amount)); // Vault-injected; uint64 → uint256 → bytes32
         return p;
     }
 }

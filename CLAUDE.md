@@ -19,8 +19,9 @@ Full architecture is in `docs/architecture.md`. ZK circuit specifications are in
 
 ```
 packages/
-  contracts/     Solidity on Polygon (Vault, CommitmentMerkleTree, NullifierRegistry, 5× verifiers)
-  circuits/      Noir circuits (bet_auth, settlement_credit, withdrawal, bet_cancel, cancel_credit)
+  contracts/     Solidity on Polygon (Vault, CommitmentMerkleTree, NullifierRegistry, 8× verifiers incl. deposit (FC-2), position_close (FC-1), partial_credit (FC-4))
+  circuits/      Circom/snarkjs circuits in groth16/; Noir .nr spec-only files in subdirs (not compiled)
+                 Active: bet_auth, settlement_credit, withdrawal, bet_cancel, cancel_credit, deposit (FC-2), position_close (FC-1), partial_credit (FC-4)
   backend/       Node.js (signing-layer, proof-relay, indexer, mock-clob-server, mock-env)
   frontend/      Next.js + Wagmi (deposit, bet, settle, withdraw UIs)
   test-fixtures/ Generated test data (markets, users, action sequences)
@@ -34,6 +35,7 @@ docs/
   Q16-proving-backend-comparison.md  UltraPLONK vs Groth16 benchmark data
   collateral-flow-audit.md     pUSD/USDC collateral flow analysis
   codespaces-setup.md          Dev environment setup guide
+  future-changes.md            Approved-but-unimplemented changes (FC-1 position close, FC-2 deposit proof, FC-3 root window)
 
 CLAUDE.md              This file
 README.md              Project overview and quick start
@@ -49,8 +51,9 @@ README.md              Project overview and quick start
 - **Nullifier formula:** `Poseidon2(secret, nonce)`. Does NOT include owner_address or balance.
 - **Secret derivation (P1/P2 — random):** Secrets are generated via `crypto.getRandomValues()`. Users must download an ECIES-encrypted backup (encrypted to their wallet public key) immediately after deposit. There is no server-side recovery in P1/P2.
 - **Secret derivation (P3+ — wallet-derived):** Secrets are derived deterministically from wallet signatures. Formula: `keccak256(wallet.signMessage("PolyShield deposit derivation\nAddress: {W}\nIndex: {i}\nVersion: 1")) mod p`. The message string is a protocol constant — never change it after mainnet deployment. Users never need to back up a secret in P3+. See `docs/zk-design.md` §3.
-- **Merkle tree:** Poseidon-hashed, depth 32, append-only. Rolling 30-root history window.
-- **ZK language:** Circom + snarkjs (BN254 / Groth16). The Noir circuit files in `packages/circuits/` exist as a specification reference only and are not compiled or used for proof generation. Do not add new Circom circuits without approval.
+- **Merkle tree:** Poseidon-hashed, depth 32, append-only. Rolling 30-root history window. A larger window (e.g. 256) with O(1) `mapping`-based `isKnownRoot` lookup is approved to raise throughput headroom (FC-3 in `docs/future-changes.md`); the changing root does NOT serialize transactions to one per block (see T8). Keep the 30-root window until FC-3 lands.
+- **Deposit binding (MANDATORY, T20):** The deposit commitment MUST be bound to the deposited amount and depositor via a mandatory deposit ZK proof. `deposit` is NOT trivial. The committed `balance` is otherwise unconstrained against the transferred `amount`, allowing a depositor to commit a larger balance than they paid and drain the pool. Add `circuits/deposit`: private `secret`; public `(commitment, amount, owner_address)`; constraint `commitment == Poseidon4(secret, amount, 0, owner_address)`. The Vault passes `owner_address = uint256(uint160(msg.sender))` and `amount` from the on-chain transfer, forcing `balance == amount`, `nonce == 0`, `owner == msg.sender`. No change to the Poseidon4 formula or the four existing circuits. See FC-2. Treat as a blocker for any deposit-handling code.
+- **ZK language:** Circom + snarkjs (BN254 / Groth16). Active circuits live in `packages/circuits/groth16/`; the Noir `.nr` files in the other subdirectories are a specification reference only — they are not compiled and not wired into any build step. New Circom circuits are built through the `Benchmarking/groth16/` pipeline (`src/cli/compile.ts`, `setupCircuits.ts`, `generateVerifiers.ts`). Register new circuits in `Benchmarking/groth16/src/constants.ts` (CIRCUIT_IDS) and `src/interfaces.ts` (CircuitId union) before compiling.
 - **ZK backend:** Groth16 (snarkjs) for both dev/testnet and mainnet. The frontend generates proofs via `snarkjs.groth16.fullProve()` using WASM artifacts compiled from Circom. On-chain verification uses snarkjs-generated Solidity verifier contracts. UltraHonk and UltraPLONK have been evaluated (see `docs/Q16-proving-backend-comparison.md`) and are not used. Do not introduce UltraPLONK or UltraHonk verifiers anywhere.
 - **Chain:** Polygon mainnet (Polymarket runs here). Testnet target: Polygon Amoy.
 - **Collateral token:** Vault accepts and pays out in USDC only. pUSD conversion (via CollateralOnramp/Offramp) is internal to the Vault contract. Do not expose pUSD to users or circuits.
@@ -69,19 +72,23 @@ README.md              Project overview and quick start
 
 ## ZK Proofs: Quick Reference
 
-Five proof types. Full specs in `docs/zk-design.md`.
+Seven proof types. The **active Circom source** is in `packages/circuits/groth16/`; the `.nr` files in subdirectories are specification-only and are NOT compiled. Build new circuits through `Benchmarking/groth16/` (see `packages/circuits/README.md`). Full specs in `docs/zk-design.md`.
 
-| Proof | Noir file | Key public inputs |
-|---|---|---|
-| Deposit commitment | (none, trivial) | `commitment` (computed client-side, submitted directly) |
-| Bet Authorization | `circuits/bet_auth/src/main.nr` | `merkle_root, nullifier, new_commitment, bet_amount, price, expected_shares, market_id, outcome_side, position_id` |
-| Settlement Credit | `circuits/settlement_credit/src/main.nr` | `merkle_root, nullifier, new_commitment, nullifier_of_bet, market_id, total_credit` (payout_per_share and shares_held are Vault-injected, NOT user-supplied) |
-| Bet Cancel Credit | `circuits/bet_cancel/src/main.nr` | `merkle_root, nullifier, new_commitment, nullifier_of_bet, bet_amount` (bet_amount Vault-injected) |
-| N/A Cancel Credit | `circuits/cancel_credit/src/main.nr` | `merkle_root, nullifier, new_commitment, nullifier_of_bet, market_id, bet_amount` (bet_amount Vault-injected) |
-| Withdrawal | `circuits/withdrawal/src/main.nr` | `merkle_root, nullifier, withdrawal_amount, recipient_hash, new_commitment` |
+| Proof | Circom source (active) | Verifier slot | Key public inputs |
+|---|---|---|---|
+| Deposit binding (MANDATORY, T20/FC-2) ✅ | `groth16/deposit.circom` | `DEPOSIT = 5` | `commitment, amount, owner_address`. Binds committed balance + owner to deposited amount and `msg.sender`. NOT trivial |
+| Bet Authorization | `groth16/bet_auth.circom` | `BET_AUTH = 0` | `merkle_root, nullifier, new_commitment, bet_amount, price, expected_shares, market_id, outcome_side, position_id` |
+| Settlement Credit | `groth16/settlement_credit.circom` | `SETTLEMENT_CREDIT = 1` | `merkle_root, nullifier, new_commitment, nullifier_of_bet, market_id, total_credit` (payout_per_share and shares_held Vault-injected) |
+| Bet Cancel Credit | `groth16/bet_cancel.circom` | `BET_CANCEL = 3` | `merkle_root, nullifier, new_commitment, nullifier_of_bet, bet_amount` (bet_amount Vault-injected) |
+| N/A Cancel Credit | `groth16/cancel_credit.circom` | `CANCEL_CREDIT = 4` | `merkle_root, nullifier, new_commitment, nullifier_of_bet, market_id, bet_amount` (bet_amount Vault-injected) |
+| Withdrawal | `groth16/withdrawal.circom` | `WITHDRAWAL = 2` | `merkle_root, nullifier, withdrawal_amount, recipient_hash, new_commitment` |
+| Position Close (FC-1) ✅ | `groth16/position_close.circom` | `POSITION_CLOSE = 6` | `merkle_root, nullifier, new_commitment, nullifier_of_bet, sell_proceeds` (sell_proceeds Vault-injected from `reportSold`). v1 only |
+| Partial-Fill Credit (FC-4) ✅ | `groth16/partial_credit.circom` | `PARTIAL_CREDIT = 7` | `merkle_root, nullifier, new_commitment, nullifier_of_bet, refund_amount` (refund_amount = bet_amount − spent_amount, Vault-injected from `reportPartialFill`). Constraint-identical to `bet_cancel`. Advanced GTC/GTD limit-order flow, gated pending live-API testing |
 
-**Commitment formula (all circuits):** `bn254::hash_4([secret, balance as Field, nonce as Field, owner_address])`
-**Nullifier formula (all circuits):** `bn254::hash_2([secret, nonce as Field])`
+**Commitment formula (all circuits):** `Poseidon4(secret, balance, nonce, owner_address)` — uses circomlib `poseidon.circom` template, matching `NoteCommitment()` in `groth16/lib/note.circom`.
+**Nullifier formula (all circuits):** `Poseidon2(secret, nonce)`.
+
+> The Noir `.nr` files in `circuits/bet_auth/`, `circuits/settlement_credit/`, etc. are **not compiled, not used for proof generation, and not wired into any build step**. They are kept as a human-readable specification reference only.
 
 ---
 
@@ -90,7 +97,7 @@ Five proof types. Full specs in `docs/zk-design.md`.
 All contracts live in `packages/contracts/`. Use Foundry for development, testing, and deployment.
 
 **Contract checklist for `Vault.sol`:**
-- `deposit(commitment, amount)` — records commitment leaf, accepts USDC via `transferFrom`, increments `cumulativeDeposits[msg.sender]`
+- `deposit(proof, commitment, amount)`: verifies the MANDATORY deposit binding proof with public inputs `(commitment, amount, uint256(uint160(msg.sender)))` so the committed balance and owner are bound to the deposited amount and `msg.sender` (T20/FC-2); records commitment leaf, accepts USDC via `transferFrom`, increments `cumulativeDeposits[msg.sender]`. Do NOT ship the proofless `deposit(commitment, amount)`; it is the T20 vulnerability
 - `authorizeBet(proof, BetAuthPublicInputs)` — verifies Bet Auth proof, nullifies old note, inserts new commitment, writes `betRecords[nullifier]`
 - `resolveMarket(market_id, payout_per_share)` — operator-only; verifies `payout_per_share` against `ctf.payoutNumerators`, stores in `pendingCredit[market_id]`
 - `creditSettlement(proof, SettlementPublicInputs)` — verifies Settlement Credit proof; Vault injects `payout_per_share` from `pendingCredit[market_id]` and `shares_held` from `betRecords[nullifier_of_bet]`; user does NOT supply these values
@@ -99,6 +106,11 @@ All contracts live in `packages/contracts/`. Use Foundry for development, testin
 - `withdraw(proof, WithdrawalPublicInputs, recipientAddress)` — verifies Withdrawal proof, verifies `Poseidon2(recipientAddress, 0) == recipient_hash`, transfers USDC; reverts if recipient does not match the commitment's `owner_address`
 - `reportFilled(nullifier_of_bet)` — operator-only; sets `betRecords.status = FILLED`
 - `reportFOKFailure(nullifier_of_bet)` — operator-only; sets `betRecords.status = FAILED`
+- `reportSold(nullifier_of_bet, sold_shares, proceeds)`: operator-only; records operator-reported sale proceeds for a position close (Q24/FC-1; v1 only, not yet built)
+- `closePosition(proof, ClosePublicInputs)`: verifies the Position Close proof; Vault injects operator-reported `sell_proceeds`; credits the note and sets status `CLOSED_CREDITED` (full sell) or returns to `FILLED` with reduced `expected_shares` (partial sell). v1 only; see FC-1
+- `reportResting(nullifier_of_bet)`: operator-only; marks a live GTC/GTD limit order `RESTING` (only from `ACTIVE`). RESTING is intentionally exempt from `adminCancelBet`. FC-4
+- `reportPartialFill(nullifier_of_bet, filled_shares, spent_amount)`: operator-only; records a partial limit-order fill that then terminated (from `ACTIVE`/`RESTING`), sets status `PARTIAL_FILLED`. FC-4
+- `partialFillCredit(proof, PartialFillPublicInputs)`: verifies the Partial-Fill Credit proof; Vault injects `refund_amount = bet_amount − spent_amount`; refunds the unfilled remainder and normalizes the record to a clean `FILLED` (`expected_shares := filled_shares`, `bet_amount := spent_amount`). FC-4
 
 **New state in `Vault.sol`:**
 - `mapping(bytes32 => uint64) public pendingCredit` — `market_id => payout_per_share`, written by `resolveMarket`
@@ -162,7 +174,7 @@ Lives in `packages/frontend/`. Next.js app with Wagmi for wallet connection.
 ## Testing Standards
 
 - Smart contracts: Foundry tests in `packages/contracts/test/`. Minimum coverage: all state transitions (deposit, bet auth, settlement credit, withdrawal), all nullifier double-spend attempts, all invalid proof rejections, Merkle root window edge cases.
-- Circuits: Noir tests in each circuit's test file. Test valid proofs and expected failures for each constraint.
+- Circuits: The authoritative circuit tests are `packages/contracts/test/RealVerifier.t.sol` (end-to-end on-chain verification of generated Groth16 proofs) and the roundtrip in `Benchmarking/groth16/src/cli/generateTestProofs.ts`. The Noir `.nr` spec files have test helpers, but those test the spec document, not the production circuit.
 - Backend: Jest unit tests for the signing service. Mock the Polymarket API. Test the circuit breaker logic.
 - Never test with a real Polymarket EOA or real USDC on mainnet.
 
@@ -206,11 +218,19 @@ forge build
 forge test
 forge test --gas-report
 
-# ── Circuits ─────────────────────────────────────────────────────────────────
-cd packages/circuits
-nargo check
-nargo test
-nargo compile
+# ── Circuits (Groth16 / snarkjs — authoritative) ─────────────────────────────
+# Build all circuits (compile → trusted setup → generate verifiers):
+cd Benchmarking/groth16
+pnpm compile:circuits       # circom → r1cs + wasm (artifacts/)
+pnpm setup:circuits         # snarkjs groth16 setup → zkeys (setup/)
+pnpm generate:verifiers     # snarkjs → *Verifier.sol (contracts/generated/)
+# Copy artifacts to frontend:
+#   artifacts/<name>/<name>_js/<name>.wasm → packages/frontend/public/circuits/
+#   setup/<name>.zkey                      → packages/frontend/public/zkeys/
+#   contracts/generated/*Verifier.sol      → packages/contracts/src/verifiers/
+
+# Noir spec-reference only (not the live build — see packages/circuits/README.md):
+# cd packages/circuits && nargo check   (validates Noir spec files for consistency)
 
 # ── Backend ──────────────────────────────────────────────────────────────────
 cd packages/backend
@@ -275,7 +295,7 @@ Rules:
 
 ## Pending Implementation Tasks
 
-These tasks were produced by a full audit of `packages/contracts/src/Vault.sol` and all circuits in `packages/circuits/`. Execute them in the order listed. After completing all contract changes, run `forge build && forge test` and confirm zero failures. After circuit changes, run `nargo test` in each affected circuit directory and confirm zero failures.
+These tasks were produced by a full audit of `packages/contracts/src/Vault.sol` and all circuits in `packages/circuits/`. Execute them in the order listed. After completing all contract changes, run `forge build && forge test` and confirm zero failures. After adding a new Groth16 circuit, rebuild through `Benchmarking/groth16` and run `forge test --match-contract RealVerifierTest` to confirm the generated verifier accepts a real proof.
 
 ---
 
@@ -318,54 +338,25 @@ bet status valid (C1)? → condition resolved (C2)? → all numerators zero?
 
 ---
 
-### TASK-M2 — Fix zero leaf in all five circuit test files
+### TASK-M2 — Fix zero leaf in Noir spec-reference files (low priority — NOT the live build)
 
-**Files:**
+**Note:** The `.nr` files listed below are **specification reference only** and are not compiled or used for proof generation. The authoritative Circom circuits in `packages/circuits/groth16/` use `bytes32(0)` (Field `0`) as the zero leaf, matching `CommitmentMerkleTree.sol`. Fixing the Noir spec files is useful for documentation consistency but does not affect any running code. Execute only if maintaining the Noir specs as an accurate spec document matters.
+
+**Files (spec-only, not compiled):**
 - `packages/circuits/bet_auth/src/test.nr`
 - `packages/circuits/withdrawal/src/test.nr`
 - `packages/circuits/settlement_credit/src/test.nr`
 - `packages/circuits/bet_cancel/src/test.nr`
 - `packages/circuits/cancel_credit/src/test.nr`
 
-**Why:** Every test file constructs a Merkle zero-path starting from `bn254::hash_3([0, 0, 0])` as the zero leaf. The deployed `CommitmentMerkleTree.sol` uses `bytes32(0)` (the Field element `0`) as its zero leaf. These produce completely different zero-paths and roots, meaning every test that exercises the Merkle path constraint is testing against a phantom tree that will never exist on-chain.
-
-**Changes required:**
-
-In `bet_auth/src/test.nr`, replace the `zero_leaf()` helper:
-```noir
-// BEFORE
-fn zero_leaf() -> Field {
-    bn254::hash_3([0, 0, 0])
-}
-```
-```noir
-// AFTER — matches CommitmentMerkleTree.sol: bytes32(0) zero leaf
-fn zero_leaf() -> Field {
-    0
-}
-```
-The `build_zero_path()` in `bet_auth/test.nr` already calls `zero_leaf()`, so no further change is needed there.
-
-In the remaining four test files, replace the inline zero-leaf initializer in `build_zero_path()`:
+In each file, replace the zero-leaf initializer:
 ```noir
 // BEFORE
 let mut h = bn254::hash_3([0, 0, 0]);
-```
-```noir
 // AFTER — matches CommitmentMerkleTree.sol: bytes32(0) zero leaf
 let mut h: Field = 0;
 ```
-
-Apply this identical one-line substitution in `withdrawal/test.nr`, `settlement_credit/test.nr`, `bet_cancel/test.nr`, and `cancel_credit/test.nr`.
-
-After the fix, rerun `nargo test` in each circuit directory. All existing tests should still pass (they are self-consistent — they compute the root dynamically and never hardcode a specific root value). If any test hardcodes a root value, update it using the correct zero-leaf computation.
-
-Also update any `Prover.toml` files whose `merkle_root`, `merkle_path`, or `path_*` values were generated from the old zero leaf. Regenerate them by running the `test_print_bench_inputs` test in each circuit after the fix:
-```bash
-cd packages/circuits/<circuit_name>
-nargo test test_print_bench_inputs 2>&1 | grep BENCH
-```
-Copy the printed values back into `Prover.toml`.
+Do NOT run `nargo test` expecting these tests to validate the production system — they validate the Noir spec document only.
 
 ---
 
@@ -538,37 +529,14 @@ function adminCancelBet(bytes32 nullifier_of_bet) external onlyOwner {
 
 ---
 
-### TASK-C3 — Regenerate `SettlementCreditVerifier.sol` (stale verification key)
+### TASK-C3 — DONE. `SettlementCreditVerifier.sol` already has 6 public inputs.
 
-**File:** `packages/contracts/src/verifiers/SettlementCreditVerifier.sol`
-
-**Why:** The current `SettlementCreditVerifier.sol` embeds `vk.num_inputs = 8`. The `settlement_credit.nr` circuit has **6** public inputs. The verifier was generated against an older version of the circuit that still exposed `payout_per_share` and `shares_held` as public inputs 7 and 8. Both were subsequently moved to on-chain Vault logic, but the verifier was never regenerated. The `verify()` function explicitly checks `requiredPublicInputCount != _publicInputs.length` (line 587) and reverts with `PUBLIC_INPUT_COUNT_INVALID`. Every call to `Vault.creditSettlement()` will revert unconditionally until this is fixed.
-
-**Changes required:**
-
-1. Recompile the settlement_credit circuit to produce a fresh artifact:
-   ```bash
-   cd packages/circuits/settlement_credit
-   nargo compile
-   ```
-
-2. Generate a new verification key and Solidity verifier:
-   ```bash
-   bb write_vk -b ./target/settlement_credit.json -o ./target --oracle_hash keccak
-   bb contract -k ./target/vk -o ./target/SettlementCreditVerifier.sol --oracle_hash keccak
-   ```
-
-3. Replace `packages/contracts/src/verifiers/SettlementCreditVerifier.sol` with the file produced at `packages/circuits/settlement_credit/target/SettlementCreditVerifier.sol`.
-
-4. Open the new verifier and confirm the line reads:
-   ```
-   mstore(add(_vk, 0x20), 0x0000000000000000000000000000000000000000000000000000000000000006) // vk.num_inputs
-   ```
-   If it reads anything other than `0x6`, do not proceed — the compilation inputs were wrong.
-
-5. Run `forge build && forge test` in `packages/contracts/`. All tests must pass. Any test that exercises `creditSettlement` must be confirmed to pass, not just compile.
-
-**No changes to `Vault.sol` or the circuit itself.** The circuit and the `_settlementPublicInputs` function are both correct (6 elements). Only the verifier artifact is stale.
+The previously documented `bb write_vk`/`bb contract` commands were wrong (the project uses snarkjs Groth16, not barretenberg). The active `SettlementCreditVerifier.sol` in `packages/contracts/src/verifiers/` is a snarkjs-generated adapter with 6 IC constants (6 public inputs), matching `settlement_credit.circom`. If regeneration is ever needed, use the `Benchmarking/groth16` pipeline:
+```bash
+cd Benchmarking/groth16
+pnpm compile:circuits && pnpm setup:circuits && pnpm generate:verifiers
+```
+Then copy `contracts/generated/SettlementCreditVerifier.sol` → `packages/contracts/src/verifiers/SettlementCreditVerifier.sol`.
 
 ---
 

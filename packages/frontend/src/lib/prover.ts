@@ -104,9 +104,54 @@ export interface CancelCreditInputs {
   bet_amount: bigint
 }
 
+// FC-4: partial-fill credit. Constraint-identical to BetCancelInputs; refund_amount
+// (bet_amount - spent_amount) is Vault-injected on-chain from reportPartialFill.
+export interface PartialCreditInputs {
+  secret: string
+  current_balance: bigint
+  nonce: bigint
+  merkle_path: string[]
+  merkle_path_indices: number[]
+  owner_address: string
+  // public
+  merkle_root: string
+  nullifier: string
+  new_commitment: string
+  nullifier_of_bet: string
+  refund_amount: bigint
+}
+
+// FC-2: mandatory deposit binding proof. Tiny single-hash circuit (no Merkle path).
+export interface DepositInputs {
+  secret: string
+  // public
+  commitment: string
+  amount: bigint
+  owner_address: string
+}
+
+// FC-1: position close credit. Mirrors SettlementInputs; sell_proceeds is
+// Vault-injected on-chain from the operator's reportSold.
+export interface PositionCloseInputs {
+  secret: string
+  balance_before_credit: bigint
+  nonce: bigint
+  /** Nonce of the note spent at bet auth time (private). */
+  bet_nonce: bigint
+  merkle_path: string[]
+  merkle_path_indices: number[]
+  owner_address: string
+  // public
+  merkle_root: string
+  nullifier: string
+  new_commitment: string
+  nullifier_of_bet: string
+  sell_proceeds: bigint
+}
+
 // ── Internals ────────────────────────────────────────────────────────────────
 
-const CIRCUIT_NAMES = ['bet_auth', 'withdrawal', 'settlement_credit', 'bet_cancel', 'cancel_credit'] as const
+const CIRCUIT_NAMES = ['bet_auth', 'withdrawal', 'settlement_credit', 'bet_cancel', 'cancel_credit', 'deposit', 'position_close', 'partial_credit'] as const
 type CircuitName = typeof CIRCUIT_NAMES[number]
 
 const wasmCache = new Map<CircuitName, Promise<Uint8Array>>()
@@ -300,6 +345,48 @@ export async function generateCancelCreditProof(inputs: CancelCreditInputs): Pro
   })
 }
 
+export async function generateDepositProof(inputs: DepositInputs): Promise<ProofResult> {
+  return prove('deposit', {
+    secret:        inputs.secret,
+    commitment:    inputs.commitment,
+    amount:        inputs.amount.toString(),
+    owner_address: inputs.owner_address,
+  })
+}
+
+export async function generatePositionCloseProof(inputs: PositionCloseInputs): Promise<ProofResult> {
+  return prove('position_close', {
+    secret:                inputs.secret,
+    balance_before_credit: inputs.balance_before_credit.toString(),
+    nonce:                 inputs.nonce.toString(),
+    bet_nonce:             inputs.bet_nonce.toString(),
+    merkle_path:           inputs.merkle_path,
+    merkle_path_indices:   inputs.merkle_path_indices.map(String),
+    owner_address:         inputs.owner_address,
+    merkle_root:           inputs.merkle_root,
+    nullifier:             inputs.nullifier,
+    new_commitment:        inputs.new_commitment,
+    nullifier_of_bet:      inputs.nullifier_of_bet,
+    sell_proceeds:         inputs.sell_proceeds.toString(),
+  })
+}
+
+export async function generatePartialCreditProof(inputs: PartialCreditInputs): Promise<ProofResult> {
+  return prove('partial_credit', {
+    secret:               inputs.secret,
+    current_balance:      inputs.current_balance.toString(),
+    nonce:                inputs.nonce.toString(),
+    merkle_path:          inputs.merkle_path,
+    merkle_path_indices:  inputs.merkle_path_indices.map(String),
+    owner_address:        inputs.owner_address,
+    merkle_root:          inputs.merkle_root,
+    nullifier:            inputs.nullifier,
+    new_commitment:       inputs.new_commitment,
+    nullifier_of_bet:     inputs.nullifier_of_bet,
+    refund_amount:        inputs.refund_amount.toString(),
+  })
+}
+
 // ── Web Worker proof runner ───────────────────────────────────────────────────
 
 import type { ProverWorkerMessage, ProverWorkerResult } from '../workers/prover.worker'
@@ -356,5 +443,8 @@ function runProofMainThread(message: ProverWorkerMessage): Promise<ProofResult> 
     case 'settlement':     return generateSettlementProof(message.inputs)
     case 'bet_cancel':     return generateBetCancelProof(message.inputs)
     case 'cancel_credit':  return generateCancelCreditProof(message.inputs)
+    case 'deposit':        return generateDepositProof(message.inputs)
+    case 'position_close': return generatePositionCloseProof(message.inputs)
+    case 'partial_credit': return generatePartialCreditProof(message.inputs)
   }
 }

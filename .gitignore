@@ -59,6 +59,7 @@ packages/backend/*.db
 packages/backend/*.db-shm
 packages/backend/*.db-wal
 packages/backend/indexer/data/
+packages/backend/data/
 
 packages/test-fixtures/node_modules/
 

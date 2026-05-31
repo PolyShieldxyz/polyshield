@@ -29,6 +29,28 @@ export interface SettledMarket {
   outcome: "YES" | "NO" | "NA";
 }
 
+/**
+ * FC-4: a resting GTC/GTD limit order. Created on POST /order with orderType
+ * GTC/GTD (returns status "live") and driven to a terminal state via
+ * POST /admin/limit-fill. The signing layer polls GET /order/:id for the
+ * current lifecycle state.
+ */
+export interface RestingOrder {
+  orderID: string;
+  tokenId: string;
+  side: string;          // "BUY" | "SELL"
+  orderType: string;     // "GTC" | "GTD"
+  price: string;         // decimal probability (e.g. "0.65")
+  size: string;          // maker amount, decimal USDC
+  createdAt: string;
+  /** live = on book, matched = fully filled, partial = partially filled then terminated, cancelled = zero-fill terminated */
+  status: "live" | "matched" | "partial" | "cancelled";
+  /** shares actually filled, 1e6-scaled (0 until a fill is reported) */
+  filledShares: number;
+  /** bet_amount portion consumed, 1e6-scaled */
+  spentAmount: number;
+}
+
 export interface ServerState {
   fillBehavior: FillBehavior;
   heartbeatCount: number;
@@ -39,6 +61,8 @@ export interface ServerState {
   nextOrderId: number;
   /** Live settlement records, keyed by conditionId (lowercase hex) */
   settledMarkets: Record<string, SettledMarket>;
+  /** FC-4: resting limit orders, keyed by orderID */
+  restingOrders: Record<string, RestingOrder>;
 }
 
 export const state: ServerState = {
@@ -50,6 +74,7 @@ export const state: ServerState = {
   responseDelayMs: 0,
   nextOrderId: 1,
   settledMarkets: {},
+  restingOrders: {},
 };
 
 export function resetState(): void {
@@ -61,4 +86,5 @@ export function resetState(): void {
   state.responseDelayMs = 0;
   state.nextOrderId = 1;
   state.settledMarkets = {};
+  state.restingOrders = {};
 }

@@ -1,0 +1,51 @@
+/**
+ * POST /api/signing/[action]
+ * Proxies requests to the signing-layer auto-settlement HTTP server (port 3004).
+ * Keeps backend service URLs server-side. Source IPs are not forwarded.
+ *
+ * Routes proxied:
+ *   POST /api/signing/close-request    → signing-layer POST /close-request   (FC-1)
+ *   POST /api/signing/claim-permission → signing-layer POST /claim-permission
+ */
+
+import { NextRequest, NextResponse } from 'next/server'
+
+const SIGNING_URL = process.env.SIGNING_LAYER_URL ?? 'http://127.0.0.1:3004'
+
+export async function POST(
+  req: NextRequest,
+  { params }: { params: { slug: string[] } },
+): Promise<NextResponse> {
+  const action = params.slug.join('/')
+  const target = `${SIGNING_URL}/${action}`
+
+  console.log(`[api/signing] → POST ${target}`)
+
+  let body: unknown
+  try {
+    body = await req.json()
+  } catch {
+    return NextResponse.json({ error: 'invalid JSON body' }, { status: 400 })
+  }
+
+  let upstream: Response
+  try {
+    upstream = await fetch(target, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    })
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err)
+    console.error(`[api/signing] signing layer unreachable at ${target}: ${msg}`)
+    return NextResponse.json(
+      { error: 'Signing layer is not running. Start with: pnpm dev:mock' },
+      { status: 503 },
+    )
+  }
+
+  const data = await upstream.json().catch(() => ({}))
+  console.log(`[api/signing] ← ${upstream.status}`, JSON.stringify(data))
+
+  return NextResponse.json(data, { status: upstream.status })
+}

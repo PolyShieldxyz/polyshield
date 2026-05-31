@@ -31,6 +31,7 @@ export const VAULT_ABI = [
   {
     type: 'function', name: 'deposit',
     inputs: [
+      { name: 'proof',      type: 'bytes' },
       { name: 'commitment', type: 'bytes32' },
       { name: 'amount',     type: 'uint256' },
     ],

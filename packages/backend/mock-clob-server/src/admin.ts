@@ -21,6 +21,7 @@
 import { Router, Request, Response } from "express";
 import { ethers } from "ethers";
 import { state, resetState, FillBehavior, SettledMarket } from "./state";
+import { mintCTFShares } from "./routes/orders";
 
 export const adminRouter = Router();
 
@@ -174,6 +175,81 @@ adminRouter.post("/settle-market", (async (req: Request, res: Response) => {
     console.error(`[admin] settle-market failed: ${msg}`);
     res.status(500).json({ error: msg });
   }
+}) as (req: Request, res: Response) => void);
+
+/**
+ * POST /admin/limit-fill   (FC-4)
+ *
+ * Drives a resting GTC/GTD limit order to a terminal state for integration tests.
+ * Body: {
+ *   orderID?: string,          // target order; if omitted, the most recent live order for tokenId
+ *   tokenId?: string,          // used to find the order when orderID is omitted
+ *   terminal: "filled" | "partial" | "cancelled",
+ *   filled_shares?: number,    // 1e6-scaled; required for "partial"
+ *   spent_amount?: number      // 1e6-scaled; required for "partial"
+ * }
+ *
+ * For "filled"/"partial" BUY orders, mints the filled CTF shares to the deposit
+ * wallet (so the signing layer's reportFilled / reportPartialFill reflects real
+ * holdings). The signing layer polls GET /order/:id and maps the terminal status.
+ */
+adminRouter.post("/limit-fill", (async (req: Request, res: Response) => {
+  const { orderID, tokenId, terminal, filled_shares, spent_amount } = req.body as {
+    orderID?: string;
+    tokenId?: string;
+    terminal?: "filled" | "partial" | "cancelled";
+    filled_shares?: number;
+    spent_amount?: number;
+  };
+
+  if (terminal !== "filled" && terminal !== "partial" && terminal !== "cancelled") {
+    res.status(400).json({ error: 'terminal must be one of: "filled", "partial", "cancelled"' });
+    return;
+  }
+
+  // Resolve the target resting order.
+  let order = orderID ? state.restingOrders[orderID] : undefined;
+  if (!order && tokenId) {
+    const matches = Object.values(state.restingOrders)
+      .filter((o) => o.tokenId === tokenId && o.status === "live");
+    order = matches[matches.length - 1];
+  }
+  if (!order) {
+    res.status(404).json({ error: "no matching resting order (provide orderID or a tokenId with a live order)" });
+    return;
+  }
+
+  if (terminal === "cancelled") {
+    order.status = "cancelled";
+    order.filledShares = 0;
+    order.spentAmount = 0;
+  } else if (terminal === "filled") {
+    const sizeMicro = Math.floor(parseFloat(order.size) * 1e6);
+    const price = parseFloat(order.price);
+    order.filledShares = price > 0 ? Math.floor(sizeMicro / price) : sizeMicro;
+    order.spentAmount = sizeMicro;
+    order.status = "matched";
+  } else {
+    // partial
+    if (typeof filled_shares !== "number" || typeof spent_amount !== "number" || filled_shares <= 0 || spent_amount <= 0) {
+      res.status(400).json({ error: "filled_shares and spent_amount (positive, 1e6-scaled) are required for terminal=partial" });
+      return;
+    }
+    order.filledShares = Math.floor(filled_shares);
+    order.spentAmount = Math.floor(spent_amount);
+    order.status = "partial";
+  }
+
+  // Mint the filled shares for BUY orders so settlement/redemption finds real holdings.
+  if (order.side === "BUY" && order.filledShares > 0) {
+    await mintCTFShares(order.tokenId, order.filledShares);
+  }
+
+  console.log(
+    `[admin] limit-fill order=${order.orderID.slice(0, 10)}... → ${order.status} ` +
+    `filledShares=${order.filledShares} spentAmount=${order.spentAmount}`
+  );
+  res.json({ ok: true, order });
 }) as (req: Request, res: Response) => void);
 
 /**
