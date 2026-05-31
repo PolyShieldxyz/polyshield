@@ -18,11 +18,12 @@ import {
   toFieldSafe,
   type Note,
 } from '@/lib/notes'
-import { fetchMerklePath, relayBet, waitForTransactionConfirmation } from '@/lib/api'
+import { fetchMerklePath, relayBet, requestLimitOrder, waitForTransactionConfirmation } from '@/lib/api'
 import { generateProofInWorker } from '@/lib/prover'
 import { log, proofSummary } from '@/lib/logger'
 
 type Phase = 'edit' | 'running' | 'success' | 'error'
+type OrderType = 'FOK' | 'GTC' | 'GTD'
 const VAULT_ADDRESS = (process.env.NEXT_PUBLIC_VAULT_ADDRESS ??
   '0x0000000000000000000000000000000000000000') as `0x${string}`
 
@@ -73,6 +74,11 @@ export function BetModal({
   const [error, setError] = useState<string | null>(null)
   const [txHash, setTxHash] = useState('')
   const [autoSettle, setAutoSettle] = useState(true)
+  // FC-4: advanced order types. FOK (default) = today's behavior; GTC/GTD rest on
+  // the book at the user's limit price (gated advanced mode pending live-API testing).
+  const [orderType, setOrderType] = useState<OrderType>('FOK')
+  const [limitCents, setLimitCents] = useState(Math.max(1, Math.min(99, Math.round(price * 100))))
+  const [gtdMinutes, setGtdMinutes] = useState(60)
 
   useEffect(() => {
     if (!open) return
@@ -81,13 +87,22 @@ export function BetModal({
     setError(null)
     setTxHash('')
     setAutoSettle(true)
-  }, [open, initialAmount, marketId])
+    setOrderType('FOK')
+    setLimitCents(Math.max(1, Math.min(99, Math.round(price * 100))))
+    setGtdMinutes(60)
+  }, [open, initialAmount, marketId, price])
 
+  // FOK fills at the market price; a limit order fills at most at the user's tick-snapped
+  // limit price (cents). The bet_auth proof is built at this effective price.
+  const effectivePrice = useMemo(
+    () => (orderType === 'FOK' ? price : limitCents / 100),
+    [orderType, price, limitCents],
+  )
   const amountMicro = useMemo(() => parseUsdcToMicro(amountInput), [amountInput])
   const shares = useMemo(() => {
-    if (!amountMicro || price <= 0) return 0n
-    return (amountMicro * 100_000_000n) / BigInt(Math.round(price * 100_000_000))
-  }, [amountMicro, price])
+    if (!amountMicro || effectivePrice <= 0) return 0n
+    return (amountMicro * 100_000_000n) / BigInt(Math.round(effectivePrice * 100_000_000))
+  }, [amountMicro, effectivePrice])
 
   const submit = async () => {
     if (!address || !amountMicro || amountMicro <= 0n) return
@@ -132,7 +147,7 @@ export function BetModal({
       const nullifierHex = computeNullifier(secret, cashNote.nonce)
       const safeConditionId = toFieldSafe(conditionId)
       const positionId = positionToField(conditionId, side)
-      const priceScaled = BigInt(Math.round(price * 100_000_000))
+      const priceScaled = BigInt(Math.round(effectivePrice * 100_000_000))
       const shareRemainder = (stake * 100_000_000n) % priceScaled
 
       const { proof } = await generateProofInWorker({
@@ -174,7 +189,19 @@ export function BetModal({
         marketName,
         ...proofSummary(proof),
         stake: stake.toString(),
+        orderType,
       })
+
+      // FC-4: register the limit-order intent BEFORE relaying so it is stored when
+      // the BetAuthorized event fires (the signing layer reads it to submit a resting
+      // GTC/GTD order instead of the default FOK). Keyed by nullifier_of_bet.
+      if (orderType !== 'FOK') {
+        await requestLimitOrder({
+          nullifier_of_bet: nullifierHex,
+          order_type: orderType,
+          expiration: orderType === 'GTD' ? gtdMinutes * 60 : undefined,
+        })
+      }
 
       const { txHash: nextTxHash } = await relayBet(proof, relayInputs)
       setTxHash(nextTxHash)
@@ -205,6 +232,7 @@ export function BetModal({
         commitment: `receipt-${nullifierHex}` as `0x${string}`,
         nullifier: nullifierHex,
         nullifier_of_bet: nullifierHex,
+        position_id: positionId as `0x${string}`,
         marketId,
         condition_id: safeConditionId as `0x${string}`,
         raw_condition_id: conditionId,
@@ -283,6 +311,49 @@ export function BetModal({
                 Reset
               </button>
             </div>
+          </div>
+          <div className="col gap-2">
+            <div className="row gap-2" style={{ alignItems: 'center' }}>
+              <div className="micro">ORDER TYPE</div>
+              <span className="pill pill-soft" style={{ fontSize: 9 }}>ADVANCED</span>
+            </div>
+            <div className="row" style={{ gap: 8 }}>
+              {(['FOK', 'GTC', 'GTD'] as OrderType[]).map((t) => (
+                <button
+                  key={t}
+                  className={`btn btn-sm ${orderType === t ? 'btn-primary' : ''}`}
+                  onClick={() => setOrderType(t)}
+                  type="button"
+                >
+                  {t === 'FOK' ? 'Fill-or-kill' : t === 'GTC' ? 'Limit (GTC)' : 'Limit (GTD)'}
+                </button>
+              ))}
+            </div>
+            {orderType !== 'FOK' && (
+              <div className="row" style={{ gap: 12, flexWrap: 'wrap' }}>
+                <label className="col gap-1">
+                  <span className="micro">LIMIT PRICE (¢ per share, 1–99)</span>
+                  <input
+                    type="number" min={1} max={99} value={limitCents}
+                    onChange={(e) => setLimitCents(Math.max(1, Math.min(99, Number(e.target.value) || 1)))}
+                    className="input" style={{ width: 140 }}
+                  />
+                </label>
+                {orderType === 'GTD' && (
+                  <label className="col gap-1">
+                    <span className="micro">EXPIRES IN (MINUTES)</span>
+                    <input
+                      type="number" min={1} value={gtdMinutes}
+                      onChange={(e) => setGtdMinutes(Math.max(1, Number(e.target.value) || 1))}
+                      className="input" style={{ width: 140 }}
+                    />
+                  </label>
+                )}
+                <div className="small" style={{ fontSize: 11, color: 'var(--text-3)', alignSelf: 'flex-end' }}>
+                  Rests on the book; the full stake is held until it fills, expires, or partially fills (then reclaim the remainder).
+                </div>
+              </div>
+            )}
           </div>
           <label className="row gap-3" style={{ alignItems: 'flex-start', cursor: 'not-allowed', opacity: 0.5 }}>
             <input

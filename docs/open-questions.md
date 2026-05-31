@@ -109,8 +109,9 @@ The real anonymity variable is anonymity set size (T3 in `threat-model.md`): how
 ### Q7 — Partial CLOB fills
 
 **Status:** RESOLVED (2026-05-20)
-**Resolution:** Option C — FOK (Fill-or-Kill) orders exclusively.
-**Impact:** Bet Authorization circuit, Settlement Credit circuit, Vault accounting
+**Resolution (v1):** Option C — FOK (Fill-or-Kill) orders exclusively.
+**REOPENED 2026-05-30:** as a near-term roadmap item to add native limit orders (GTC/GTD). v1 stays FOK-only. See FC-4 in `docs/future-changes.md` and the detail block at the end of this question.
+**Impact:** Bet Authorization circuit, Settlement Credit circuit, Vault accounting, Signing Layer, new partial-fill credit proof
 
 **Resolution rationale:**
 
@@ -129,6 +130,22 @@ This eliminates the partial fill accounting problem entirely. No Refund Credit p
 5. If `FOK_ORDER_NOT_FILLED_ERROR`: see Q7a below — a recovery proof type is required.
 
 **Sub-question Q7a — RESOLVED (2026-05-20):** Bet Cancellation Credit circuit specified in `zk-design.md` Section 5. Design summary: the Signing Layer operator calls `Vault.reportFOKFailure(nullifier_of_bet)`, which marks the bet record `FAILED`. The user then submits a Bet Cancellation Credit proof proving ownership of the post-bet note. The Vault injects `bet_amount` from `betRecords` (not user-supplied) and verifies the proof before restoring the note balance. The `BetRecord` struct now includes `bet_amount` and `status` fields. Both `bet_cancel.nr` and `cancel_credit.nr` are fully specified and unblocked for Claude Code implementation.
+
+#### REOPENED (2026-05-30): native limit order roadmap
+
+v1 ships FOK-only, which is correct because FOK is all-or-nothing and eliminates partial-fill accounting. But users want true limit orders (rest on the book until filled), so this is reopened as a near-term roadmap item (FC-4). Verified Polymarket facts:
+
+- **Native limit order types** are `GTC` (rests until filled or cancelled) and `GTD` (auto-expires at a timestamp; Polymarket enforces a 60-second security threshold, so an effective lifetime of N seconds means `expiration = now + 60 + N`). Under the hood all orders are limit orders; FOK/FAK are just marketable limit orders. Source: docs.polymarket.com create-order.
+- **Fill reporting is available for async orders.** The synchronous `POST /order` response gives `status` (`live`/`matched`/`delayed`/`unmatched`) and FOK failure via `FOK_ORDER_NOT_FILLED_ERROR`. For resting/partial fills, the authenticated **User Channel** websocket (`wss://ws-subscriptions-clob.polymarket.com/ws/user`) pushes `TRADE` messages filtered by API key with lifecycle `MATCHED -> MINED -> CONFIRMED` (and `RETRYING`/`FAILED`). REST `GET /orders/:id` and `GET /trades` allow polling. Source: docs.polymarket.com websocket user-channel.
+- **Heartbeat dependency.** Open orders are auto-cancelled if the CLOB heartbeat lapses past 10 seconds. A resting limit order therefore only persists while the signing layer is alive; a signer outage cancels it. This interacts with Q3 (backend availability).
+- **Partial fills return.** GTC/GTD/FAK can fill partially, which is exactly what FOK was chosen to avoid. Supporting limit orders requires partial-fill/expiry note accounting: a new operator report `reportPartialFill(nullifier_of_bet, filled_shares, spent_amount)` plus a partial-credit proof that refunds the unfilled remainder to the note.
+- **Circuit fit.** `bet_auth` already carries `price` and `expected_shares = floor(bet_amount * 1e8 / price)`, so a user limit price fits the existing circuit. The work is async fill tracking, partial-credit accounting, and the bet-flow ordering decision.
+
+**Two flow options to evaluate in FC-4:**
+- A. Place-first, debit-on-fill: submit the GTC/GTD order, then call `authorizeBet` only on confirmed fill. Cleanest accounting (no refund path), but the note balance must be reserved off-chain while the order rests to prevent the user double-spending the same note elsewhere, and the privacy timing model changes (the order rests before any on-chain event).
+- B. Pre-debit, refund-remainder: keep the current debit-then-submit pattern; on partial fill or expiry, refund the unfilled portion via the partial-credit proof. Matches today's FOK flow and the cancellation-credit pattern, at the cost of a new proof type and operator report.
+
+Full spec and decision tracked in FC-4.
 
 ---
 
@@ -424,3 +441,60 @@ These items emerged from the Claude Design prototype. They are not blockers for 
 - Can multiple notes be exported in one file?
 - How does the import flow work: connect wallet → decrypt file → restore notes to local state?
 - Should the backup also be pinnable to IPFS (as Q10 mentions) automatically, or only if the user opts in?
+
+---
+
+## Position Management (added 2026-05-30)
+
+### Q24: Position close / secondary sale before settlement
+
+**Status:** RESOLVED (2026-05-30)
+**Resolution:** New `position_close` proof type, mirror of Settlement Credit. v1 = operator-reported proceeds. Partial sells supported in v1.
+**Impact:** New circuit, new Vault function, Signing Layer, `BetRecord` struct
+**See also:** `docs/future-changes.md` FC-1 (implementation plan), T20.
+
+**Problem:** A depositor cannot exit a position before the market resolves. A bet is a FOK BUY; value only returns to the note via Settlement Credit, Bet Cancellation Credit (FOK failed), or N/A Cancellation Credit. Active traders need to realize gains or cut losses mid-market. This is the active-management side of the Q5 limitation.
+
+**Resolution rationale:**
+
+Closing means the Signing Layer submits a FOK SELL of the user's shares of `position_id` at a user-chosen limit price. Proceeds (pUSD then USDC via offramp) return to the pool, and the user's note is credited. The note mechanics mirror `settlement_credit` exactly: spend the post-bet note, prove tree membership, recommit `balance + proceeds`.
+
+The mid-market sell price is set by the off-chain CLOB fill and is NOT derivable from CTF on-chain state, so `proceeds` cannot be made trustless the way `payout_per_share` is. The chosen v1 design sources `proceeds` from an operator report (operator-only `reportSold`, mirror of `reportFilled`), Vault-injected so the user cannot alter it in the proof. This is the same trust class already accepted by `acknowledgePolymarketReturn`. v2 moves to an on-chain `OrderFilled` event proof or a TEE-attested value.
+
+**v1 scope:**
+- Full and partial sells are both supported in v1. A partial sell splits one bet record into a sold portion (credited) and a remaining portion (still `FILLED` against fewer shares); the remainder reuses the change-note construction already present in `withdrawal.nr`.
+- Proceeds are operator-reported and Vault-injected.
+
+**Privacy:** A SELL from the vault EOA is publicly visible on Polymarket, exactly like the BUY, consistent with the public-bet-content model (Q6/T1). The close proof reveals `nullifier_of_bet`, but Settlement Credit already reveals the same value, so no new linkage is created. Close requests go through the relay, never the user's wallet (T19).
+
+**Sign-off note:** New circuit, new public inputs, new bet statuses, and a new operator trust instance. Approved in direction; confirm exact public-input ordering against the verifier before codegen. See FC-1.
+
+---
+
+## Compliance (added 2026-05-30)
+
+### Q25: Compliant selective disclosure of a depositor's bets
+
+**Status:** ONGOING
+**Direction:** Option C, threshold-escrowed, per-subject viewing key.
+**Impact:** SDK, deposit flow, key-management infrastructure, governance
+
+**Problem:** A regulator may lawfully request the full bet history of an identified depositor W (for example, to detect or track insider trading). The privacy invariant hides which depositor authorized which bet. The compliance goal is selective, per-subject disclosure with no protocol-wide backdoor: producing W's bets must not deanonymize any other depositor.
+
+**Why this is feasible at all:** Three structural facts give a per-subject hook. (1) `owner_address` (= W) is in every note commitment via `Poseidon4(secret, balance, nonce, owner_address)`. (2) In P3+, secrets are wallet-derived deterministically by deposit index, so given W's wallet (or a key derived from it) every note in W's lineage is re-derivable. (3) The deposit W → vault is already public. Together, anyone holding W's viewing key can re-derive W's secrets, recompute every commitment/nullifier in W's chain, and match them to the public `BetAuthorized` events. No one else can. That is a Zcash-style viewing key.
+
+**Chosen direction, Option C (threshold-escrowed viewing key):** At deposit, the client additionally submits `ThresholdEnc(guardians, viewing_key_for_W)`, keyed to W. A lawful request triggers a k-of-n guardian decryption that yields only W's viewing key, after which disclosure proceeds as with a user-held key. This is per-subject (never exposes the whole set), auditable (each decryption is a recorded guardian action), and does not require subject cooperation, which jurisdictions that mandate a recoverable disclosure path generally require.
+
+**Open items (why this is ONGOING, not resolved):**
+- Guardian set composition, threshold parameters (k, n), and selection/rotation governance.
+- Encryption scheme for the escrow blob and its binding to W and to the deposit.
+- Whether Option C is mandatory for all deposits or gated per deployment/jurisdiction; the privacy trade-off (a k-of-n quorum that can deanonymize a chosen subject) must be explicitly accepted by Arya before this ships.
+- Interaction with P1/P2 random secrets (viewing key is the note backup set, not auto-derivable) vs P3+ deterministic secrets (clean).
+- Relationship to the existing auto-settlement permission blob, which already gives the operator linkage for opt-in users and could serve as an interim disclosure source.
+
+**Options considered and not chosen as the primary path:**
+- User-held viewing key (compelled disclosure only): zero backdoor, but cannot satisfy jurisdictions requiring disclosure without subject cooperation. Strong default candidate; retained as the disclosure mechanic that Option C feeds into.
+- Owner reveal at settlement: destroys the core invariant for everyone; rejected as a default.
+- Privacy-Pools association sets: answers "is W clean?", not "what did W bet?"; adjacent tool, different question.
+
+**Decision required from Arya:** confirm Option C parameters and whether it is mandatory or deployment-gated. This is a privacy-model change and requires explicit trade-off acceptance.

@@ -67,9 +67,15 @@ Polyshield's privacy guarantee is: **which depositor authorized which bet is hid
 
 ### T8 — Stale Merkle Root
 **Severity:** HIGH
-**Description:** Between when a user generates their ZK proof (using the current Merkle root) and when they submit the proof on-chain, other users may have made deposits or state transitions, changing the Merkle root. The proof will reference an outdated root and be rejected.
-**Mitigation:** The Vault contract maintains a rolling window of the last 30 Merkle roots (`recentRoots[30]`). The proof is valid if its `merkle_root` matches any root in the window. This is the same approach as Tornado Cash's `MerkleTreeWithHistory`.
-**Status:** DESIGN LEVEL
+**Description:** Between when a user generates their ZK proof (using a Merkle root) and when they submit the proof on-chain, other users may have made deposits or state transitions, each of which inserts a leaf and produces a new root. If the referenced root has been evicted from the history window by the time the tx executes, the proof is rejected (`UnknownRoot`).
+**Mitigation:** The Vault contract maintains a rolling window of the last 30 Merkle roots (`recentRoots[30]`). The proof is valid if its `merkle_root` matches any root in the window (`CommitmentMerkleTree.isKnownRoot`). This is the same approach as Tornado Cash's `MerkleTreeWithHistory`.
+
+**Clarification (2026-05-30): this does NOT serialize state changes to one transaction per block.** The root changes on every `tree.insert` and `merkle_root` is a public input to every proof, but concurrency is safe for two reasons: (1) membership is monotonic, a leaf present under root R is present under every later root; (2) an old root plus its old path verify together, because the circuit checks `computed_root == merkle_root` and the contract accepts R as long as it is within the last 30 roots, so users never refresh their path mid-flight. Many state-changing transactions can therefore land in the same block, each carrying whatever recent root it was built against. The only true serialization point is per-note nullifier double-spend (T7), which is intended.
+
+**Real constraint:** the referenced root must still be among the last `HISTORY_SIZE` (currently 30) roots when the tx executes. Each successful state transition inserts exactly one leaf = one new root, so if more than 30 inserts land between proof-build and inclusion, the root is stale. With 30s-2min client proving times, 30 inserts under load is plausible and would cause stale-root reverts and forced rebuilds.
+
+**Scaling plan (FC-3 in `docs/future-changes.md`):** bump `HISTORY_SIZE` to a much larger value (e.g. 256) and switch `isKnownRoot` from the O(HISTORY_SIZE) array scan to a `mapping(bytes32 => bool)` lookup with a ring buffer for eviction, making a large window O(1) per verify. No circuit changes required.
+**Status:** DESIGN LEVEL (mitigation correct; window-scaling tracked as FC-3)
 
 ### T9 — Withdrawal Front-Running
 **Severity:** HIGH
@@ -155,7 +161,17 @@ Polyshield's privacy guarantee is: **which depositor authorized which bet is hid
 
 ---
 
-## 6. Attack Surface Summary
+## 6. Soundness Attacks
+
+### T20: Deposit Balance Forgery (Committed Balance != Deposited Amount)
+**Severity:** CRITICAL
+**Description:** `Vault.deposit(bytes32 commitment, uint256 amount)` transfers `amount` USDC and inserts `commitment` into the tree, but it cannot read the `balance` field inside the commitment (the commitment hides it), and there is no deposit-time ZK proof. Every spending circuit checks balance only relatively (`bet_auth`: `current_balance >= bet_amount`; `withdrawal`: `withdrawal_amount <= final_balance`). Nothing ties the committed `balance` to the deposited `amount`. A depositor can call `deposit(Poseidon4(secret, 200e6, 0, owner), amount = 100e6)`: the contract pulls 100 USDC but inserts a commitment that opens to a 200 USDC balance. A later valid withdrawal for 200 USDC passes every assertion (the note really is in the tree; `200 <= 200`) and pays out 200, stealing 100 from the shared pool. The `InsufficientLiquidity` guard in `withdraw` only makes the loss surface later (the pool drains and honest users cannot withdraw); it is not a defense. `owner_address` is likewise unbound at deposit, so W-to-W is unenforced at the entry point.
+**Mitigation (SOLVED, direction approved, see FC-2 in `docs/future-changes.md`):** Re-instate the deposit proof as MANDATORY (prior docs wrongly classed it optional/trivial). Add a small `deposit` circuit: private `secret`; public `(commitment, amount, owner_address)`; constraint `commitment == Poseidon4(secret, amount, 0, owner_address)`. `Vault.deposit` becomes `deposit(proof, commitment, amount)` and calls the verifier with public inputs `(commitment, amount, uint256(uint160(msg.sender)))`, forcing `balance == amount`, `nonce == 0`, and `owner_address == msg.sender`, with `secret` still private. No change to the Poseidon4 commitment formula or the four existing circuits; one new verifier slot (`DEPOSIT = 5`). A global "total committed == total deposited" invariant is uncheckable per-note without revealing balances and only fails after the theft, so it is not an acceptable substitute.
+**Status:** SOLVED at design level (mandatory deposit proof). Treat as a blocker for any deposit-handling code until implemented.
+
+---
+
+## 7. Attack Surface Summary
 
 | # | Attack | Severity | Mitigation Status |
 |---|---|---|---|
@@ -178,3 +194,4 @@ Polyshield's privacy guarantee is: **which depositor authorized which bet is hid
 | T17 | Note preimage loss | HIGH | Open |
 | T18 | Proof Relay IP/timing correlation | HIGH | Open |
 | T19 | Frontend direct transaction (impl risk) | CRITICAL | Design level |
+| T20 | Deposit balance forgery (committed != deposited) | CRITICAL | Solved (mandatory deposit proof, FC-2) |

@@ -11,6 +11,9 @@ import {SettlementCreditVerifier} from "../src/verifiers/SettlementCreditVerifie
 import {WithdrawalVerifier} from "../src/verifiers/WithdrawalVerifier.sol";
 import {BetCancelVerifier} from "../src/verifiers/BetCancelVerifier.sol";
 import {CancelCreditVerifier} from "../src/verifiers/CancelCreditVerifier.sol";
+import {DepositVerifier} from "../src/verifiers/DepositVerifier.sol";
+import {PositionCloseVerifier} from "../src/verifiers/PositionCloseVerifier.sol";
+import {PartialCreditVerifier} from "../src/verifiers/PartialCreditVerifier.sol";
 import {MockUSDC} from "../src/mocks/MockUSDC.sol";
 import {MockCTF} from "../src/mocks/MockCTF.sol";
 import {MockCollateralOfframp} from "../src/mocks/MockCollateralOfframp.sol";
@@ -58,6 +61,9 @@ contract MockDeploy is Script {
     WithdrawalVerifier      internal s_withdrawal;
     BetCancelVerifier       internal s_betCancel;
     CancelCreditVerifier    internal s_cancelCredit;
+    DepositVerifier         internal s_deposit;
+    PositionCloseVerifier   internal s_positionClose;
+    PartialCreditVerifier   internal s_partialCredit;
     bytes32                 internal s_resolvedYesMarket;
     bytes32                 internal s_naMarket;
 
@@ -119,21 +125,27 @@ contract MockDeploy is Script {
         vm.stopBroadcast();
     }
 
-    // ── Step 3: deploy + wire real UltraPLONK verifiers ─────────────────────
+    // ── Step 3: deploy + wire real Groth16 (snarkjs) verifiers ──────────────
 
     function _deployVerifiers() internal {
         vm.startBroadcast(DEPLOYER_KEY);
-        s_betAuth      = new BetAuthVerifier();
-        s_settlement   = new SettlementCreditVerifier();
-        s_withdrawal   = new WithdrawalVerifier();
-        s_betCancel    = new BetCancelVerifier();
-        s_cancelCredit = new CancelCreditVerifier();
+        s_betAuth       = new BetAuthVerifier();
+        s_settlement    = new SettlementCreditVerifier();
+        s_withdrawal    = new WithdrawalVerifier();
+        s_betCancel     = new BetCancelVerifier();
+        s_cancelCredit  = new CancelCreditVerifier();
+        s_deposit       = new DepositVerifier();         // FC-2
+        s_positionClose = new PositionCloseVerifier();   // FC-1
+        s_partialCredit = new PartialCreditVerifier();   // FC-4
 
         s_vault.proposeVerifier(s_vault.BET_AUTH(),          address(s_betAuth));
         s_vault.proposeVerifier(s_vault.SETTLEMENT_CREDIT(), address(s_settlement));
         s_vault.proposeVerifier(s_vault.WITHDRAWAL(),        address(s_withdrawal));
         s_vault.proposeVerifier(s_vault.BET_CANCEL(),        address(s_betCancel));
         s_vault.proposeVerifier(s_vault.CANCEL_CREDIT(),     address(s_cancelCredit));
+        s_vault.proposeVerifier(s_vault.DEPOSIT(),           address(s_deposit));
+        s_vault.proposeVerifier(s_vault.POSITION_CLOSE(),    address(s_positionClose));
+        s_vault.proposeVerifier(s_vault.PARTIAL_CREDIT(),    address(s_partialCredit));
         vm.stopBroadcast();
         // acceptVerifier calls happen in a second pass after Node.js advances Anvil's
         // clock past the 48-hour timelock. See MockAcceptVerifiers.s.sol + deploy.ts.
@@ -170,17 +182,22 @@ contract MockDeploy is Script {
         vm.stopBroadcast();
     }
 
-    // ── Step 6: approve + deposit ─────────────────────────────────────────────
+    // ── Step 6: pre-approve USDC (no seeded deposits) ─────────────────────────
+    //
+    // FC-2 (T20): deposit() now requires a real Groth16 binding proof, which cannot
+    // be produced from a Solidity script. The previous keccak placeholder commitments
+    // were phantom leaves no real note could ever open. Real deposits are created
+    // through the proof-gated frontend flow. We still pre-approve USDC so the first
+    // frontend deposit does not need a separate approval tx. ALICE_COMMITMENT_1 /
+    // BOB_COMMITMENT_1 remain logged as stable env values for mock-env/deploy.ts.
 
     function _seedDeposits() internal {
         vm.startBroadcast(ALICE_KEY);
         s_usdc.approve(address(s_vault), type(uint256).max);
-        s_vault.deposit(ALICE_COMMITMENT_1, 1_000 * 1e6); // $1k
         vm.stopBroadcast();
 
         vm.startBroadcast(BOB_KEY);
         s_usdc.approve(address(s_vault), type(uint256).max);
-        s_vault.deposit(BOB_COMMITMENT_1, 500 * 1e6); // $500
         vm.stopBroadcast();
     }
 
@@ -216,6 +233,9 @@ contract MockDeploy is Script {
         console2.log("WITHDRAWAL_VERIFIER=%s",    address(s_withdrawal));
         console2.log("BET_CANCEL_VERIFIER=%s",    address(s_betCancel));
         console2.log("CANCEL_CREDIT_VERIFIER=%s", address(s_cancelCredit));
+        console2.log("DEPOSIT_VERIFIER=%s",        address(s_deposit));
+        console2.log("POSITION_CLOSE_VERIFIER=%s", address(s_positionClose));
+        console2.log("PARTIAL_CREDIT_VERIFIER=%s", address(s_partialCredit));
         console2.log("RESOLVED_YES_MARKET=%s",    vm.toString(s_resolvedYesMarket));
         console2.log("NA_MARKET=%s",              vm.toString(s_naMarket));
         console2.log("ALICE_COMMITMENT_1=%s",     vm.toString(ALICE_COMMITMENT_1));

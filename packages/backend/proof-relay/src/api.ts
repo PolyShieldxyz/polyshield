@@ -7,6 +7,8 @@ import {
   relayWithdraw,
   relayBetCancellationCredit,
   relayNACancellationCredit,
+  relayClosePosition,
+  relayPartialFillCredit,
 } from "./relayer";
 import { computeMerkleProof } from "./merkle";
 
@@ -177,6 +179,40 @@ export function createApp(): express.Application {
       res.json({ txHash });
     } catch (err) {
       logger.error({ err }, "naCancellationCredit relay failed");
+      res.status(500).json({ error: extractRevertReason(err) });
+    }
+  });
+
+  // FC-1: relay a position-close credit proof (pre-settlement secondary sale).
+  app.post("/relay/close", async (req, res) => {
+    const { proof, inputs } = req.body;
+    if (!proof || !inputs) {
+      res.status(400).json({ error: "proof and inputs required" });
+      return;
+    }
+    try {
+      const txHash = await relayClosePosition(proof, inputs);
+      logger.info({ txHash }, "closePosition relayed");
+      res.json({ txHash });
+    } catch (err) {
+      logger.error({ err }, "closePosition relay failed");
+      res.status(500).json({ error: extractRevertReason(err) });
+    }
+  });
+
+  // FC-4: relay a partial-fill credit proof (limit order partially filled then terminated).
+  app.post("/relay/partial-credit", async (req, res) => {
+    const { proof, inputs } = req.body;
+    if (!proof || !inputs) {
+      res.status(400).json({ error: "proof and inputs required" });
+      return;
+    }
+    try {
+      const txHash = await relayPartialFillCredit(proof, inputs);
+      logger.info({ txHash }, "partialFillCredit relayed");
+      res.json({ txHash });
+    } catch (err) {
+      logger.error({ err }, "partialFillCredit relay failed");
       res.status(500).json({ error: extractRevertReason(err) });
     }
   });

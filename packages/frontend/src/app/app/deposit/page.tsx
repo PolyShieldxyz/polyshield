@@ -11,6 +11,7 @@ import {
   deriveSecret, computeCommitment, computeNullifier,
   getNextDepositIndex, incrementDepositIndex, addNote, clearNoteCache, recordWalletActivity,
 } from '@/lib/notes'
+import { generateDepositProof } from '@/lib/prover'
 
 const IS_DEV = process.env.NEXT_PUBLIC_DEV_MODE === 'true'
 const VAULT_ADDRESS = (process.env.NEXT_PUBLIC_VAULT_ADDRESS ?? '0x0000000000000000000000000000000000000000') as `0x${string}`
@@ -341,6 +342,9 @@ export default function DepositPage() {
   const { isSuccess: depositConfirmed, isError: depositReverted } = useWaitForTransactionReceipt({ hash: depositTxHash })
   // Guard against React Strict Mode double-invoking the deposit effect.
   const depositSubmittedRef = useRef(false)
+  // FC-2: the mandatory deposit binding proof, generated client-side from the
+  // in-scope secret in handleDeriveAndDeposit and consumed by doDeposit.
+  const depositProofRef = useRef<`0x${string}` | null>(null)
 
   // ── State machine ─────────────────────────────────────────────────────────
   useEffect(() => {
@@ -420,6 +424,17 @@ export default function DepositPage() {
       setCommitment(c); setNullifier(n); setDepositIndex(index)
       console.log('[deposit] note derived from wallet signature', { commitment: c, index })
 
+      // FC-2 (T20): generate the mandatory deposit binding proof. Binds the hidden
+      // balance + owner to the transferred amount + msg.sender. Secret stays client-side.
+      const { proof } = await generateDepositProof({
+        secret,
+        commitment: c,
+        amount: amountMicro,
+        owner_address: BigInt(address).toString(),
+      })
+      depositProofRef.current = proof
+      console.log('[deposit] binding proof generated')
+
       setTxError(null)
       depositSubmittedRef.current = false // reset for fresh attempt
       setPhase('approve')
@@ -453,13 +468,17 @@ export default function DepositPage() {
 
   async function doDeposit() {
     if (depositSubmittedRef.current) return
+    if (!depositProofRef.current) {
+      setTxError('Deposit binding proof missing. Please restart the deposit.')
+      return
+    }
     depositSubmittedRef.current = true // set synchronously before any await
     const nonce = await publicClient!.getTransactionCount({ address: address!, blockTag: 'latest' })
     writeDeposit({
       address: VAULT_ADDRESS,
       abi: VAULT_ABI,
       functionName: 'deposit',
-      args: [commitment, amountMicro],
+      args: [depositProofRef.current, commitment, amountMicro],
       nonce,
     })
   }

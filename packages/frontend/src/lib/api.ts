@@ -58,6 +58,36 @@ export interface RelayBetCancelInputs {
   nullifier_of_bet: string
 }
 
+// FC-1: position close credit proof inputs (sell_proceeds is Vault-injected).
+export interface RelayCloseInputs {
+  merkle_root: string
+  nullifier: string
+  new_commitment: string
+  nullifier_of_bet: string
+}
+
+// FC-4: partial-fill credit proof inputs (refund_amount is Vault-injected).
+export interface RelayPartialCreditInputs {
+  merkle_root: string
+  nullifier: string
+  new_commitment: string
+  nullifier_of_bet: string
+}
+
+// BetStatus enum (Vault.sol): ACTIVE=0, FILLED=1, FAILED=2, CREDITED=3,
+// CANCELLED_CREDITED=4, CLOSING=5, CLOSED_CREDITED=6, PARTIAL_FILLED=7, RESTING=8.
+export const BET_STATUS = {
+  ACTIVE: 0,
+  FILLED: 1,
+  FAILED: 2,
+  CREDITED: 3,
+  CANCELLED_CREDITED: 4,
+  CLOSING: 5,
+  CLOSED_CREDITED: 6,
+  PARTIAL_FILLED: 7,
+  RESTING: 8,
+} as const
+
 export interface SettlementRecord {
   conditionId: string
   positionId: string
@@ -132,6 +162,108 @@ export async function relayBetCancel(
 ): Promise<{ txHash: string }> {
   devLog('[polyshield:api] relaying BET_CANCEL proof', { nullifier: inputs.nullifier })
   return post('/api/relay/bet-cancel', { proof, inputs }) as Promise<{ txHash: string }>
+}
+
+// FC-1: relay a position-close credit proof to the Vault (via proof-relay).
+export async function relayClose(
+  proof: `0x${string}`,
+  inputs: RelayCloseInputs,
+): Promise<{ txHash: string }> {
+  devLog('[polyshield:api] relaying POSITION_CLOSE proof', { nullifier: inputs.nullifier })
+  return post('/api/relay/close', { proof, inputs }) as Promise<{ txHash: string }>
+}
+
+// FC-4: relay a partial-fill credit proof to the Vault (via proof-relay). The Vault
+// injects refund_amount = bet_amount - spent_amount from the operator's reportPartialFill.
+export async function relayPartialCredit(
+  proof: `0x${string}`,
+  inputs: RelayPartialCreditInputs,
+): Promise<{ txHash: string }> {
+  devLog('[polyshield:api] relaying PARTIAL_CREDIT proof', { nullifier: inputs.nullifier })
+  return post('/api/relay/partial-credit', { proof, inputs }) as Promise<{ txHash: string }>
+}
+
+// FC-4: register a limit-order intent with the signing layer right after relaying
+// authorizeBet for an advanced-mode (limit) bet. The event listener then submits a
+// resting GTC/GTD order instead of the default FOK. expiration is the GTD effective
+// lifetime in seconds (ignored for GTC).
+export async function requestLimitOrder(req: {
+  nullifier_of_bet: string
+  order_type: 'GTC' | 'GTD'
+  expiration?: number
+}): Promise<{ ok: boolean }> {
+  devLog('[polyshield:api] registering limit-order intent', { nullifier_of_bet: req.nullifier_of_bet, order_type: req.order_type })
+  return post('/api/signing/limit-order', req) as Promise<{ ok: boolean }>
+}
+
+// FC-4: read the partial-fill fields of a bet record from the Vault. Returns the
+// on-chain bet_amount and spent_amount (so the frontend can compute the exact
+// refund_amount = bet_amount - spent_amount that the Vault will inject) plus
+// filled_shares for display. betRecords tuple fields (32 bytes each):
+// [0]market_id [1]condition_id [2]position_id [3]expected_shares [4]bet_amount
+// [5]outcome_side [6]status [7]sell_proceeds [8]sold_shares [9]filled_shares [10]spent_amount
+export async function fetchPartialFill(
+  vaultAddress: string,
+  nullifier_of_bet: `0x${string}`,
+  rpcUrl = process.env.NEXT_PUBLIC_CHAIN_RPC ?? 'http://127.0.0.1:8545',
+): Promise<{ status: number; betAmount: bigint; spentAmount: bigint; filledShares: bigint }> {
+  const data = `0x3e2ccd6c${nullifier_of_bet.slice(2).padStart(64, '0')}`
+  const res = await fetch(rpcUrl, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'eth_call', params: [{ to: vaultAddress, data }, 'latest'] }),
+  })
+  const json = await res.json() as { result?: string }
+  const raw = json.result ?? '0x'
+  const word = (i: number): bigint => {
+    const slice = raw.slice(2 + 64 * i, 2 + 64 * (i + 1))
+    return slice.length === 64 ? BigInt('0x' + slice) : 0n
+  }
+  if (raw.length < 2 + 64 * 11) return { status: -1, betAmount: 0n, spentAmount: 0n, filledShares: 0n }
+  return {
+    status: Number(word(6)),
+    betAmount: word(4),
+    spentAmount: word(10),
+    filledShares: word(9),
+  }
+}
+
+// FC-1: ask the signing layer to submit a FOK SELL for a pre-settlement close.
+// sold_shares and limit_price are 1e6-scaled decimal strings. The operator reports
+// the fill via reportSold (status → CLOSING); the caller then polls the bet status
+// and generates the closePosition proof.
+export async function requestClose(req: {
+  nullifier_of_bet: string
+  position_id: string
+  sold_shares: string
+  limit_price: string
+}): Promise<{ ok: boolean }> {
+  devLog('[polyshield:api] requesting position close (FOK SELL)', { nullifier_of_bet: req.nullifier_of_bet })
+  return post('/api/signing/close-request', req) as Promise<{ ok: boolean }>
+}
+
+// FC-1: read a bet record's status from the Vault to detect the CLOSING transition.
+// betRecords(bytes32) returns a 9-field tuple; status (BetStatus enum) is field index 6.
+// Selector: keccak256("betRecords(bytes32)") = 0x... (computed below from the getter).
+export async function fetchBetStatus(
+  vaultAddress: string,
+  nullifier_of_bet: `0x${string}`,
+  rpcUrl = process.env.NEXT_PUBLIC_CHAIN_RPC ?? 'http://127.0.0.1:8545',
+): Promise<number> {
+  // betRecords getter selector = first 4 bytes of keccak256("betRecords(bytes32)") = 0x3e2ccd6c
+  const data = `0x3e2ccd6c${nullifier_of_bet.slice(2).padStart(64, '0')}`
+  const res = await fetch(rpcUrl, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'eth_call', params: [{ to: vaultAddress, data }, 'latest'] }),
+  })
+  const json = await res.json() as { result?: string }
+  const raw = json.result ?? '0x'
+  if (raw.length < 2 + 64 * 7) return -1
+  // Tuple fields are 32 bytes each: [market_id, condition_id, position_id, expected_shares,
+  // bet_amount, outcome_side, status, sell_proceeds, sold_shares]. status is index 6.
+  const statusWord = raw.slice(2 + 64 * 6, 2 + 64 * 7)
+  return parseInt(statusWord, 16)
 }
 
 export async function fetchSettlement(marketId: string): Promise<SettlementRecord | null> {

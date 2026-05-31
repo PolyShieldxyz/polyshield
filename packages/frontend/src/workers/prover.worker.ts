@@ -2,9 +2,9 @@
  * ZK prover Web Worker.
  *
  * Runs exactly one proof per worker lifetime, then the caller terminates it.
- * Termination releases the Barretenberg WASM heap back to the OS, preventing
- * the ~1.4 GB idle memory accumulation that occurs when the WASM lives on the
- * main thread or in a long-lived worker.
+ * Termination releases the snarkjs WASM heap back to the OS, preventing idle
+ * memory accumulation that occurs when the WASM lives on the main thread or in
+ * a long-lived worker.
  *
  * Message protocol:
  *   in:  { type: ProofType, inputs: <type-specific inputs object> }
@@ -18,10 +18,13 @@ import type {
   SettlementInputs,
   BetCancelInputs,
   CancelCreditInputs,
+  DepositInputs,
+  PositionCloseInputs,
+  PartialCreditInputs,
   ProofResult,
 } from '../lib/prover'
 
-export type ProofType = 'bet_auth' | 'withdrawal' | 'settlement' | 'bet_cancel' | 'cancel_credit'
+export type ProofType = 'bet_auth' | 'withdrawal' | 'settlement' | 'bet_cancel' | 'cancel_credit' | 'deposit' | 'position_close' | 'partial_credit'
 
 export type ProverWorkerMessage =
   | { type: 'bet_auth';     inputs: BetAuthInputs }
@@ -29,6 +32,9 @@ export type ProverWorkerMessage =
   | { type: 'settlement';   inputs: SettlementInputs }
   | { type: 'bet_cancel';   inputs: BetCancelInputs }
   | { type: 'cancel_credit'; inputs: CancelCreditInputs }
+  | { type: 'deposit';      inputs: DepositInputs }
+  | { type: 'position_close'; inputs: PositionCloseInputs }
+  | { type: 'partial_credit'; inputs: PartialCreditInputs }
 
 export type ProverWorkerResult =
   | { type: 'done';  result: ProofResult }
@@ -36,7 +42,7 @@ export type ProverWorkerResult =
 
 self.onmessage = async (event: MessageEvent<ProverWorkerMessage>) => {
   try {
-    const { generateBetAuthProof, generateWithdrawalProof, generateSettlementProof, generateBetCancelProof, generateCancelCreditProof } =
+    const { generateBetAuthProof, generateWithdrawalProof, generateSettlementProof, generateBetCancelProof, generateCancelCreditProof, generateDepositProof, generatePositionCloseProof, generatePartialCreditProof } =
       await import('../lib/prover')
 
     let result: ProofResult
@@ -56,6 +62,15 @@ self.onmessage = async (event: MessageEvent<ProverWorkerMessage>) => {
         break
       case 'cancel_credit':
         result = await generateCancelCreditProof(event.data.inputs)
+        break
+      case 'deposit':
+        result = await generateDepositProof(event.data.inputs)
+        break
+      case 'position_close':
+        result = await generatePositionCloseProof(event.data.inputs)
+        break
+      case 'partial_credit':
+        result = await generatePartialCreditProof(event.data.inputs)
         break
       default:
         throw new Error(`Unknown proof type: ${(event.data as { type: string }).type}`)
