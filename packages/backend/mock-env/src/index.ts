@@ -173,6 +173,7 @@ function writeEnvTest(addrs: DeployedAddresses): void {
     "",
     "# ── Mock CLOB server ──────────────────────────────────────",
     `POLY_API_URL=http://127.0.0.1:${CLOB_PORT}`,
+    `POLY_WS_URL=ws://127.0.0.1:${CLOB_PORT}/ws/user`,
     "POLY_API_KEY=mock-api-key-0000",
     "POLY_SECRET=mock-secret-0000",
     "POLY_PASSPHRASE=mock-passphrase-0000",
@@ -247,9 +248,15 @@ function buildSharedEnv(addrs: DeployedAddresses): Record<string, string> {
     PUSD_ADDRESS:                      addrs.PUSD_ADDRESS,
     ONRAMP_ADDRESS:                    addrs.ONRAMP_ADDRESS,
     OFFRAMP_ADDRESS:                   addrs.OFFRAMP_ADDRESS,
-    DEPOSIT_WALLET_ADDRESS:            ACCOUNTS.DEPOSIT_WALLET,
-    // C2/H2: signing layer uses this key to sign pUSD approvals, offramp calls,
-    // and USDC transfers that must originate from the deposit wallet in local dev.
+    // Post-April-2026 model: the deposit wallet is the MockDepositWallet proxy. JIT
+    // funding forwards pUSD here; fills/settlement act on it via the relayer (below).
+    DEPOSIT_WALLET_ADDRESS:            addrs.DEPOSIT_WALLET_PROXY,
+    DEPOSIT_WALLET_PROXY:              addrs.DEPOSIT_WALLET_PROXY,
+    // Mock relayer endpoint (lives in the mock CLOB server). The signing layer's
+    // DepositWalletExecutor POSTs WALLET batches here; the mock submits them on-chain
+    // to the proxy. In production this is the Polymarket builder-relayer URL.
+    MOCK_RELAYER_URL:                  `http://127.0.0.1:${CLOB_PORT}`,
+    // EOA owner key of the proxy — retained for the EoaExecutor fallback / legacy path.
     DEPOSIT_WALLET_KEY:                ACCOUNTS.DEPOSIT_WALLET_KEY,
     MOCK_DEPLOYER_PRIVATE_KEY:         ACCOUNTS.OWNER_PRIVATE_KEY,
     TREE_ADDRESS:                      addrs.TREE_ADDRESS,
@@ -261,6 +268,7 @@ function buildSharedEnv(addrs: DeployedAddresses): Record<string, string> {
     POLY_SECRET:                       "mock-secret-0000",
     POLY_PASSPHRASE:                   "mock-passphrase-0000",
     POLY_API_URL:                      `http://127.0.0.1:${CLOB_PORT}`,
+    POLY_WS_URL:                       `ws://127.0.0.1:${CLOB_PORT}/ws/user`,
     PROOF_RELAY_PORT:                  String(RELAY_PORT),
     INDEXER_PORT:                      String(INDEXER_PORT),
     INDEXER_DB_PATH:                   "/tmp/polyshield-indexer-dev.db",
@@ -303,7 +311,7 @@ async function main(): Promise<void> {
   await startAnvil();
 
   console.log("[mock-env] ── Step 2: Deploying contracts ─────────────────────");
-  const addrs = deployContracts();
+  const addrs = await deployContracts();
   console.log(`[mock-env] Vault deployed at ${addrs.VAULT_ADDRESS}`);
   console.log(`[mock-env] USDC  deployed at ${addrs.USDC_ADDRESS}`);
   console.log(`[mock-env] CTF   deployed at ${addrs.CTF_ADDRESS}`);

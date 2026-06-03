@@ -66,6 +66,27 @@ export interface RelayCloseInputs {
   nullifier_of_bet: string
 }
 
+// FC-8: note-consolidation proof inputs. `nullifiers` is exactly 4 entries
+// (inactive slots are the 0x00..00 sentinel).
+export interface RelayConsolidateInputs {
+  merkle_root: string
+  nullifiers: string[]
+  new_commitment: string
+}
+
+// FC-9: operator EIP-712 fill attestation (off-chain, gasless). reportType: 1=FILLED,
+// 2=FAILED, 3=PARTIAL (amountA=filled_shares, amountB=spent_amount), 4=SOLD
+// (amountA=sold_shares, amountB=proceeds). amounts are uint64 decimal strings.
+export interface OperatorAttestation {
+  nullifierOfBet: string
+  reportType: number
+  amountA: string
+  amountB: string
+}
+export interface SignedAttestation extends OperatorAttestation {
+  signature: string
+}
+
 // FC-4: partial-fill credit proof inputs (refund_amount is Vault-injected).
 export interface RelayPartialCreditInputs {
   merkle_root: string
@@ -142,9 +163,10 @@ export async function relayBet(
 export async function relaySettlement(
   proof: `0x${string}`,
   inputs: RelaySettlementInputs,
+  att?: SignedAttestation,
 ): Promise<{ txHash: string }> {
   devLog('[polyshield:api] relaying SETTLE_CRED proof', { nullifier: inputs.nullifier })
-  return post('/api/relay/settlement', { proof, inputs }) as Promise<{ txHash: string }>
+  return post('/api/relay/settlement', { proof, inputs, ...attBody(att) }) as Promise<{ txHash: string }>
 }
 
 export async function relayWithdrawal(
@@ -159,28 +181,59 @@ export async function relayWithdrawal(
 export async function relayBetCancel(
   proof: `0x${string}`,
   inputs: RelayBetCancelInputs,
+  att?: SignedAttestation,
 ): Promise<{ txHash: string }> {
   devLog('[polyshield:api] relaying BET_CANCEL proof', { nullifier: inputs.nullifier })
-  return post('/api/relay/bet-cancel', { proof, inputs }) as Promise<{ txHash: string }>
+  return post('/api/relay/bet-cancel', { proof, inputs, ...attBody(att) }) as Promise<{ txHash: string }>
 }
 
 // FC-1: relay a position-close credit proof to the Vault (via proof-relay).
+// FC-9: proceeds come from the operator's SOLD attestation.
 export async function relayClose(
   proof: `0x${string}`,
   inputs: RelayCloseInputs,
+  att?: SignedAttestation,
 ): Promise<{ txHash: string }> {
   devLog('[polyshield:api] relaying POSITION_CLOSE proof', { nullifier: inputs.nullifier })
-  return post('/api/relay/close', { proof, inputs }) as Promise<{ txHash: string }>
+  return post('/api/relay/close', { proof, inputs, ...attBody(att) }) as Promise<{ txHash: string }>
 }
 
-// FC-4: relay a partial-fill credit proof to the Vault (via proof-relay). The Vault
-// injects refund_amount = bet_amount - spent_amount from the operator's reportPartialFill.
+// FC-4: relay a partial-fill credit proof to the Vault (via proof-relay).
+// FC-9: refund_amount = bet_amount - spent_amount is derived from the operator's PARTIAL attestation.
 export async function relayPartialCredit(
   proof: `0x${string}`,
   inputs: RelayPartialCreditInputs,
+  att?: SignedAttestation,
 ): Promise<{ txHash: string }> {
   devLog('[polyshield:api] relaying PARTIAL_CREDIT proof', { nullifier: inputs.nullifier })
-  return post('/api/relay/partial-credit', { proof, inputs }) as Promise<{ txHash: string }>
+  return post('/api/relay/partial-credit', { proof, inputs, ...attBody(att) }) as Promise<{ txHash: string }>
+}
+
+// FC-9: split a SignedAttestation into the { attestation, signature } body the relay expects.
+function attBody(att?: SignedAttestation): { attestation?: OperatorAttestation; signature?: string } {
+  if (!att) return {}
+  const { signature, ...attestation } = att
+  return { attestation, signature }
+}
+
+// FC-9: fetch the operator's off-chain fill attestation for a bet (public; the nullifier is
+// already on-chain). Returns null if the operator has not signed one yet (404).
+export async function fetchAttestation(nullifierOfBet: `0x${string}`): Promise<SignedAttestation | null> {
+  try {
+    return await get(`/api/signing/attestation/${nullifierOfBet}`) as SignedAttestation
+  } catch {
+    return null
+  }
+}
+
+// FC-8: relay a note-consolidation proof to the Vault (via proof-relay). Merges up to
+// 4 same-owner notes into one; no token movement, no bet record.
+export async function relayConsolidate(
+  proof: `0x${string}`,
+  inputs: RelayConsolidateInputs,
+): Promise<{ txHash: string }> {
+  devLog('[polyshield:api] relaying CONSOLIDATE proof', { active: inputs.nullifiers.filter((n) => BigInt(n) !== 0n).length })
+  return post('/api/relay/consolidate', { proof, inputs }) as Promise<{ txHash: string }>
 }
 
 // FC-4: register a limit-order intent with the signing layer right after relaying
@@ -189,24 +242,36 @@ export async function relayPartialCredit(
 // lifetime in seconds (ignored for GTC).
 export async function requestLimitOrder(req: {
   nullifier_of_bet: string
-  order_type: 'GTC' | 'GTD'
+  order_type: 'GTC' | 'GTD' | 'FAK'
   expiration?: number
 }): Promise<{ ok: boolean }> {
   devLog('[polyshield:api] registering limit-order intent', { nullifier_of_bet: req.nullifier_of_bet, order_type: req.order_type })
   return post('/api/signing/limit-order', req) as Promise<{ ok: boolean }>
 }
 
-// FC-4: read the partial-fill fields of a bet record from the Vault. Returns the
-// on-chain bet_amount and spent_amount (so the frontend can compute the exact
-// refund_amount = bet_amount - spent_amount that the Vault will inject) plus
-// filled_shares for display. betRecords tuple fields (32 bytes each):
+// Decoded form of the Vault `betRecords(bytes32)` public getter. `status` is -1
+// when the record is absent / the call returned short data.
+export interface BetRecordView {
+  status: number
+  expectedShares: bigint
+  betAmount: bigint
+  soldShares: bigint
+  filledShares: bigint
+  spentAmount: bigint
+  sellProceeds: bigint
+}
+
+// Read and decode the full bet record from the Vault. The `betRecords` getter
+// returns the BetRecord struct as a flat tuple of 32-byte words (selector
+// 0x3e2ccd6c = keccak256("betRecords(bytes32)")[:4]). Word layout (32 bytes each):
 // [0]market_id [1]condition_id [2]position_id [3]expected_shares [4]bet_amount
 // [5]outcome_side [6]status [7]sell_proceeds [8]sold_shares [9]filled_shares [10]spent_amount
-export async function fetchPartialFill(
+// Single source of truth for this layout — fetchPartialFill / fetchBetStatus delegate here.
+export async function fetchBetRecord(
   vaultAddress: string,
   nullifier_of_bet: `0x${string}`,
   rpcUrl = process.env.NEXT_PUBLIC_CHAIN_RPC ?? 'http://127.0.0.1:8545',
-): Promise<{ status: number; betAmount: bigint; spentAmount: bigint; filledShares: bigint }> {
+): Promise<BetRecordView> {
   const data = `0x3e2ccd6c${nullifier_of_bet.slice(2).padStart(64, '0')}`
   const res = await fetch(rpcUrl, {
     method: 'POST',
@@ -219,13 +284,29 @@ export async function fetchPartialFill(
     const slice = raw.slice(2 + 64 * i, 2 + 64 * (i + 1))
     return slice.length === 64 ? BigInt('0x' + slice) : 0n
   }
-  if (raw.length < 2 + 64 * 11) return { status: -1, betAmount: 0n, spentAmount: 0n, filledShares: 0n }
+  if (raw.length < 2 + 64 * 11) {
+    return { status: -1, expectedShares: 0n, betAmount: 0n, soldShares: 0n, filledShares: 0n, spentAmount: 0n, sellProceeds: 0n }
+  }
   return {
     status: Number(word(6)),
+    expectedShares: word(3),
     betAmount: word(4),
-    spentAmount: word(10),
+    sellProceeds: word(7),
+    soldShares: word(8),
     filledShares: word(9),
+    spentAmount: word(10),
   }
+}
+
+// FC-4: partial-fill view used by PartialFillCreditModal to compute the exact
+// refund_amount = bet_amount - spent_amount that the Vault will inject.
+export async function fetchPartialFill(
+  vaultAddress: string,
+  nullifier_of_bet: `0x${string}`,
+  rpcUrl = process.env.NEXT_PUBLIC_CHAIN_RPC ?? 'http://127.0.0.1:8545',
+): Promise<{ status: number; betAmount: bigint; spentAmount: bigint; filledShares: bigint }> {
+  const r = await fetchBetRecord(vaultAddress, nullifier_of_bet, rpcUrl)
+  return { status: r.status, betAmount: r.betAmount, spentAmount: r.spentAmount, filledShares: r.filledShares }
 }
 
 // FC-1: ask the signing layer to submit a FOK SELL for a pre-settlement close.
@@ -243,27 +324,13 @@ export async function requestClose(req: {
 }
 
 // FC-1: read a bet record's status from the Vault to detect the CLOSING transition.
-// betRecords(bytes32) returns a 9-field tuple; status (BetStatus enum) is field index 6.
-// Selector: keccak256("betRecords(bytes32)") = 0x... (computed below from the getter).
 export async function fetchBetStatus(
   vaultAddress: string,
   nullifier_of_bet: `0x${string}`,
   rpcUrl = process.env.NEXT_PUBLIC_CHAIN_RPC ?? 'http://127.0.0.1:8545',
 ): Promise<number> {
-  // betRecords getter selector = first 4 bytes of keccak256("betRecords(bytes32)") = 0x3e2ccd6c
-  const data = `0x3e2ccd6c${nullifier_of_bet.slice(2).padStart(64, '0')}`
-  const res = await fetch(rpcUrl, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'eth_call', params: [{ to: vaultAddress, data }, 'latest'] }),
-  })
-  const json = await res.json() as { result?: string }
-  const raw = json.result ?? '0x'
-  if (raw.length < 2 + 64 * 7) return -1
-  // Tuple fields are 32 bytes each: [market_id, condition_id, position_id, expected_shares,
-  // bet_amount, outcome_side, status, sell_proceeds, sold_shares]. status is index 6.
-  const statusWord = raw.slice(2 + 64 * 6, 2 + 64 * 7)
-  return parseInt(statusWord, 16)
+  const r = await fetchBetRecord(vaultAddress, nullifier_of_bet, rpcUrl)
+  return r.status
 }
 
 export async function fetchSettlement(marketId: string): Promise<SettlementRecord | null> {
@@ -374,8 +441,11 @@ export async function waitForTransactionConfirmation(
 }
 
 // Fetch the current Merkle root from the live CommitmentMerkleTree.
-// Vault.tree() → tree address → tree.currentRootIndex() → tree.recentRoots(index) → root.
-// This must be called fresh before every bet because other deposits shift the root.
+// Vault.tree() → tree address → tree.currentRoot() → root.
+// (FC-3) `currentRoot` is the single source of truth for the latest root, so no
+// index math / window-size assumption is needed. The live proof path fetches its
+// root via the proof-relay's event reconstruction (fetchMerklePath); this helper
+// is a standalone utility for reading the latest root directly.
 export async function fetchCurrentMerkleRoot(
   vaultAddress: string,
   rpcUrl = process.env.NEXT_PUBLIC_CHAIN_RPC ?? 'http://127.0.0.1:8545',
@@ -394,13 +464,8 @@ export async function fetchCurrentMerkleRoot(
   const treeRaw = await call(vaultAddress, '0xfd54b228')
   const treeAddress = '0x' + treeRaw.slice(-40)
 
-  // 2. tree.currentRootIndex() → uint32
-  const indexRaw = await call(treeAddress, '0x90eeb02b')
-  const index = parseInt(indexRaw, 16) % 30   // rolling window size = 30
-
-  // 3. tree.recentRoots(uint256 index) → bytes32
-  const indexHex = index.toString(16).padStart(64, '0')
-  const root = await call(treeAddress, `0xd539857a${indexHex}`) as `0x${string}`
+  // 2. tree.currentRoot() → bytes32
+  const root = await call(treeAddress, '0xfdab463d') as `0x${string}`
 
   devLog('[polyshield:api] fetchCurrentMerkleRoot →', root)
   return root

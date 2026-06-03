@@ -15,15 +15,17 @@ import {
   markNoteSpent,
   positionToField,
   recordWalletActivity,
+  selectNotesForAmount,
   toFieldSafe,
   type Note,
 } from '@/lib/notes'
+import { consolidateNotes } from '@/lib/consolidate'
 import { fetchMerklePath, relayBet, requestLimitOrder, waitForTransactionConfirmation } from '@/lib/api'
 import { generateProofInWorker } from '@/lib/prover'
 import { log, proofSummary } from '@/lib/logger'
 
 type Phase = 'edit' | 'running' | 'success' | 'error'
-type OrderType = 'FOK' | 'GTC' | 'GTD'
+type OrderType = 'FOK' | 'FAK' | 'GTC' | 'GTD'
 const VAULT_ADDRESS = (process.env.NEXT_PUBLIC_VAULT_ADDRESS ??
   '0x0000000000000000000000000000000000000000') as `0x${string}`
 
@@ -74,6 +76,12 @@ export function BetModal({
   const [error, setError] = useState<string | null>(null)
   const [txHash, setTxHash] = useState('')
   const [autoSettle, setAutoSettle] = useState(true)
+  // FINDING: FUNC-001 — drive the progress bar from real elapsed time (not a fake
+  // hardcoded width) and surface an honest "this can take a while" message.
+  const [progress, setProgress] = useState(5)
+  // FINDING: FUNC-001 — set when the worker fails and the prover falls back to the
+  // main thread (polyshield:prover-fallback event), so we can tell the user.
+  const [fallbackNote, setFallbackNote] = useState<string | null>(null)
   // FC-4: advanced order types. FOK (default) = today's behavior; GTC/GTD rest on
   // the book at the user's limit price (gated advanced mode pending live-API testing).
   const [orderType, setOrderType] = useState<OrderType>('FOK')
@@ -87,15 +95,53 @@ export function BetModal({
     setError(null)
     setTxHash('')
     setAutoSettle(true)
+    setProgress(5)
+    setFallbackNote(null)
     setOrderType('FOK')
     setLimitCents(Math.max(1, Math.min(99, Math.round(price * 100))))
     setGtdMinutes(60)
   }, [open, initialAmount, marketId, price])
 
+  // FINDING: FUNC-001 — advance the progress bar from ~5% toward ~90% over ~120s
+  // while proving. It approaches 90% asymptotically and never reaches 100% until
+  // the proof actually completes (phase leaves 'running'), so the bar reflects
+  // honest "still working" state rather than a fixed 72% lie. Resets on phase
+  // change away from 'running'.
+  useEffect(() => {
+    if (phase !== 'running') {
+      setProgress(5)
+      return
+    }
+    const start = Date.now()
+    const id = window.setInterval(() => {
+      const elapsed = (Date.now() - start) / 1000
+      // Asymptotic ease toward 90% with a ~120s time constant.
+      const next = 90 - 85 * Math.exp(-elapsed / 120)
+      setProgress((prev) => Math.max(prev, Math.min(90, next)))
+    }, 500)
+    return () => window.clearInterval(id)
+  }, [phase])
+
+  // FINDING: FUNC-001 — when the Web Worker prover fails and falls back to the main
+  // thread (prover.ts dispatches polyshield:prover-fallback), warn the user that it
+  // will be slower and may need a more powerful device.
+  useEffect(() => {
+    if (typeof window === 'undefined') return
+    const onFallback = () => {
+      setFallbackNote(
+        'Proof is taking longer on this device — falling back. If it fails, try again on a more powerful device (desktop with more RAM).',
+      )
+    }
+    window.addEventListener('polyshield:prover-fallback', onFallback)
+    return () => window.removeEventListener('polyshield:prover-fallback', onFallback)
+  }, [])
+
   // FOK fills at the market price; a limit order fills at most at the user's tick-snapped
   // limit price (cents). The bet_auth proof is built at this effective price.
   const effectivePrice = useMemo(
-    () => (orderType === 'FOK' ? price : limitCents / 100),
+    // FOK and FAK are market orders (use the live market price); GTC/GTD rest at the
+    // user's limit price.
+    () => (orderType === 'FOK' || orderType === 'FAK' ? price : limitCents / 100),
     [orderType, price, limitCents],
   )
   const amountMicro = useMemo(() => parseUsdcToMicro(amountInput), [amountInput])
@@ -106,7 +152,7 @@ export function BetModal({
 
   const submit = async () => {
     if (!address || !amountMicro || amountMicro <= 0n) return
-    const cashNote = getCurrentCashNote(address)
+    let cashNote = getCurrentCashNote(address)
     if (!cashNote) {
       const msg = 'No available cash balance to place this bet. Deposit USDC first.'
       console.error('[BetModal] submit: no spendable note found for', address)
@@ -114,12 +160,16 @@ export function BetModal({
       setError(msg)
       return
     }
+    // FC-8: a single note need not cover the stake — up to 4 notes can be merged first.
+    // Reject only when even the largest 4 notes can't cover it.
     if (amountMicro > cashNote.balance) {
-      const msg = `Bet amount exceeds available cash balance.`
-      console.error('[BetModal] submit: amount exceeds balance', { amount: amountMicro, balance: cashNote.balance })
-      setPhase('error')
-      setError(msg)
-      return
+      const sel = selectNotesForAmount(address, amountMicro)
+      if (!sel.ok) {
+        console.error('[BetModal] submit: amount exceeds combinable balance', { amount: amountMicro })
+        setPhase('error')
+        setError(sel.error)
+        return
+      }
     }
 
     setPhase('running')
@@ -128,6 +178,18 @@ export function BetModal({
 
     try {
       const stake = amountMicro
+      // FC-8: if no single note covers the stake, consolidate up to 4 notes into one
+      // (a merge proof + tx via the relay), then bet from the merged note.
+      if (stake > cashNote.balance) {
+        const sel = selectNotesForAmount(address, stake)
+        if (!sel.ok) throw new Error(sel.error)
+        cashNote = await consolidateNotes({
+          wallet: address,
+          signMessageAsync,
+          notes: sel.selection.notes,
+          onProgress: (m) => log('bet_modal_consolidate', { step: m }),
+        })
+      }
       const secret = await deriveSecret(signMessageAsync, address, cashNote.depositIndex)
       let merkleProof
       try {
@@ -266,7 +328,15 @@ export function BetModal({
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err)
       console.error('[BetModal] submit failed:', err)
-      setError(message)
+      // FINDING: FUNC-001 — on a proof timeout (prover.ts rejects with "Proof
+      // generation timed out after 3 minutes"), point the user at a more capable
+      // device instead of surfacing the raw timer message.
+      const isTimeout = /timed out/i.test(message)
+      setError(
+        isTimeout
+          ? 'Proof generation is taking too long on this device. Try again on a more powerful device (desktop with more RAM).'
+          : message,
+      )
       setPhase('error')
       log('bet_modal_error', { error: message, marketId, marketName })
     }
@@ -296,6 +366,7 @@ export function BetModal({
                 value={amountInput}
                 onChange={(event) => setAmountInput(event.target.value)}
                 placeholder="0.00"
+                aria-label="Bet amount in USDC"
                 style={{
                   flex: 1,
                   background: 'var(--bg-1)',
@@ -318,18 +389,24 @@ export function BetModal({
               <span className="pill pill-soft" style={{ fontSize: 9 }}>ADVANCED</span>
             </div>
             <div className="row" style={{ gap: 8 }}>
-              {(['FOK', 'GTC', 'GTD'] as OrderType[]).map((t) => (
+              {(['FOK', 'FAK', 'GTC', 'GTD'] as OrderType[]).map((t) => (
                 <button
                   key={t}
                   className={`btn btn-sm ${orderType === t ? 'btn-primary' : ''}`}
                   onClick={() => setOrderType(t)}
                   type="button"
                 >
-                  {t === 'FOK' ? 'Fill-or-kill' : t === 'GTC' ? 'Limit (GTC)' : 'Limit (GTD)'}
+                  {t === 'FOK'
+                    ? 'Fill-or-kill'
+                    : t === 'FAK'
+                      ? 'Fill-and-kill'
+                      : t === 'GTC'
+                        ? 'Limit (GTC)'
+                        : 'Limit (GTD)'}
                 </button>
               ))}
             </div>
-            {orderType !== 'FOK' && (
+            {(orderType === 'GTC' || orderType === 'GTD') && (
               <div className="row" style={{ gap: 12, flexWrap: 'wrap' }}>
                 <label className="col gap-1">
                   <span className="micro">LIMIT PRICE (¢ per share, 1–99)</span>
@@ -352,6 +429,12 @@ export function BetModal({
                 <div className="small" style={{ fontSize: 11, color: 'var(--text-3)', alignSelf: 'flex-end' }}>
                   Rests on the book; the full stake is held until it fills, expires, or partially fills (then reclaim the remainder).
                 </div>
+              </div>
+            )}
+            {orderType === 'FAK' && (
+              <div className="small" style={{ fontSize: 11, color: 'var(--text-3)' }}>
+                Fills immediately at the market price for whatever size is available and kills the rest. If it fills only
+                partially, reclaim the unfilled remainder of your stake afterward.
               </div>
             )}
           </div>
@@ -382,13 +465,16 @@ export function BetModal({
         <div className="col gap-4">
           <div>
             <div className="micro">PROGRESS</div>
-            <h3 className="h4 mt-2" style={{ margin: 0 }}>Generating proof... ~2 seconds</h3>
+            <h3 className="h4 mt-2" style={{ margin: 0 }}>Generating proof… this can take 30s–2min. Keep this tab open.</h3>
           </div>
           <div className="panel" style={{ padding: 18 }}>
             <div className="small" style={{ fontSize: 12 }}>The proof stays in your browser until it is relayed.</div>
             <div className="mt-3" style={{ height: 4, background: 'rgba(255,255,255,0.06)', borderRadius: 2 }}>
-              <div style={{ height: 4, width: '72%', background: 'var(--cyan)', borderRadius: 2, animation: 'pulse-glow 1.2s ease-in-out infinite' }} />
+              <div style={{ height: 4, width: `${progress}%`, background: 'var(--cyan)', borderRadius: 2, transition: 'width 0.5s linear', animation: 'pulse-glow 1.2s ease-in-out infinite' }} />
             </div>
+            {fallbackNote && (
+              <div className="small mt-3" style={{ fontSize: 11, color: 'var(--amber)' }}>{fallbackNote}</div>
+            )}
           </div>
         </div>
       )}

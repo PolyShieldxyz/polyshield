@@ -15,7 +15,9 @@ import { heartbeatRouter } from "./routes/heartbeat";
 import { ordersRouter } from "./routes/orders";
 import { bookRouter } from "./routes/book";
 import { marketsRouter } from "./routes/markets";
+import { relayerRouter } from "./routes/relayer";
 import { adminRouter } from "./admin";
+import { attachUserChannel } from "./ws";
 
 const PORT = Number(process.env.PORT ?? 3001);
 
@@ -39,6 +41,8 @@ export function createApp(): express.Express {
   app.use("/order", ordersRouter);
   app.use("/book", bookRouter);
   app.use("/markets", marketsRouter);
+  // Mock builder relayer — submits deposit-wallet WALLET batches to the proxy.
+  app.use("/relayer", relayerRouter);
 
   // Health check
   app.get("/health", (_req, res) => res.json({ ok: true }));
@@ -52,10 +56,13 @@ export function createApp(): express.Express {
 // Only start server when run directly (not when imported in tests)
 if (require.main === module) {
   const app = createApp();
-  app.listen(PORT, "127.0.0.1", () => {
+  const server = app.listen(PORT, "127.0.0.1", () => {
     console.log(`[mock-clob] listening on http://127.0.0.1:${PORT}`);
     console.log(`[mock-clob] control API: POST http://127.0.0.1:${PORT}/admin/set-behavior`);
     console.log(`[mock-clob]              GET  http://127.0.0.1:${PORT}/admin/state`);
     console.log(`[mock-clob]              POST http://127.0.0.1:${PORT}/admin/reset`);
   });
+  // FC-4: user-channel websocket so the signing layer's production fill tracker is
+  // exercised against the mock (set POLY_WS_URL=ws://127.0.0.1:PORT/ws/user).
+  attachUserChannel(server);
 }

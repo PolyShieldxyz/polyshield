@@ -1,7 +1,9 @@
-// FC-4: tests for submitLimitOrder's terminal-state mapping against the mock CLOB.
-// Exercises the mock-mode (localhost) path: POST /order → "live" → reportResting,
-// then GET /order/:id terminal status → exactly one of reportFilled /
-// reportPartialFill / reportFOKFailure. No live network; fetch + contract are mocked.
+// FC-4 + FC-9: tests for submitLimitOrder's submit-and-register behavior. After the
+// websocket-tracking rewrite, submitLimitOrder no longer blocks on a REST poll or attest
+// synchronously — on a "live" ack it records a non-binding RESTING UI signal and hands the
+// order to the websocket fill tracker (mocked here), which drives the terminal attestation
+// asynchronously (see wsFillTracker.test.ts / terminalAttestation.test.ts for that path).
+// No live network; fetch, contract, the tracker, and the attestation store are mocked.
 
 import { ethers } from "ethers";
 
@@ -14,6 +16,9 @@ jest.mock("../config", () => ({
     polygonRpcUrl: "http://localhost:8545",
     vaultContractAddress: "0x" + "b".repeat(40),
     signingLayerOperatorAddress: "0x" + "c".repeat(40),
+    pusdAddress: "0x" + "d".repeat(40),
+    depositWalletAddress: "0x" + "e".repeat(40),
+    polyWsUrl: "ws://localhost:3001/ws/user",
   },
 }));
 
@@ -22,11 +27,14 @@ jest.mock("../circuitBreaker", () => ({
   isHalted: jest.fn().mockReturnValue(false),
 }));
 
-// nonceManager.send just invokes the tx builder with a fixed nonce.
-jest.mock("../nonceManager", () => ({
-  signingLayerNonceManager: {
-    send: jest.fn(async (_p: unknown, _w: unknown, fn: (n: number) => unknown) => fn(0)),
-  },
+// The websocket fill tracker is mocked: submitLimitOrder's job is to submit + register.
+jest.mock("../wsFillTracker", () => ({ trackOrder: jest.fn() }));
+
+jest.mock("../attestationStore", () => ({
+  ReportType: { FILLED: 1, FAILED: 2, PARTIAL: 3, SOLD: 4 },
+  getAttestationDomainParams: jest.fn(() => ({ chainId: 31337, verifyingContract: "0x" + "b".repeat(40) })),
+  markResting: jest.fn(),
+  signAndStoreAttestation: jest.fn(),
 }));
 
 const event = {
@@ -39,80 +47,66 @@ const event = {
   new_commitment: "0x" + "4".repeat(64),
 };
 
-describe("submitLimitOrder terminal-state mapping", () => {
-  let reportResting: jest.Mock;
-  let reportFilled: jest.Mock;
-  let reportPartialFill: jest.Mock;
-  let reportFOKFailure: jest.Mock;
-  let restingState: { status: string; filledShares: number; spentAmount: number };
+describe("submitLimitOrder submit-and-register (FC-4 websocket handoff)", () => {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  let store: any;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  let trackerMod: any;
 
   beforeEach(() => {
     jest.clearAllMocks();
-    process.env.POLY_API_URL = "http://localhost:3001"; // forces mock-mode fetch path
-
-    const wait = jest.fn().mockResolvedValue(undefined);
-    reportResting = jest.fn().mockResolvedValue({ wait });
-    reportFilled = jest.fn().mockResolvedValue({ wait });
-    reportPartialFill = jest.fn().mockResolvedValue({ wait });
-    reportFOKFailure = jest.fn().mockResolvedValue({ wait });
+    process.env.POLY_API_URL = "http://localhost:3001";
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    store = require("../attestationStore");
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    trackerMod = require("../wsFillTracker");
 
     jest.spyOn(ethers, "Contract").mockImplementation(() => ({
-      reportResting,
-      reportFilled,
-      reportPartialFill,
-      reportFOKFailure,
+      balanceOf: jest.fn().mockResolvedValue(10_000_000_000n),
     }) as unknown as ethers.Contract);
 
-    // fetch: POST /order → live + orderID; GET /order/:id → current restingState.
-    global.fetch = jest.fn(async (url: string, init?: { method?: string }) => {
-      const isPost = init?.method === "POST";
-      if (isPost && url.endsWith("/order")) {
-        return { ok: true, status: 200, json: async () => ({ success: true, status: "live", orderID: "0xorder1" }) } as unknown as Response;
-      }
-      // GET /order/:id
-      return { ok: true, status: 200, json: async () => restingState } as unknown as Response;
-    }) as unknown as typeof fetch;
+    // POST /order → live + orderID.
+    global.fetch = jest.fn(async () => ({
+      ok: true, status: 200, json: async () => ({ success: true, status: "live", orderID: "0xorder1" }),
+    } as unknown as Response)) as unknown as typeof fetch;
   });
 
-  const run = async () => {
+  const run = async (orderType: "GTC" | "GTD" = "GTC", expiration = 0) => {
     const { submitLimitOrder } = await import("../orderBuilder");
-    const wallet = { address: "0x1234" } as unknown as ethers.Wallet;
-    const provider = {} as ethers.JsonRpcProvider;
-    await submitLimitOrder(event, { orderType: "GTC", expiration: 0 }, wallet, provider);
+    await submitLimitOrder(event, { orderType, expiration }, { address: "0x1234" } as unknown as ethers.Wallet, {} as ethers.JsonRpcProvider);
   };
 
-  it("fully filled → reportResting then reportFilled", async () => {
-    restingState = { status: "matched", filledShares: 200_000_000, spentAmount: 100_000_000 };
-    await run();
-    expect(reportResting).toHaveBeenCalledWith(event.nullifier, { nonce: 0 });
-    expect(reportFilled).toHaveBeenCalledWith(event.nullifier, { nonce: 0 });
-    expect(reportPartialFill).not.toHaveBeenCalled();
-    expect(reportFOKFailure).not.toHaveBeenCalled();
+  it("on 'live' ack: records RESTING and registers the order with the tracker (no sync attestation)", async () => {
+    await run("GTC");
+    expect(store.markResting).toHaveBeenCalledWith(event.nullifier);
+    expect(trackerMod.trackOrder).toHaveBeenCalledWith(
+      expect.objectContaining({
+        nullifier: event.nullifier,
+        orderID: "0xorder1",
+        conditionId: event.market_id,
+        tokenId: event.position_id,
+        expected_shares: event.expected_shares,
+        bet_amount: event.bet_amount,
+        price: event.price,
+        orderType: "GTC",
+      }),
+    );
+    expect(store.signAndStoreAttestation).not.toHaveBeenCalled();
   });
 
-  it("partial then terminated → reportPartialFill with filled/spent", async () => {
-    restingState = { status: "partial", filledShares: 120_000_000, spentAmount: 60_000_000 };
-    await run();
-    expect(reportResting).toHaveBeenCalled();
-    expect(reportPartialFill).toHaveBeenCalledWith(event.nullifier, 120_000_000n, 60_000_000n, { nonce: 0 });
-    expect(reportFilled).not.toHaveBeenCalled();
-    expect(reportFOKFailure).not.toHaveBeenCalled();
-  });
-
-  it("zero filled (cancelled) → reportFOKFailure", async () => {
-    restingState = { status: "cancelled", filledShares: 0, spentAmount: 0 };
-    await run();
-    expect(reportResting).toHaveBeenCalled();
-    expect(reportFOKFailure).toHaveBeenCalledWith(event.nullifier, { nonce: 0 });
-    expect(reportFilled).not.toHaveBeenCalled();
-    expect(reportPartialFill).not.toHaveBeenCalled();
+  it("does not register when no orderID is returned", async () => {
+    global.fetch = jest.fn(async () => ({
+      ok: true, status: 200, json: async () => ({ success: true, status: "live" }),
+    } as unknown as Response)) as unknown as typeof fetch;
+    await run("GTC");
+    expect(trackerMod.trackOrder).not.toHaveBeenCalled();
   });
 
   it("does not submit when circuit breaker is halted", async () => {
     const { isHalted } = require("../circuitBreaker");
     isHalted.mockReturnValue(true);
-    await run();
+    await run("GTC");
     expect(global.fetch).not.toHaveBeenCalled();
-    expect(reportResting).not.toHaveBeenCalled();
+    expect(trackerMod.trackOrder).not.toHaveBeenCalled();
   });
 });

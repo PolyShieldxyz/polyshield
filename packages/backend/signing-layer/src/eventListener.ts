@@ -2,8 +2,9 @@ import fs from "fs";
 import path from "path";
 import { ethers } from "ethers";
 import pino from "pino";
-import { submitFOKOrder, submitLimitOrder } from "./orderBuilder";
+import { submitFOKOrder, submitLimitOrder, submitFAKOrder } from "./orderBuilder";
 import { getLimitOrder } from "./limitOrderStore";
+import { getAttestation } from "./attestationStore";
 import { config } from "./config";
 
 const STATE_FILE = path.join(process.cwd(), "data", "event-listener-state.json");
@@ -31,9 +32,6 @@ const VAULT_ABI = [
   "function betRecords(bytes32 nullifier) view returns (bytes32 market_id, bytes32 condition_id, bytes32 position_id, uint64 expected_shares, uint64 bet_amount, uint8 outcome_side, uint8 status)",
 ];
 
-// BetStatus.ACTIVE = 0 (matches Solidity enum order)
-const BET_STATUS_ACTIVE = 0;
-
 async function processBetEvent(
   nullifier: string,
   market_id: string,
@@ -47,12 +45,17 @@ async function processBetEvent(
 ): Promise<void> {
   const orderEvent = { nullifier, market_id, position_id, expected_shares, bet_amount, price, new_commitment };
 
-  // FC-4: if the frontend registered a limit-order intent for this nullifier, submit
-  // a resting GTC/GTD order; otherwise default to FOK (unchanged behavior).
+  // FC-4: if the frontend registered an order-type intent for this nullifier, route
+  // accordingly: FAK (fill-and-kill market order) or a resting GTC/GTD limit order.
+  // Otherwise default to FOK (unchanged behavior).
   const intent = getLimitOrder(nullifier);
   if (intent) {
-    logger.info({ nullifier, order_type: intent.order_type }, "limit-order intent found — submitting resting order");
-    await submitLimitOrder(orderEvent, { orderType: intent.order_type, expiration: intent.expiration }, wallet, provider);
+    logger.info({ nullifier, order_type: intent.order_type }, "order-type intent found — routing");
+    if (intent.order_type === "FAK") {
+      await submitFAKOrder(orderEvent, wallet, provider);
+    } else {
+      await submitLimitOrder(orderEvent, { orderType: intent.order_type, expiration: intent.expiration }, wallet, provider);
+    }
     return;
   }
 
@@ -71,9 +74,15 @@ async function catchUpMissedBets(
 ): Promise<void> {
   logger.info("event-listener: scanning for missed BetAuthorized events...");
   try {
-    const lastBlock = loadLastBlock();
+    // API-009: clamp the persisted cursor to [0, currentBlock]. A corrupt or
+    // oversized lastBlock (e.g. from a tampered/garbled state file, or after a
+    // chain reset to a lower height) would otherwise push fromBlock past the
+    // chain head and silently skip the entire history scan.
+    const currentBlock = await provider.getBlockNumber();
+    const rawLastBlock = loadLastBlock();
+    const lastBlock = Math.min(Math.max(0, Number(rawLastBlock) || 0), currentBlock);
     const fromBlock = Math.max(0, lastBlock - SAFETY_BUFFER);
-    logger.info({ fromBlock, lastBlock }, "event-listener: catchup scan range");
+    logger.info({ fromBlock, lastBlock, currentBlock, rawLastBlock }, "event-listener: catchup scan range");
 
     const filter = vault.filters.BetAuthorized();
     const logs = await vault.queryFilter(filter, fromBlock, "latest");
@@ -88,12 +97,20 @@ async function catchUpMissedBets(
 
       const nullifier = parsed.args[0] as string;
       try {
-        const rec = await vault.betRecords(nullifier);
-        // status is the 7th field (index 6) in the BetRecord tuple
-        const status = Number(rec[6]);
-        if (status !== BET_STATUS_ACTIVE) continue;
+        // FC-9: on-chain status is no longer advanced by report* (those are gone),
+        // so an ACTIVE on-chain status no longer means "not yet handled" — the order
+        // may already be filled. Dedupe on the off-chain attestation store instead:
+        // a persisted attestation means the order already reached a terminal state,
+        // so re-submitting would double-place on the CLOB.
+        if (getAttestation(nullifier)) continue;
 
-        logger.warn({ nullifier }, "event-listener: found ACTIVE bet from missed event — reprocessing");
+        // Skip bets that don't exist on-chain (e.g. reverted tx). The bet record's
+        // market_id is bytes32(0) when no record was written.
+        const rec = await vault.betRecords(nullifier);
+        const market_id = rec[0] as string;
+        if (!market_id || market_id === ethers.ZeroHash) continue;
+
+        logger.warn({ nullifier }, "event-listener: found un-attested bet from missed event — reprocessing");
         await processBetEvent(
           nullifier,
           parsed.args[1] as string,   // market_id

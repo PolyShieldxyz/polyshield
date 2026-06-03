@@ -14,12 +14,14 @@
 import Database from "better-sqlite3";
 import path from "path";
 
-export type LimitOrderType = "GTC" | "GTD";
+// FOK is the default (no intent recorded). The intent store covers the non-default
+// order types: resting limit orders (GTC/GTD) and the FAK market order.
+export type LimitOrderType = "GTC" | "GTD" | "FAK";
 
 export interface LimitOrderIntent {
   nullifier_of_bet: string;
   order_type: LimitOrderType;
-  /** GTD effective lifetime in seconds (0 / undefined for GTC). */
+  /** GTD effective lifetime in seconds (0 / undefined for GTC and FAK). */
   expiration: number;
 }
 
@@ -58,9 +60,11 @@ export function getLimitOrder(nullifier_of_bet: string): LimitOrderIntent | null
     .prepare(`SELECT nullifier_of_bet, order_type, expiration FROM limit_orders WHERE nullifier_of_bet = ?`)
     .get(nullifier_of_bet) as { nullifier_of_bet: string; order_type: string; expiration: number } | undefined;
   if (!row) return null;
+  const order_type: LimitOrderType =
+    row.order_type === "GTD" ? "GTD" : row.order_type === "FAK" ? "FAK" : "GTC";
   return {
     nullifier_of_bet: row.nullifier_of_bet,
-    order_type: row.order_type === "GTD" ? "GTD" : "GTC",
+    order_type,
     expiration: row.expiration,
   };
 }

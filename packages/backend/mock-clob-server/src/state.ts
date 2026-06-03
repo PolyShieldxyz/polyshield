@@ -5,7 +5,8 @@
 
 export type FillBehavior =
   | "fill"         // order fills successfully
-  | "no_fill"      // FOK order not filled (normal market failure)
+  | "partial_fill" // FAK order fills partially then kills the remainder (uses partialFillBps)
+  | "no_fill"      // FOK/FAK order not filled (normal market failure)
   | "error_403"    // account flagged / banned — triggers circuit breaker
   | "timeout"      // server hangs, no response (tests timeout handling)
   | "rate_limit";  // 429 Too Many Requests
@@ -53,6 +54,8 @@ export interface RestingOrder {
 
 export interface ServerState {
   fillBehavior: FillBehavior;
+  /** FAK/partial fill fraction in basis points (e.g. 5000 = 50%) for "partial_fill". */
+  partialFillBps: number;
   heartbeatCount: number;
   heartbeatId: string;
   ordersReceived: ReceivedOrder[];
@@ -67,6 +70,7 @@ export interface ServerState {
 
 export const state: ServerState = {
   fillBehavior: "fill",
+  partialFillBps: 5000,
   heartbeatCount: 0,
   heartbeatId: "hb-0000-0000-0000",
   ordersReceived: [],
@@ -79,6 +83,7 @@ export const state: ServerState = {
 
 export function resetState(): void {
   state.fillBehavior = "fill";
+  state.partialFillBps = 5000;
   state.heartbeatCount = 0;
   state.heartbeatId = "hb-0000-0000-0000";
   state.ordersReceived = [];

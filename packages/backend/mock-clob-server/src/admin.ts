@@ -22,8 +22,35 @@ import { Router, Request, Response } from "express";
 import { ethers } from "ethers";
 import { state, resetState, FillBehavior, SettledMarket } from "./state";
 import { mintCTFShares } from "./routes/orders";
+import { broadcastOrderUpdate } from "./ws";
 
 export const adminRouter = Router();
+
+// API-011: optional admin-token guard. This router stays LOOPBACK-ONLY and must
+// NEVER be exposed on a public interface. When DEV_ADMIN_TOKEN is set, every
+// /admin/* call must present a matching `x-admin-token` header (or
+// `Authorization: Bearer <token>`); when unset we allow (dev convenience) but
+// warn so the relaxed posture is visible in logs.
+let warnedNoAdminToken = false;
+adminRouter.use((req: Request, res: Response, next) => {
+  const expected = process.env["DEV_ADMIN_TOKEN"];
+  if (!expected) {
+    if (!warnedNoAdminToken) {
+      warnedNoAdminToken = true;
+      console.warn("[admin] DEV_ADMIN_TOKEN unset — /admin/* is unauthenticated (loopback-only dev mode)");
+    }
+    next();
+    return;
+  }
+  const headerToken = req.header("x-admin-token");
+  const auth = req.header("authorization");
+  const bearer = auth && auth.startsWith("Bearer ") ? auth.slice("Bearer ".length) : undefined;
+  if (headerToken === expected || bearer === expected) {
+    next();
+    return;
+  }
+  res.status(401).json({ error: "unauthorized" });
+});
 
 // Minimal ABI for the MockCTF settlement calls
 const MOCK_CTF_ABI = [
@@ -39,15 +66,19 @@ const VAULT_ABI = [
 ];
 
 adminRouter.post("/set-behavior", (req: Request, res: Response) => {
-  const { behavior } = req.body as { behavior?: FillBehavior };
-  const valid: FillBehavior[] = ["fill", "no_fill", "error_403", "timeout", "rate_limit"];
+  const { behavior, partialFillBps } = req.body as { behavior?: FillBehavior; partialFillBps?: number };
+  const valid: FillBehavior[] = ["fill", "partial_fill", "no_fill", "error_403", "timeout", "rate_limit"];
   if (!behavior || !valid.includes(behavior)) {
     res.status(400).json({ error: `behavior must be one of: ${valid.join(", ")}` });
     return;
   }
   state.fillBehavior = behavior;
-  console.log(`[admin] fill behavior → ${behavior}`);
-  res.json({ ok: true, fillBehavior: state.fillBehavior });
+  // Optional: control the FAK/partial fraction (basis points) used by "partial_fill".
+  if (typeof partialFillBps === "number" && partialFillBps > 0 && partialFillBps < 10000) {
+    state.partialFillBps = Math.floor(partialFillBps);
+  }
+  console.log(`[admin] fill behavior → ${behavior}${behavior === "partial_fill" ? ` (${state.partialFillBps}bps)` : ""}`);
+  res.json({ ok: true, fillBehavior: state.fillBehavior, partialFillBps: state.partialFillBps });
 });
 
 adminRouter.post("/set-delay", (req: Request, res: Response) => {
@@ -171,9 +202,10 @@ adminRouter.post("/settle-market", (async (req: Request, res: Response) => {
 
     res.json({ ok: true, settlement: settled, ctfTxHash: ctfReceipt?.hash, resolveMarketTxHash });
   } catch (err) {
+    // API-004: log full error server-side; return a generic message to the caller.
     const msg = err instanceof Error ? err.message : String(err);
     console.error(`[admin] settle-market failed: ${msg}`);
-    res.status(500).json({ error: msg });
+    res.status(500).json({ error: "settle-market failed" });
   }
 }) as (req: Request, res: Response) => void);
 
@@ -245,6 +277,17 @@ adminRouter.post("/limit-fill", (async (req: Request, res: Response) => {
     await mintCTFShares(order.tokenId, order.filledShares);
   }
 
+  // FC-4: push the terminal state to user-channel websocket subscribers (the signing
+  // layer's wsFillTracker). The REST GET /order/:id still reflects the same state as a
+  // reconcile backstop.
+  broadcastOrderUpdate({
+    orderID: order.orderID,
+    tokenId: order.tokenId,
+    status: order.status,
+    filledShares: order.filledShares,
+    spentAmount: order.spentAmount,
+  });
+
   console.log(
     `[admin] limit-fill order=${order.orderID.slice(0, 10)}... → ${order.status} ` +
     `filledShares=${order.filledShares} spentAmount=${order.spentAmount}`
@@ -284,8 +327,9 @@ adminRouter.post("/report-filled", (async (req: Request, res: Response) => {
     console.log(`[admin] reportFilled confirmed: nullifier=${nullifier.slice(0, 10)}... tx=${receipt?.hash}`);
     res.json({ ok: true, txHash: receipt?.hash });
   } catch (err) {
+    // API-004: log full error server-side; return a generic message to the caller.
     const msg = err instanceof Error ? err.message : String(err);
     console.error(`[admin] report-filled failed: ${msg}`);
-    res.status(500).json({ error: msg });
+    res.status(500).json({ error: "report-filled failed" });
   }
 }) as (req: Request, res: Response) => void);
