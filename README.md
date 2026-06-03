@@ -214,8 +214,8 @@ Smart contracts are open-source and MIT licensed. Independent audits are planned
 
 | Phase | Timeline | Status | Focus |
 |---|---|---|---|
-| **P1 — MVP Alpha** | H1 2026 | IN PROGRESS | Core contracts, circuits, signing layer v1, testnet scaffold, fee infrastructure |
-| **P2 — Testnet v1** | H2 2026 | PLANNED | Real WASM proofs, wallet-derived secrets, operator-driven settlement, open beta |
+| **P1 — MVP Alpha** | H1 2026 | IN PROGRESS | Core contracts, circuits, signing layer v1, testnet scaffold, fee infrastructure, JIT collateral deployment (Option 3 / FC-7) on a relayer/proxy deposit-wallet model |
+| **P2 — Testnet v1** | H2 2026 | PLANNED | Real WASM proofs, wallet-derived secrets, operator-driven settlement, open beta, base-buffer + JIT-overflow collateral (Option 4) |
 | **P3 — TEE + Multi-chain** | H1 2027 | PLANNED | AWS Nitro signing layer v2, multi-chain deposits, withdrawal fee |
 | **P4 — Privacy Infrastructure** | H2 2027 | PLANNED | Decoy traffic, onion relay, SMT nullifier, privacy metrics dashboard |
 | **P5 — Multi-market** | 2028 | RESEARCH | Expand beyond Polymarket, GTC order support |

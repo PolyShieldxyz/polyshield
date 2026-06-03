@@ -1,8 +1,10 @@
 # Polymarket API and Protocol Reference
 
-**Version:** 0.2 (Verified)
-**Last updated:** 2026-05-20
-**Status:** All sections verified against official Polymarket documentation and GitHub source. No more [UNVERIFIED] sections — any future changes to Polymarket's contracts or API require re-verification.
+**Version:** 0.3 (Verified)
+**Last updated:** 2026-06-02
+**Status:** All sections verified against official Polymarket documentation ([api-reference](https://docs.polymarket.com/api-reference), [builders/overview](https://docs.polymarket.com/builders/overview)) and GitHub source. v0.3 adds the API-surface overview (Gamma / Data / Bridge APIs), the L1 request-header list, the **Builder Program & Relayer Client** section, and current SDK/relayer package names. No more [UNVERIFIED] sections — any future changes to Polymarket's contracts or API require re-verification.
+
+> **v0.3 diff vs. official docs (comparison summary).** The CLOB order types, the two-level (L1/L2) auth model, the four signature types (EOA/POLY_PROXY/GNOSIS_SAFE/POLY_1271), the EIP-712 order struct, the heartbeat behaviour, and the contract addresses below all still match the official reference. New in the official docs and now reflected here: (1) Polymarket exposes **four** API services — Gamma, Data, CLOB, Bridge (§3.0); (2) L1 credential-creation requests carry a `POLY_NONCE` header (§3); (3) the **Builder Program** with `builderCode` order attribution and the gas-free **Relayer Client** (§5.1); (4) georestriction/region routing for the CLOB (§3.0).
 
 ---
 
@@ -101,6 +103,21 @@ This value is derived directly from on-chain CTF state — not from an external 
 
 Polymarket's CLOB is off-chain. Order matching happens server-side at Polymarket. Settlement happens on-chain via the CTF Exchange V2 contract when orders are matched.
 
+### 3.0 API Surface Overview
+
+The official reference splits the platform into four HTTP services. Polyshield only needs the **CLOB API** for order flow plus optionally the **Data API** for position/redemption queries; the others are listed for completeness.
+
+| Service | Base URL | Auth | Used by Polyshield |
+|---|---|---|---|
+| CLOB API | `https://clob.polymarket.com` | public reads; L2 for trading | **Yes** — order submission, status, cancel, heartbeat (signing layer) |
+| Data API | `https://data-api.polymarket.com` | none | Optional — positions, trades, holder data; useful cross-check for the Indexer |
+| Gamma API | `https://gamma-api.polymarket.com` | none | Optional — markets/events/tags metadata (market discovery in the frontend) |
+| Bridge API | `https://bridge.polymarket.com` | n/a | No — deposit/withdrawal proxy to fun.xyz; Polyshield manages its own collateral path |
+
+Docs index for machine consumption: `https://docs.polymarket.com/llms.txt`. Official client libraries exist for **TypeScript, Python, and Rust** (see §5.1 for exact package names).
+
+**Region / georestriction:** the CLOB is served primarily from `eu-west-2`, with `eu-west-1` as a non-georestricted alternative; KYC/KYB unlocks direct colocation. The signing layer's egress region matters operationally (a georestricted region can have orders rejected) — pin the signing layer to a permitted region.
+
 ### Order Types
 
 All four order types are confirmed supported:
@@ -136,6 +153,15 @@ const types = {
   ],
 };
 ```
+
+The L1 credential-creation/derivation request itself carries these headers (distinct from the L2 set below):
+
+| Header | Description |
+|---|---|
+| `POLY_ADDRESS` | Polygon signer address |
+| `POLY_SIGNATURE` | EIP-712 `ClobAuth` signature |
+| `POLY_TIMESTAMP` | Current UNIX timestamp |
+| `POLY_NONCE` | Request nonce |
 
 **L2 (HMAC-SHA256 / API Key):** Required on every authenticated trading endpoint (order submission, cancellation, heartbeat). Five headers must be sent:
 
@@ -300,11 +326,41 @@ NOT the vault's signing EOA address. The Deposit Wallet holds the tokens, not th
 
 ### Wallet Lifecycle for Polyshield
 
-1. **At vault deployment:** The vault operator deploys a Deposit Wallet for the vault's signing EOA via `POST /relayer/submit` with `type: "WALLET-CREATE"`. The Deposit Wallet address is stored in the Vault contract.
-2. **Funding:** When vault users deposit USDC, the Vault accumulates USDC. A periodic `fundPolymarketAccount()` call converts USDC to pUSD via `CollateralOnramp` and sends pUSD to the Deposit Wallet. The Vault then calls `CollateralOnramp.approve` from the Deposit Wallet (via a `WALLET` batch) for the CTF Exchange V2.
+1. **At vault deployment:** The vault operator deploys a Deposit Wallet for the vault's signing EOA via `POST /relayer/submit` with `type: "WALLET-CREATE"`. The Deposit Wallet address is stored in the Vault contract. **One-time approvals** (pUSD → CTF Exchange V2 and pUSD → offramp) are submitted from the Deposit Wallet via a `WALLET` batch (`DepositWalletExecutor.ensureApprovals`).
+2. **Funding — JIT (Option 3 / FC-7):** Deposits accumulate as USDC in the Vault; nothing is converted at deposit time. **Per bet**, just before order submission, the Signing Layer calls `Vault.fundPolymarketWallet(shortfall)` to convert only the uncovered remainder of `bet_amount` (USDC → pUSD via `CollateralOnramp`) and forward it to the Deposit Wallet. pUSD left after a no-fill is reused as a residual buffer, so subsequent bets onramp less; the steady state converges on the Option-4 base buffer. (Earlier docs described a *periodic* bulk `fundPolymarketAccount()` — that is the Option-2/4 bulk variant; the implemented path is per-bet JIT.)
 3. **Trading:** The Signing Layer uses the deposit wallet as the order maker, signs with POLY_1271, submits FOK orders via the CLOB API.
-4. **Settlement:** After market resolution, the Signing Layer (or Indexer) calls `CTF.redeemPositions(...)` from the Deposit Wallet via a `WALLET` batch. Winning pUSD flows back to the Deposit Wallet. The Vault then calls `CollateralOfframp` to convert pUSD back to USDC.
+4. **Settlement:** After market resolution, the Signing Layer (or Indexer) submits a `WALLET` batch via the relayer abstraction (`DepositWalletExecutor`) calling `CTF.redeemPositions(...)` from the Deposit Wallet, then `approve`/`CollateralOfframp.withdraw`/`transfer` to send USDC back to the Vault, and the operator calls `acknowledgePolymarketReturn` to decrement `deployedToPolymarket`. Locally this runs against the `MockDepositWallet` proxy via the mock relayer route; in production against the Polymarket builder relayer.
 5. **User withdrawal:** When a user generates a valid Withdrawal ZK proof, the Vault contract transfers USDC to the recipient address.
+
+---
+
+## 5.1 Builder Program & Relayer Client
+
+Source: [docs.polymarket.com/builders/overview](https://docs.polymarket.com/builders/overview). This is the integration path Polyshield already follows (deposit wallet + relayer + POLY_1271), so the signing layer should adopt the official Builder tooling rather than hand-rolling relayer calls.
+
+### What a "builder" is
+
+A **builder** routes user orders to Polymarket and in return gets (1) **gas-free** on-chain operations through Polymarket's relayer and (2) volume attribution on a public leaderboard. Two mechanics matter for Polyshield:
+
+- **`builderCode` attribution.** The app attaches its `builderCode` to the order struct; *"the builder code is serialized on-chain as part of the signed order."* This is exactly the `builder` field shown in the EIP-712 order in §3 (currently `0x0000...`). **For the live test, set `order.builder` to Polyshield's registered builder code** so orders are attributed and eligible for gas-free relaying. The builder code is created/managed in the Builder dashboard.
+- **Gas-free relayer.** *"Gas-free wallet deployment, approvals, order execution and CTF operations."* The relayer covers the Polygon gas for: deposit-wallet deployment (`WALLET-CREATE`), one-time approvals (pUSD + outcome tokens), order execution, and CTF operations (`redeemPositions`, etc.). This is the mechanism behind Polyshield's `DepositWalletExecutor` `WALLET` batches (see §5) — in production those batches go to the **builder relayer**, removing the need for the relay EOA to hold MATIC for deposit-wallet actions.
+
+### SDK clients (current package/repo names)
+
+| Client | Language | Repo / package |
+|---|---|---|
+| CLOB Client | TypeScript | `github.com/Polymarket/clob-client-v2` |
+| CLOB Client | Python | `github.com/Polymarket/py-clob-client-v2` |
+| CLOB Client | Rust | `github.com/Polymarket/rs-clob-client-v2` |
+| Relayer Client | TypeScript | `github.com/Polymarket/builder-relayer-client` |
+| Relayer Client | Python | `github.com/Polymarket/py-builder-relayer-client` |
+
+The Signing Layer should use the **CLOB Client** (order signing/submission, builder attribution, POLY_1271 wrapping — see §3) and the **Relayer Client** (gas-free wallet create / approvals / redemption batches — the production backend for `DepositWalletExecutor`). L2 API credentials are derived from wallet (L1) authentication and managed via the Builder dashboard.
+
+### Implications for Polyshield
+
+- The previously-noted flat `relayGasFeeUSDC` (P2 fee, see CLAUDE.md) covers the relay EOA's Polygon gas for the **on-chain proof relay**, which is separate from Polymarket's builder relayer; deposit-wallet/CLOB on-chain actions become gas-free under the builder relayer, so the operator's MATIC burn is limited to the proof-relay path.
+- Builder enrollment is an operational prerequisite for the live mainnet test: register a builder profile, obtain a `builderCode`, and wire it into the order builder so `order.builder` is non-zero.
 
 ---
 

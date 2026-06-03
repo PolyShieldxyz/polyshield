@@ -9,9 +9,9 @@ const INDEXER_URL = process.env.INDEXER_URL ?? 'http://127.0.0.1:3003'
 
 export async function GET(
   _req: NextRequest,
-  { params }: { params: { market_id: string } },
+  { params }: { params: Promise<{ market_id: string }> }, // Next 15: params is async
 ): Promise<NextResponse> {
-  const { market_id } = params
+  const { market_id } = await params
   const target = `${INDEXER_URL}/settlement/${encodeURIComponent(market_id)}`
 
   console.log(`[api/settlement] → GET ${target}`)

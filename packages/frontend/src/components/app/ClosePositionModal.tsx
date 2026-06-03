@@ -11,7 +11,6 @@ import {
   deriveSecret,
   formatUsdc,
   getFreeNoteForDeposit,
-  getCurrentCashNote,
   markNoteSpent,
   markBetReceiptSpent,
   recordWalletActivity,
@@ -19,16 +18,18 @@ import {
 } from '@/lib/notes'
 import {
   fetchMerklePath,
+  fetchAttestation,
+  fetchBetRecord,
   relayClose,
   requestClose,
-  fetchBetStatus,
   waitForTransactionConfirmation,
+  type SignedAttestation,
 } from '@/lib/api'
 import { generatePositionCloseProof } from '@/lib/prover'
 
-// BetStatus enum (Vault.sol): ACTIVE=0, FILLED=1, FAILED=2, CREDITED=3,
-// CANCELLED_CREDITED=4, CLOSING=5, CLOSED_CREDITED=6.
-const STATUS_CLOSING = 5
+// FC-9: proceeds are conveyed by the operator's SOLD attestation (reportType 4), not an
+// on-chain CLOSING status. We poll the attestation endpoint until the operator signs it.
+const REPORT_SOLD = 4
 
 type Phase = 'input' | 'selling' | 'proving' | 'done' | 'error'
 
@@ -72,11 +73,13 @@ export function ClosePositionModal({
     return () => window.clearTimeout(id)
   }, [phase, onClose, onComplete])
 
-  async function pollUntilClosing(nullifierOfBet: `0x${string}`, timeoutMs = 60_000): Promise<void> {
+  // Poll the operator's attestation endpoint until a SOLD attestation appears (the operator
+  // signs it once the FOK SELL fills). Returns the signed attestation.
+  async function pollUntilSold(nullifierOfBet: `0x${string}`, timeoutMs = 60_000): Promise<SignedAttestation> {
     const start = Date.now()
     while (Date.now() - start < timeoutMs) {
-      const status = await fetchBetStatus(vaultAddress, nullifierOfBet)
-      if (status === STATUS_CLOSING) return
+      const att = await fetchAttestation(nullifierOfBet)
+      if (att && att.reportType === REPORT_SOLD) return att
       await new Promise((r) => setTimeout(r, 2_000))
     }
     throw new Error('Sell order did not fill in time (position stays open). Try a more aggressive limit price.')
@@ -95,14 +98,16 @@ export function ClosePositionModal({
 
     // Full close in this UI. limit_price is 1e6-scaled (priceCents/100 * 1e6).
     const limitPrice = BigInt(priceCents) * 10_000n // cents → 1e6 scale
-    const soldShares = totalShares
-    // proceeds MUST match the backend formula exactly so the proof's sell_proceeds
-    // equals the Vault-injected rec.sell_proceeds: floor(sold_shares * limit_price / 1e6).
-    const computedProceeds = (soldShares * limitPrice) / 1_000_000n
-    setProceeds(computedProceeds)
 
     try {
-      // Phase 1: ask the signing layer to submit the FOK SELL, then wait for CLOSING.
+      // Size the SELL from the authoritative on-chain expected_shares (full close), NOT the
+      // possibly-stale localStorage receipt. The Vault requires the SOLD attestation's
+      // sold_shares == expected_shares exactly, so the operator must sell that exact amount.
+      const rec = await fetchBetRecord(vaultAddress, nullifierOfBet)
+      const soldShares = rec.expectedShares
+
+      // Phase 1: ask the signing layer to submit the FOK SELL, then wait for the operator's
+      // SOLD attestation (FC-9: gasless — no on-chain CLOSING status anymore).
       setPhase('selling')
       await requestClose({
         nullifier_of_bet: nullifierOfBet,
@@ -110,13 +115,22 @@ export function ClosePositionModal({
         sold_shares: soldShares.toString(),
         limit_price: limitPrice.toString(),
       })
-      await pollUntilClosing(nullifierOfBet)
+      const soldAtt = await pollUntilSold(nullifierOfBet)
+      // Use the operator-attested proceeds; the Vault injects att.amountB as sell_proceeds.
+      const computedProceeds = BigInt(soldAtt.amountB)
+      setProceeds(computedProceeds)
 
       // Phase 2: credit the proceeds into the note via a position_close proof.
+      // Must spend a note from the SAME deposit chain as the bet receipt: the close
+      // circuit derives nullifier_of_bet = Poseidon2(secret, bet_nonce) from this
+      // note's deposit index, so a note from a different deposit would produce a
+      // non-matching nullifier_of_bet and the proof would not verify. No cross-deposit
+      // fallback (that mismatch is exactly the bug being fixed).
       setPhase('proving')
-      const freeNote =
-        getFreeNoteForDeposit(address, receipt.depositIndex) ?? getCurrentCashNote(address)
-      if (!freeNote) throw new Error('No cash note is available to receive the sale proceeds.')
+      const freeNote = getFreeNoteForDeposit(address, receipt.depositIndex)
+      if (!freeNote) {
+        throw new Error('No spendable note for this position’s deposit. Recover your notes and try again.')
+      }
 
       const secret = await deriveSecret(signMessageAsync, address, freeNote.depositIndex)
       const merkle = await fetchMerklePath(freeNote.commitment)
@@ -145,7 +159,7 @@ export function ClosePositionModal({
         nullifier: freeNote.nullifier,
         new_commitment: newCommitment,
         nullifier_of_bet: nullifierOfBet,
-      })
+      }, soldAtt)
       await waitForTransactionConfirmation(txHash as `0x${string}`)
 
       markNoteSpent(freeNote.commitment)

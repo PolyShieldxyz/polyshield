@@ -14,11 +14,14 @@ import {CancelCreditVerifier} from "../src/verifiers/CancelCreditVerifier.sol";
 import {DepositVerifier} from "../src/verifiers/DepositVerifier.sol";
 import {PositionCloseVerifier} from "../src/verifiers/PositionCloseVerifier.sol";
 import {PartialCreditVerifier} from "../src/verifiers/PartialCreditVerifier.sol";
+import {ConsolidateVerifier} from "../src/verifiers/ConsolidateVerifier.sol";
 import {MockUSDC} from "../src/mocks/MockUSDC.sol";
 import {MockCTF} from "../src/mocks/MockCTF.sol";
 import {MockCollateralOfframp} from "../src/mocks/MockCollateralOfframp.sol";
 import {MockCollateralOnramp} from "../src/mocks/MockCollateralOnramp.sol";
 import {MockPUSD} from "../src/mocks/MockPUSD.sol";
+import {MockDepositWallet} from "../src/mocks/MockDepositWallet.sol";
+import {DeployLib} from "./DeployLib.sol";
 
 /// @notice Deploys all contracts + mocks on a local Anvil node for dev/integration testing.
 /// Uses contract-level storage variables to stay within the Solidity stack limit.
@@ -36,7 +39,12 @@ contract MockDeploy is Script {
 
     address constant OWNER          = 0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266;
     address constant OPERATOR       = 0x70997970C51812dc3A010C7d01b50e0d17dc79C8;
+    // Legacy plain-EOA deposit wallet (Anvil #2) — kept only as the owner/funding key
+    // for the proxy. The Vault's depositWallet is now the MockDepositWallet proxy below.
     address constant DEPOSIT_WALLET = 0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC;
+    // Relayer (Anvil #3) — authorized executor of the deposit-wallet proxy; mock twin
+    // of the Polymarket relayer. mock-env exports its key as RELAYER_PRIVATE_KEY.
+    address constant RELAYER        = 0x90F79bf6EB2c4f870365E785982E1f101E93b906;
     address constant ALICE          = 0x15d34AAf54267DB7D7c367839AAf71A00a2C6A65;
     address constant BOB            = 0x9965507D1a55bcC2695C58ba16FB37d819B0A4dc;
     address constant ATTACKER       = 0x976EA74026E726554dB657fA54763abd0C3a0aa9;
@@ -52,6 +60,7 @@ contract MockDeploy is Script {
     MockCTF                 internal s_ctf;
     MockCollateralOnramp  internal s_onramp;
     MockCollateralOfframp internal s_offramp;
+    MockDepositWallet       internal s_depositWallet;
     PoseidonT3Hasher        internal s_poseidon;
     NullifierRegistry       internal s_registry;
     CommitmentMerkleTree    internal s_tree;
@@ -64,6 +73,7 @@ contract MockDeploy is Script {
     DepositVerifier         internal s_deposit;
     PositionCloseVerifier   internal s_positionClose;
     PartialCreditVerifier   internal s_partialCredit;
+    ConsolidateVerifier     internal s_consolidate;
     bytes32                 internal s_resolvedYesMarket;
     bytes32                 internal s_naMarket;
 
@@ -90,8 +100,14 @@ contract MockDeploy is Script {
         s_usdc     = new MockUSDC();
         s_pusd     = new MockPUSD();
         s_ctf      = new MockCTF(address(s_pusd));
-        s_poseidon = new PoseidonT3Hasher();   // real BN254 Poseidon2 — matches Noir
+        // Real BN254 Poseidon2 (matches Noir) as a UUPS proxy: impl + ERC1967 proxy.
+        address poseidonImpl = address(new PoseidonT3Hasher());
+        s_poseidon = PoseidonT3Hasher(DeployLib.deployOwnedProxy(poseidonImpl, OWNER));
         s_onramp   = new MockCollateralOnramp(address(s_usdc), address(s_pusd));
+        // Deposit-wallet proxy (post-April-2026 model). Deployed here, before _deployCore's
+        // CREATE-address prediction snapshot, so the registry/tree/offramp/vault offsets are
+        // unaffected. owner = legacy EOA (funding/control), relayer = RELAYER (batch executor).
+        s_depositWallet = new MockDepositWallet(DEPOSIT_WALLET, RELAYER);
         vm.stopBroadcast();
     }
 
@@ -99,29 +115,46 @@ contract MockDeploy is Script {
 
     function _deployCore() internal {
         address deployer = vm.addr(DEPLOYER_KEY);
-        // After step 1, deployer nonce advanced by 3 (usdc, ctf, poseidon).
-        // Core order: registry(+0), tree(+1), offramp(+2), vault(+3) relative to current nonce.
-        uint64 nonce = vm.getNonce(deployer);
-        address predictedOfframp = vm.computeCreateAddress(deployer, nonce + 2);
-        address predictedVault = vm.computeCreateAddress(deployer, nonce + 3);
 
         vm.startBroadcast(DEPLOYER_KEY);
-        s_registry = new NullifierRegistry(predictedVault);
-        s_tree     = new CommitmentMerkleTree(predictedVault, address(s_poseidon));
-        s_offramp  = new MockCollateralOfframp(address(s_usdc), address(s_pusd));
-        require(address(s_offramp) == predictedOfframp, "MockDeploy: offramp addr mismatch");
-        s_vault    = new Vault(
-            address(s_usdc),
-            address(s_tree),
-            address(s_registry),
-            address(s_onramp),
-            address(s_offramp),
-            address(s_ctf),
-            OPERATOR,
-            DEPOSIT_WALLET,
-            OWNER
+        // Deploy implementations + the (non-cyclic) offramp mock first.
+        address registryImpl = address(new NullifierRegistry());
+        address treeImpl     = address(new CommitmentMerkleTree());
+        address vaultImpl    = address(new Vault());
+        s_offramp            = new MockCollateralOfframp(address(s_usdc), address(s_pusd));
+
+        // Cyclic trio under proxies: predict the Vault PROXY address so the registry/tree
+        // proxies can initialize against it. The next three deployer CREATEs are
+        // registryProxy(nonce), treeProxy(nonce+1), vaultProxy(nonce+2). Inner G16Base
+        // CREATEs of other proxies are attributed to those proxies, not the deployer.
+        uint64 nonce = vm.getNonce(deployer);
+        address predictedVault = vm.computeCreateAddress(deployer, nonce + 2);
+
+        s_registry = NullifierRegistry(
+            DeployLib.deployProxy(registryImpl, abi.encodeCall(NullifierRegistry.initialize, (predictedVault, OWNER)))
         );
-        require(address(s_vault) == predictedVault, "MockDeploy: vault addr mismatch");
+        s_tree = CommitmentMerkleTree(
+            DeployLib.deployProxy(
+                treeImpl, abi.encodeCall(CommitmentMerkleTree.initialize, (predictedVault, address(s_poseidon), OWNER))
+            )
+        );
+        s_vault = Vault(
+            DeployLib.deployVaultProxy(
+                vaultImpl,
+                DeployLib.VaultInit({
+                    usdc: address(s_usdc),
+                    tree: address(s_tree),
+                    registry: address(s_registry),
+                    onramp: address(s_onramp),
+                    offramp: address(s_offramp),
+                    ctf: address(s_ctf),
+                    operator: OPERATOR,
+                    depositWallet: address(s_depositWallet),
+                    owner: OWNER
+                })
+            )
+        );
+        require(address(s_vault) == predictedVault, "MockDeploy: vault proxy addr mismatch");
         vm.stopBroadcast();
     }
 
@@ -129,14 +162,17 @@ contract MockDeploy is Script {
 
     function _deployVerifiers() internal {
         vm.startBroadcast(DEPLOYER_KEY);
-        s_betAuth       = new BetAuthVerifier();
-        s_settlement    = new SettlementCreditVerifier();
-        s_withdrawal    = new WithdrawalVerifier();
-        s_betCancel     = new BetCancelVerifier();
-        s_cancelCredit  = new CancelCreditVerifier();
-        s_deposit       = new DepositVerifier();         // FC-2
-        s_positionClose = new PositionCloseVerifier();   // FC-1
-        s_partialCredit = new PartialCreditVerifier();   // FC-4
+        // Each verifier adapter is UUPS-upgradeable: deploy impl + ERC1967 proxy (owner = OWNER).
+        // The proxy address is what gets registered in the Vault verifier slots.
+        s_betAuth       = BetAuthVerifier(DeployLib.deployOwnedProxy(address(new BetAuthVerifier()), OWNER));
+        s_settlement    = SettlementCreditVerifier(DeployLib.deployOwnedProxy(address(new SettlementCreditVerifier()), OWNER));
+        s_withdrawal    = WithdrawalVerifier(DeployLib.deployOwnedProxy(address(new WithdrawalVerifier()), OWNER));
+        s_betCancel     = BetCancelVerifier(DeployLib.deployOwnedProxy(address(new BetCancelVerifier()), OWNER));
+        s_cancelCredit  = CancelCreditVerifier(DeployLib.deployOwnedProxy(address(new CancelCreditVerifier()), OWNER));
+        s_deposit       = DepositVerifier(DeployLib.deployOwnedProxy(address(new DepositVerifier()), OWNER));         // FC-2
+        s_positionClose = PositionCloseVerifier(DeployLib.deployOwnedProxy(address(new PositionCloseVerifier()), OWNER)); // FC-1
+        s_partialCredit = PartialCreditVerifier(DeployLib.deployOwnedProxy(address(new PartialCreditVerifier()), OWNER)); // FC-4
+        s_consolidate   = ConsolidateVerifier(DeployLib.deployOwnedProxy(address(new ConsolidateVerifier()), OWNER));     // FC-8
 
         s_vault.proposeVerifier(s_vault.BET_AUTH(),          address(s_betAuth));
         s_vault.proposeVerifier(s_vault.SETTLEMENT_CREDIT(), address(s_settlement));
@@ -146,6 +182,7 @@ contract MockDeploy is Script {
         s_vault.proposeVerifier(s_vault.DEPOSIT(),           address(s_deposit));
         s_vault.proposeVerifier(s_vault.POSITION_CLOSE(),    address(s_positionClose));
         s_vault.proposeVerifier(s_vault.PARTIAL_CREDIT(),    address(s_partialCredit));
+        s_vault.proposeVerifier(s_vault.CONSOLIDATE(),       address(s_consolidate));
         vm.stopBroadcast();
         // acceptVerifier calls happen in a second pass after Node.js advances Anvil's
         // clock past the 48-hour timelock. See MockAcceptVerifiers.s.sol + deploy.ts.
@@ -223,6 +260,7 @@ contract MockDeploy is Script {
         console2.log("PUSD_ADDRESS=%s",          address(s_pusd));
         console2.log("ONRAMP_ADDRESS=%s",        address(s_onramp));
         console2.log("OFFRAMP_ADDRESS=%s",       address(s_offramp));
+        console2.log("DEPOSIT_WALLET_PROXY=%s",   address(s_depositWallet));
         console2.log("CTF_ADDRESS=%s",            address(s_ctf));
         console2.log("POSEIDON_ADDRESS=%s",       address(s_poseidon));
         console2.log("REGISTRY_ADDRESS=%s",       address(s_registry));
@@ -236,6 +274,7 @@ contract MockDeploy is Script {
         console2.log("DEPOSIT_VERIFIER=%s",        address(s_deposit));
         console2.log("POSITION_CLOSE_VERIFIER=%s", address(s_positionClose));
         console2.log("PARTIAL_CREDIT_VERIFIER=%s", address(s_partialCredit));
+        console2.log("CONSOLIDATE_VERIFIER=%s",    address(s_consolidate));
         console2.log("RESOLVED_YES_MARKET=%s",    vm.toString(s_resolvedYesMarket));
         console2.log("NA_MARKET=%s",              vm.toString(s_naMarket));
         console2.log("ALICE_COMMITMENT_1=%s",     vm.toString(ALICE_COMMITMENT_1));

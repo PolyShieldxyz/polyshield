@@ -5,8 +5,14 @@ script = "script"
 out = "out"
 libs = ["lib"]
 solc = "0.8.24"
+# EIP-1153 transient storage (ReentrancyGuardTransient). Polygon PoS supports it
+# since the Napoli hardfork; required for the UUPS-upgradeable Vault's reentrancy guard.
+evm_version = "cancun"
 optimizer = true
 optimizer_runs = 200
+# Legacy codegen (via_ir = false) to keep compile time + memory low. The only
+# stack-too-deep risk was the 9-arg Vault.initialize() calldata in the proxy deploy
+# paths; that is isolated into DeployLib.deployVaultProxy (memory-struct arg).
 via_ir = false
 fs_permissions = [{ access = "read", path = "./" }, { access = "read", path = "../" }]
 

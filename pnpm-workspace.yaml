@@ -1,3 +1,28 @@
 packages:
   - "packages/*"
   - "packages/backend/*"
+  - "Benchmarking/groth16"
+# Security overrides for transitive CVEs (DEP-002/003/004). pnpm v10 reads these from
+# pnpm-workspace.yaml (the "pnpm.overrides" field in package.json is ignored).
+# Verify with `pnpm install && pnpm audit`.
+# - vite is pinned to the 6.4.x line (6.4.2 is the path-traversal fix) and capped <7 so it stays
+#   compatible with vitest 3 without pulling vite 7's stricter Node engine. Paired with the
+#   frontend's vitest ^3.2.4 bump (Workstream F).
+# - uuid is capped to the 11.x line (11.1.1 is the advisory fix) to avoid an unnecessary v14 jump.
+# NOT overridable here:
+#  - DEP-005 (elliptic): no fixed version is published (latest is 6.6.1); revisit when one ships.
+overrides:
+  underscore: ">=1.13.8"
+  esbuild: ">=0.25.0"
+  postcss: ">=8.5.10"
+  ws: ">=8.20.1"
+  uuid: ">=11.1.1 <12"
+  vite: ">=6.4.2 <7"
+allowBuilds:
+  better-sqlite3: true
+  bufferutil: true
+  esbuild: true
+  keccak: true
+  sharp: true
+  unrs-resolver: true
+  utf-8-validate: true

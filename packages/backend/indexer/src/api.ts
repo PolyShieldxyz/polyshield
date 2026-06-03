@@ -26,7 +26,7 @@ async function fetchVaultResolvedAt(marketId: string): Promise<number | null> {
 
 export function createApp(): express.Application {
   const app = express();
-  app.use(express.json());
+  app.use(express.json({ limit: "32kb" })); // API-006: cap request body size
 
   // Log every request
   app.use((req, _res, next) => {
@@ -60,7 +60,8 @@ export function createApp(): express.Application {
 }
 
 export function startServer(app: express.Application, port: number): void {
-  app.listen(port, () => {
+  // API-005: bind to loopback by default; override only via BIND_HOST.
+  app.listen(port, process.env.BIND_HOST || "127.0.0.1", () => {
     logger.info({ port }, "Indexer API listening");
   });
 }

@@ -1,14 +1,16 @@
 import { redirect } from 'next/navigation'
 
-export default function BetRedirectPage({
+export default async function BetRedirectPage({
   searchParams,
 }: {
-  searchParams: Record<string, string | string[] | undefined>
+  // Next 15: searchParams is async (a Promise)
+  searchParams: Promise<Record<string, string | string[] | undefined>>
 }) {
-  const conditionId = typeof searchParams.conditionId === 'string' ? searchParams.conditionId : undefined
+  const sp = await searchParams
+  const conditionId = typeof sp.conditionId === 'string' ? sp.conditionId : undefined
   if (conditionId) {
     const params = new URLSearchParams()
-    Object.entries(searchParams).forEach(([key, value]) => {
+    Object.entries(sp).forEach(([key, value]) => {
       if (typeof value === 'string' && key !== 'conditionId') params.set(key, value)
     })
     params.set('modal', 'bet')

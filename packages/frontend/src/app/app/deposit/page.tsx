@@ -91,8 +91,10 @@ function Step0({
           </div>
           <div style={{ display: 'flex', alignItems: 'center', background: 'var(--bg-1)', border: `1px solid ${insufficient && amount > 0 ? 'var(--red)' : 'var(--line-strong)'}`, borderRadius: 6, padding: '0 14px', marginTop: 8 }}>
             <span className="mono" style={{ color: 'var(--text-2)', marginRight: 8, fontSize: 20 }}>$</span>
+            {/* FINDING: A11Y-002 aria-label (no associated <label>); A11Y-001 dropped inline outline:none so the global :focus-visible ring applies. */}
             <input type="number" value={amount} onChange={(e) => setAmount(Math.max(0, +e.target.value || 0))}
-              style={{ background: 'transparent', border: 'none', outline: 'none', color: 'var(--text)', fontFamily: 'var(--mono)', fontSize: 28, padding: '16px 0', width: '100%' }} />
+              aria-label="Deposit amount in USDC"
+              style={{ background: 'transparent', border: 'none', color: 'var(--text)', fontFamily: 'var(--mono)', fontSize: 28, padding: '16px 0', width: '100%' }} />
             <span className="mono" style={{ color: 'var(--text-2)', fontSize: 14, letterSpacing: '0.06em' }}>USDC</span>
           </div>
           {insufficient && amount > 0 && (
@@ -323,7 +325,9 @@ export default function DepositPage() {
     address: USDC_ADDRESS,
     abi: USDC_ABI,
     functionName: 'allowance',
-    args: [address ?? '0x0', VAULT_ADDRESS],
+    // FINDING: FUNC-002 — use the full zero address (matches the balanceOf call
+    // above); '0x0' is not a valid 20-byte address arg for the ERC-20 ABI.
+    args: [address ?? '0x0000000000000000000000000000000000000000', VAULT_ADDRESS],
     query: { enabled: !!address },
   })
 

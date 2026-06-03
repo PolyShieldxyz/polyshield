@@ -26,6 +26,7 @@ contract MockAcceptVerifiers is Script {
         vault.acceptVerifier(vault.DEPOSIT());
         vault.acceptVerifier(vault.POSITION_CLOSE());
         vault.acceptVerifier(vault.PARTIAL_CREDIT());
+        vault.acceptVerifier(vault.CONSOLIDATE());
         vm.stopBroadcast();
     }
 }

@@ -10,9 +10,9 @@ const RELAY_URL = process.env.PROOF_RELAY_URL ?? 'http://127.0.0.1:3002'
 
 export async function GET(
   _req: NextRequest,
-  { params }: { params: { commitment: string } },
+  { params }: { params: Promise<{ commitment: string }> }, // Next 15: params is async
 ): Promise<NextResponse> {
-  const { commitment } = params
+  const { commitment } = await params
   const target = `${RELAY_URL}/merkle-path/${commitment}`
 
   let relayRes: Response

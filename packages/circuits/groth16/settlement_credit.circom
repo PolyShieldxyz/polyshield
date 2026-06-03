@@ -62,11 +62,23 @@ template SettlementCredit() {
     nextCommitment.owner_address <== owner_address;
     nextCommitment.out === new_commitment;
 
+    // SEC-001: constrain bet_nonce so it is no longer a fully free witness. The settlement design
+    // intentionally decouples the credited note from the bet receipt — a user may settle an open
+    // bet after later activity on the same deposit chain (see SettlementModal.tsx) — so we CANNOT
+    // bind bet_nonce == nonce - 1 as the cancel circuits do. Instead require bet_nonce < nonce: the
+    // referenced bet must sit at a strictly earlier nonce on the same secret's chain than the note
+    // being spent. This holds in every legitimate flow and forces nonce >= 1.
+    component betNonceBits = AssertBits(64);
+    betNonceBits.in <== bet_nonce;
+    component betNonceOrder = AssertLessThan(64);
+    betNonceOrder.lhs <== bet_nonce;
+    betNonceOrder.rhs <== nonce;
+
     component preBetNullifier = NullifierHash();
     preBetNullifier.secret <== secret;
     preBetNullifier.nonce <== bet_nonce;
     preBetNullifier.out === nullifier_of_bet;
-    market_id === market_id;
+    // SEC-008: market_id stays public for on-chain binding only; intentionally unconstrained in-circuit.
 }
 
 component main {public [merkle_root, nullifier, new_commitment, nullifier_of_bet, market_id, total_credit]} = SettlementCredit();

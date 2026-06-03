@@ -14,9 +14,10 @@ const SIGNING_URL = process.env.SIGNING_LAYER_URL ?? 'http://127.0.0.1:3004'
 
 export async function POST(
   req: NextRequest,
-  { params }: { params: { slug: string[] } },
+  { params }: { params: Promise<{ slug: string[] }> }, // Next 15: params is async
 ): Promise<NextResponse> {
-  const action = params.slug.join('/')
+  const { slug } = await params
+  const action = slug.join('/')
   const target = `${SIGNING_URL}/${action}`
 
   console.log(`[api/signing] → POST ${target}`)
@@ -34,6 +35,7 @@ export async function POST(
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
+      cache: 'no-store', // Next 15: don't cache user-request forwards
     })
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err)
@@ -47,5 +49,34 @@ export async function POST(
   const data = await upstream.json().catch(() => ({}))
   console.log(`[api/signing] ← ${upstream.status}`, JSON.stringify(data))
 
+  return NextResponse.json(data, { status: upstream.status })
+}
+
+// GET /api/signing/attestation/:nullifier (FC-9) — proxies the operator's public
+// attestation read endpoint. The nullifier is already public on-chain; no body.
+export async function GET(
+  _req: NextRequest,
+  { params }: { params: Promise<{ slug: string[] }> },
+): Promise<NextResponse> {
+  const { slug } = await params
+  const action = slug.join('/')
+  const target = `${SIGNING_URL}/${action}`
+
+  console.log(`[api/signing] → GET ${target}`)
+
+  let upstream: Response
+  try {
+    upstream = await fetch(target, { method: 'GET', cache: 'no-store' })
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err)
+    console.error(`[api/signing] signing layer unreachable at ${target}: ${msg}`)
+    return NextResponse.json(
+      { error: 'Signing layer is not running. Start with: pnpm dev:mock' },
+      { status: 503 },
+    )
+  }
+
+  const data = await upstream.json().catch(() => ({}))
+  console.log(`[api/signing] ← ${upstream.status}`, JSON.stringify(data))
   return NextResponse.json(data, { status: upstream.status })
 }

@@ -12,6 +12,7 @@ import {MockCTF} from "../src/mocks/MockCTF.sol";
 import {MockPUSD} from "../src/mocks/MockPUSD.sol";
 import {MockCollateralOnramp} from "../src/mocks/MockCollateralOnramp.sol";
 import {MockCollateralOfframp} from "../src/mocks/MockCollateralOfframp.sol";
+import {DeployLib} from "../script/DeployLib.sol";
 
 contract VaultTest is Test {
     Vault public vault;
@@ -25,14 +26,16 @@ contract VaultTest is Test {
     MockVerifier public depositVerifier;
     MockVerifier public positionCloseVerifier;
     MockVerifier public partialCreditVerifier;
+    MockVerifier public consolidateVerifier;
     MockPoseidonT3 public poseidon;
     MockUSDC public usdc;
     MockCTF public ctf;
     MockCollateralOnramp public onramp;
     MockCollateralOfframp public offramp;
 
+    uint256 internal constant OPERATOR_PK = 0xA11CE00000000000000000000000000000000000000000000000000000000001;
     address public owner = address(0x1111);
-    address public operator = address(0x2222);
+    address public operator;
     address public depositWallet = address(0x3333);
     address public alice = address(0xA1CE);
     address public bob = address(0xB0B0);
@@ -53,6 +56,7 @@ contract VaultTest is Test {
     bytes public constant DUMMY_PROOF = hex"deadbeef";
 
     function setUp() public {
+        operator = vm.addr(OPERATOR_PK);
         poseidon = new MockPoseidonT3();
         usdc = new MockUSDC();
         ctf = new MockCTF(address(new MockPUSD()));
@@ -60,24 +64,42 @@ contract VaultTest is Test {
         onramp = new MockCollateralOnramp(address(usdc), address(pusd));
         offramp = new MockCollateralOfframp(address(usdc), address(pusd));
 
-        // Deploy infrastructure with vault address = this contract initially,
-        // then we re-deploy with the actual vault address
+        // UUPS: deploy implementations, then proxies. Predict the Vault PROXY address so
+        // the registry/tree proxies can initialize against it (registryProxy, treeProxy,
+        // vaultProxy are the next three CREATEs by address(this)).
+        address registryImpl = address(new NullifierRegistry());
+        address treeImpl = address(new CommitmentMerkleTree());
+        address vaultImpl = address(new Vault());
         address predictedVault = vm.computeCreateAddress(address(this), vm.getNonce(address(this)) + 2);
 
-        registry = new NullifierRegistry(predictedVault);
-        tree = new CommitmentMerkleTree(predictedVault, address(poseidon));
-
-        vault = new Vault(
-            address(usdc),
-            address(tree),
-            address(registry),
-            address(onramp),
-            address(offramp),
-            address(ctf),
-            operator,
-            depositWallet,
-            owner
+        registry = NullifierRegistry(
+            DeployLib.deployProxy(registryImpl, abi.encodeCall(NullifierRegistry.initialize, (predictedVault, owner)))
         );
+        tree = CommitmentMerkleTree(
+            DeployLib.deployProxy(
+                treeImpl, abi.encodeCall(CommitmentMerkleTree.initialize, (predictedVault, address(poseidon), owner))
+            )
+        );
+        vault = Vault(
+            DeployLib.deployVaultProxy(
+                vaultImpl,
+                DeployLib.VaultInit({
+                    usdc: address(usdc),
+                    tree: address(tree),
+                    registry: address(registry),
+                    onramp: address(onramp),
+                    offramp: address(offramp),
+                    ctf: address(ctf),
+                    operator: operator,
+                    depositWallet: depositWallet,
+                    owner: owner
+                })
+            )
+        );
+        require(address(vault) == predictedVault, "VaultTest: vault proxy addr mismatch");
+
+        // FC-9: set up the EIP-712 domain used to verify operator fill attestations.
+        vault.initializeV2();
 
         // Deploy mock verifiers
         betAuthVerifier = new MockVerifier(true);
@@ -88,6 +110,7 @@ contract VaultTest is Test {
         depositVerifier = new MockVerifier(true);
         positionCloseVerifier = new MockVerifier(true);
         partialCreditVerifier = new MockVerifier(true);
+        consolidateVerifier = new MockVerifier(true);
 
         // Wire verifiers — propose then accept after timelock
         vm.startPrank(owner);
@@ -99,6 +122,7 @@ contract VaultTest is Test {
         vault.proposeVerifier(vault.DEPOSIT(), address(depositVerifier));
         vault.proposeVerifier(vault.POSITION_CLOSE(), address(positionCloseVerifier));
         vault.proposeVerifier(vault.PARTIAL_CREDIT(), address(partialCreditVerifier));
+        vault.proposeVerifier(vault.CONSOLIDATE(), address(consolidateVerifier));
         vm.stopPrank();
         vm.warp(block.timestamp + 48 hours + 1);
         vm.startPrank(owner);
@@ -110,6 +134,7 @@ contract VaultTest is Test {
         vault.acceptVerifier(vault.DEPOSIT());
         vault.acceptVerifier(vault.POSITION_CLOSE());
         vault.acceptVerifier(vault.PARTIAL_CREDIT());
+        vault.acceptVerifier(vault.CONSOLIDATE());
         vm.stopPrank();
 
         // Fund Alice with USDC
@@ -128,7 +153,45 @@ contract VaultTest is Test {
     // =========================================================================
 
     function _currentRoot() internal view returns (bytes32) {
-        return tree.recentRoots(tree.currentRootIndex());
+        return tree.currentRoot();
+    }
+
+    // =========================================================================
+    // FC-9: operator attestation helpers (EIP-712 OperatorAttestation)
+    // =========================================================================
+
+    bytes32 internal constant ATT_TYPEHASH =
+        keccak256("OperatorAttestation(bytes32 nullifierOfBet,uint8 reportType,uint64 amountA,uint64 amountB)");
+
+    function _domainSeparator() internal view returns (bytes32) {
+        return keccak256(
+            abi.encode(
+                keccak256("EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)"),
+                keccak256(bytes("Polyshield")),
+                keccak256(bytes("1")),
+                block.chainid,
+                address(vault)
+            )
+        );
+    }
+
+    /// @dev Build + operator-sign an attestation bound to `nob`.
+    function _attest(bytes32 nob, uint8 rType, uint64 a, uint64 b)
+        internal
+        view
+        returns (Vault.OperatorAttestation memory att, bytes memory sig)
+    {
+        att = Vault.OperatorAttestation({nullifierOfBet: nob, reportType: rType, amountA: a, amountB: b});
+        bytes32 structHash = keccak256(abi.encode(ATT_TYPEHASH, att.nullifierOfBet, att.reportType, att.amountA, att.amountB));
+        bytes32 digest = keccak256(abi.encodePacked("\x19\x01", _domainSeparator(), structHash));
+        (uint8 v, bytes32 r, bytes32 s) = vm.sign(OPERATOR_PK, digest);
+        sig = abi.encodePacked(r, s, v);
+    }
+
+    /// @dev An empty attestation, used on the FILLED/FAILED no-attestation branches.
+    function _noAtt() internal pure returns (Vault.OperatorAttestation memory att, bytes memory sig) {
+        att = Vault.OperatorAttestation({nullifierOfBet: bytes32(0), reportType: 0, amountA: 0, amountB: 0});
+        sig = "";
     }
 
     // =========================================================================
@@ -275,51 +338,13 @@ contract VaultTest is Test {
     }
 
     // =========================================================================
-    // reportFilled / reportFOKFailure
+    // Bet setup helpers (FC-9: status is advanced via attestations, not report* calls)
     // =========================================================================
 
     function _authorizeBetAndGetNullifier() internal returns (bytes32) {
         bytes32 root = _depositAndGetRoot();
         vault.authorizeBet(DUMMY_PROOF, _betAuthInputs(root));
         return NULLIFIER_1;
-    }
-
-    function test_reportFilled_succeeds() public {
-        bytes32 null1 = _authorizeBetAndGetNullifier();
-        vm.prank(operator);
-        vault.reportFilled(null1);
-        (,,,,,, Vault.BetStatus status,,,,) = vault.betRecords(null1);
-        assertEq(uint8(status), uint8(Vault.BetStatus.FILLED));
-    }
-
-    function test_reportFilled_revert_onlyOperator() public {
-        bytes32 null1 = _authorizeBetAndGetNullifier();
-        vm.prank(attacker);
-        vm.expectRevert(Vault.OnlyOperator.selector);
-        vault.reportFilled(null1);
-    }
-
-    function test_reportFOKFailure_succeeds() public {
-        bytes32 null1 = _authorizeBetAndGetNullifier();
-        vm.prank(operator);
-        vault.reportFOKFailure(null1);
-        (,,,,,, Vault.BetStatus status,,,,) = vault.betRecords(null1);
-        assertEq(uint8(status), uint8(Vault.BetStatus.FAILED));
-    }
-
-    function test_reportFOKFailure_revert_onlyOperator() public {
-        bytes32 null1 = _authorizeBetAndGetNullifier();
-        vm.prank(attacker);
-        vm.expectRevert(Vault.OnlyOperator.selector);
-        vault.reportFOKFailure(null1);
-    }
-
-    function test_reportFOKFailure_emitsEvent() public {
-        bytes32 null1 = _authorizeBetAndGetNullifier();
-        vm.prank(operator);
-        vm.expectEmit(true, false, false, false);
-        emit Vault.FOKFailed(null1);
-        vault.reportFOKFailure(null1);
     }
 
     // =========================================================================
@@ -349,10 +374,10 @@ contract VaultTest is Test {
         ctf.setPayoutDenominator(MARKET_ID, 1_000_000);
     }
 
+    // FC-9: a "filled" bet stays ACTIVE on-chain; the FILLED operator attestation
+    // authorizes the credit at action time. This helper leaves the bet ACTIVE.
     function _setupFilledBet() internal {
         _authorizeBetAndGetNullifier();
-        vm.prank(operator);
-        vault.reportFilled(NULLIFIER_1);
     }
 
     function _setupFilledAndResolvedBet() internal {
@@ -362,10 +387,16 @@ contract VaultTest is Test {
         vault.resolveMarket(MARKET_ID);
     }
 
+    // FILLED attestation for the active-path credit (full fill on NULLIFIER_1).
+    function _filledAtt() internal view returns (Vault.OperatorAttestation memory att, bytes memory sig) {
+        return _attest(NULLIFIER_1, vault.REPORT_FILLED(), 0, 0);
+    }
+
     function test_creditSettlement_succeeds() public {
         _setupFilledAndResolvedBet();
         bytes32 root = _currentRoot();
-        vault.creditSettlement(DUMMY_PROOF, _settlementInputs(root));
+        (Vault.OperatorAttestation memory att, bytes memory sig) = _filledAtt();
+        vault.creditSettlement(DUMMY_PROOF, _settlementInputs(root), att, sig);
         assertTrue(registry.isSpent(NULLIFIER_2));
         (,,,,,, Vault.BetStatus status,,,,) = vault.betRecords(NULLIFIER_1);
         assertEq(uint8(status), uint8(Vault.BetStatus.CREDITED));
@@ -374,10 +405,11 @@ contract VaultTest is Test {
     function test_creditSettlement_revert_nullifierSpent() public {
         _setupFilledAndResolvedBet();
         bytes32 root = _currentRoot();
-        vault.creditSettlement(DUMMY_PROOF, _settlementInputs(root));
+        (Vault.OperatorAttestation memory att, bytes memory sig) = _filledAtt();
+        vault.creditSettlement(DUMMY_PROOF, _settlementInputs(root), att, sig);
         bytes32 root2 = _currentRoot();
         vm.expectRevert(Vault.NullifierSpent.selector);
-        vault.creditSettlement(DUMMY_PROOF, _settlementInputs(root2));
+        vault.creditSettlement(DUMMY_PROOF, _settlementInputs(root2), att, sig);
     }
 
     function test_creditSettlement_revert_betNotFound() public {
@@ -386,16 +418,9 @@ contract VaultTest is Test {
         bytes32 root = _currentRoot();
         Vault.SettlementPublicInputs memory inputs = _settlementInputs(root);
         inputs.nullifier_of_bet = keccak256("nonexistent");
+        (Vault.OperatorAttestation memory att, bytes memory sig) = _attest(inputs.nullifier_of_bet, vault.REPORT_FILLED(), 0, 0);
         vm.expectRevert(Vault.BetNotFound.selector);
-        vault.creditSettlement(DUMMY_PROOF, inputs);
-    }
-
-    function test_creditSettlement_revert_betNotFilled() public {
-        // Bet is ACTIVE, not FILLED
-        _authorizeBetAndGetNullifier();
-        bytes32 root = _currentRoot();
-        vm.expectRevert(Vault.BetNotFilled.selector);
-        vault.creditSettlement(DUMMY_PROOF, _settlementInputs(root));
+        vault.creditSettlement(DUMMY_PROOF, inputs, att, sig);
     }
 
     function test_creditSettlement_revert_wrongMarket() public {
@@ -403,36 +428,40 @@ contract VaultTest is Test {
         bytes32 root = _currentRoot();
         Vault.SettlementPublicInputs memory inputs = _settlementInputs(root);
         inputs.market_id = keccak256("wrong_market");
+        (Vault.OperatorAttestation memory att, bytes memory sig) = _filledAtt();
         vm.expectRevert(Vault.WrongMarket.selector);
-        vault.creditSettlement(DUMMY_PROOF, inputs);
+        vault.creditSettlement(DUMMY_PROOF, inputs, att, sig);
     }
 
     function test_creditSettlement_revert_marketNotResolved() public {
-        // Bet is FILLED but resolveMarket was never called
+        // Bet is ACTIVE (filled-but-unclaimed) but resolveMarket was never called.
         _setupFilledBet();
         bytes32 root = _currentRoot();
+        (Vault.OperatorAttestation memory att, bytes memory sig) = _filledAtt();
         vm.expectRevert(Vault.MarketNotResolved.selector);
-        vault.creditSettlement(DUMMY_PROOF, _settlementInputs(root));
+        vault.creditSettlement(DUMMY_PROOF, _settlementInputs(root), att, sig);
     }
 
     function test_creditSettlement_revert_invalidProof() public {
         _setupFilledAndResolvedBet();
         bytes32 root = _currentRoot();
         settlementVerifier.setShouldPass(false);
+        (Vault.OperatorAttestation memory att, bytes memory sig) = _filledAtt();
         vm.expectRevert(Vault.InvalidProof.selector);
-        vault.creditSettlement(DUMMY_PROOF, _settlementInputs(root));
+        vault.creditSettlement(DUMMY_PROOF, _settlementInputs(root), att, sig);
     }
 
     function test_creditSettlement_revert_doubleCreditAfterCredited() public {
         _setupFilledAndResolvedBet();
         bytes32 root = _currentRoot();
-        vault.creditSettlement(DUMMY_PROOF, _settlementInputs(root));
-        // Try to credit again with a new nullifier -- bet status is CREDITED, not FILLED
+        (Vault.OperatorAttestation memory att, bytes memory sig) = _filledAtt();
+        vault.creditSettlement(DUMMY_PROOF, _settlementInputs(root), att, sig);
+        // Try to credit again with a new nullifier -- bet status is CREDITED, not ACTIVE/FILLED
         bytes32 root2 = _currentRoot();
         Vault.SettlementPublicInputs memory inputs2 = _settlementInputs(root2);
         inputs2.nullifier = keccak256("nullifier_3");
         vm.expectRevert(Vault.BetNotFilled.selector);
-        vault.creditSettlement(DUMMY_PROOF, inputs2);
+        vault.creditSettlement(DUMMY_PROOF, inputs2, att, sig);
     }
 
     function test_creditSettlement_succeeds_marketIdAboveBN254P() public {
@@ -458,9 +487,6 @@ contract VaultTest is Test {
             position_id: POSITION_ID
         }));
 
-        vm.prank(operator);
-        vault.reportFilled(NULLIFIER_1);
-
         uint256[] memory numerators = new uint256[](2);
         numerators[0] = 1_000_000;
         numerators[1] = 0;
@@ -470,6 +496,7 @@ contract VaultTest is Test {
         vault.resolveMarket(large_market_id);
 
         bytes32 root2 = _currentRoot();
+        (Vault.OperatorAttestation memory att, bytes memory sig) = _filledAtt();
         vault.creditSettlement(DUMMY_PROOF, Vault.SettlementPublicInputs({
             merkle_root: root2,
             nullifier: NULLIFIER_2,
@@ -477,7 +504,7 @@ contract VaultTest is Test {
             nullifier_of_bet: NULLIFIER_1,
             market_id: large_market_id,
             total_credit: 200_000_000
-        }));
+        }), att, sig);
 
         (,,,,,, Vault.BetStatus status,,,,) = vault.betRecords(NULLIFIER_1);
         assertEq(uint8(status), uint8(Vault.BetStatus.CREDITED));
@@ -565,7 +592,7 @@ contract VaultTest is Test {
         vault.withdraw(DUMMY_PROOF, _withdrawInputs(root, rHash, nextCommitment), recipient);
         assertEq(usdc.balanceOf(recipient) - balBefore, 500 * 1e6);
         assertTrue(registry.isSpent(NULLIFIER_2));
-        assertEq(_currentRoot(), tree.recentRoots(tree.currentRootIndex()));
+        assertTrue(tree.isKnownRoot(_currentRoot()));
     }
 
     function test_withdraw_emitsEvent() public {
@@ -585,12 +612,13 @@ contract VaultTest is Test {
         bytes32 root = _currentRoot();
         bytes32 rHash = _recipientHash(recipient);
         bytes32 nextCommitment = COMMITMENT_2;
-        uint32 rootIndexBefore = tree.currentRootIndex();
+        uint64 rootCountBefore = tree.rootCount();
 
         vault.withdraw(DUMMY_PROOF, _withdrawInputs(root, rHash, nextCommitment), recipient);
 
-        assertEq(tree.currentRootIndex(), rootIndexBefore + 1);
-        assertEq(_currentRoot(), tree.recentRoots(tree.currentRootIndex()));
+        // The remainder commitment was inserted, so exactly one new root was produced.
+        assertEq(tree.rootCount(), rootCountBefore + 1);
+        assertTrue(tree.isKnownRoot(_currentRoot()));
     }
 
     function test_withdraw_full_skipsRemainderInsert() public {
@@ -605,13 +633,14 @@ contract VaultTest is Test {
             recipient_hash: rHash,
             new_commitment: bytes32(0)
         });
-        uint32 rootIndexBefore = tree.currentRootIndex();
+        uint64 rootCountBefore = tree.rootCount();
         uint256 balBefore = usdc.balanceOf(recipient);
 
         vault.withdraw(DUMMY_PROOF, inputs, recipient);
 
         assertEq(usdc.balanceOf(recipient) - balBefore, DEPOSIT_AMOUNT);
-        assertEq(tree.currentRootIndex(), rootIndexBefore);
+        // Full withdrawal (new_commitment == 0) inserts no leaf → no new root.
+        assertEq(tree.rootCount(), rootCountBefore);
     }
 
     function test_withdraw_revert_nullifierSpent() public {
@@ -664,16 +693,22 @@ contract VaultTest is Test {
         });
     }
 
+    // FC-9: a "failed" bet stays ACTIVE on-chain; the FAILED operator attestation
+    // authorizes the cancellation credit at action time. This helper leaves it ACTIVE.
     function _setupFailedBet() internal {
         _authorizeBetAndGetNullifier();
-        vm.prank(operator);
-        vault.reportFOKFailure(NULLIFIER_1);
+    }
+
+    // FAILED attestation for the active-path cancellation credit on NULLIFIER_1.
+    function _failedAtt() internal view returns (Vault.OperatorAttestation memory att, bytes memory sig) {
+        return _attest(NULLIFIER_1, vault.REPORT_FAILED(), 0, 0);
     }
 
     function test_betCancellationCredit_succeeds() public {
         _setupFailedBet();
         bytes32 root = _currentRoot();
-        vault.betCancellationCredit(DUMMY_PROOF, _betCancelInputs(root));
+        (Vault.OperatorAttestation memory att, bytes memory sig) = _failedAtt();
+        vault.betCancellationCredit(DUMMY_PROOF, _betCancelInputs(root), att, sig);
         assertTrue(registry.isSpent(NULLIFIER_2));
         (,,,,,, Vault.BetStatus status,,,,) = vault.betRecords(NULLIFIER_1);
         assertEq(uint8(status), uint8(Vault.BetStatus.CANCELLED_CREDITED));
@@ -682,29 +717,32 @@ contract VaultTest is Test {
     function test_betCancellationCredit_revert_alreadyCredited() public {
         _setupFailedBet();
         bytes32 root = _currentRoot();
-        vault.betCancellationCredit(DUMMY_PROOF, _betCancelInputs(root));
-        // Status is now CANCELLED_CREDITED, not FAILED
+        (Vault.OperatorAttestation memory att, bytes memory sig) = _failedAtt();
+        vault.betCancellationCredit(DUMMY_PROOF, _betCancelInputs(root), att, sig);
+        // Status is now CANCELLED_CREDITED, not ACTIVE/FAILED
         bytes32 root2 = _currentRoot();
         Vault.BetCancelPublicInputs memory inputs2 = _betCancelInputs(root2);
         inputs2.nullifier = keccak256("null_3");
         vm.expectRevert(Vault.BetNotFailed.selector);
-        vault.betCancellationCredit(DUMMY_PROOF, inputs2);
+        vault.betCancellationCredit(DUMMY_PROOF, inputs2, att, sig);
     }
 
     function test_betCancellationCredit_revert_betNotFailed() public {
-        // Bet is ACTIVE, not FAILED
+        // Bet is ACTIVE with no attestation -> AttestationMismatch (empty att.nullifierOfBet).
         _authorizeBetAndGetNullifier();
         bytes32 root = _currentRoot();
-        vm.expectRevert(Vault.BetNotFailed.selector);
-        vault.betCancellationCredit(DUMMY_PROOF, _betCancelInputs(root));
+        (Vault.OperatorAttestation memory att, bytes memory sig) = _noAtt();
+        vm.expectRevert(Vault.AttestationMismatch.selector);
+        vault.betCancellationCredit(DUMMY_PROOF, _betCancelInputs(root), att, sig);
     }
 
     function test_betCancellationCredit_revert_invalidProof() public {
         _setupFailedBet();
         bytes32 root = _currentRoot();
         betCancelVerifier.setShouldPass(false);
+        (Vault.OperatorAttestation memory att, bytes memory sig) = _failedAtt();
         vm.expectRevert(Vault.InvalidProof.selector);
-        vault.betCancellationCredit(DUMMY_PROOF, _betCancelInputs(root));
+        vault.betCancellationCredit(DUMMY_PROOF, _betCancelInputs(root), att, sig);
     }
 
     // =========================================================================
@@ -721,6 +759,8 @@ contract VaultTest is Test {
         });
     }
 
+    // FC-9: the bet stays ACTIVE on-chain; a FILLED (or FAILED) operator attestation
+    // authorizes the N/A credit. This helper leaves the bet ACTIVE and resolves N/A.
     function _setupNAMarket() internal {
         _authorizeBetAndGetNullifier();
         // Set all-zero numerators with non-zero denominator (N/A resolution)
@@ -734,7 +774,8 @@ contract VaultTest is Test {
     function test_naCancellationCredit_succeeds() public {
         _setupNAMarket();
         bytes32 root = _currentRoot();
-        vault.naCancellationCredit(DUMMY_PROOF, _naCancelInputs(root));
+        (Vault.OperatorAttestation memory att, bytes memory sig) = _filledAtt();
+        vault.naCancellationCredit(DUMMY_PROOF, _naCancelInputs(root), att, sig);
         assertTrue(registry.isSpent(NULLIFIER_2));
         (,,,,,, Vault.BetStatus status,,,,) = vault.betRecords(NULLIFIER_1);
         assertEq(uint8(status), uint8(Vault.BetStatus.CANCELLED_CREDITED));
@@ -749,18 +790,20 @@ contract VaultTest is Test {
         ctf.setPayoutNumerators(MARKET_ID, numerators);
         ctf.setPayoutDenominator(MARKET_ID, 1_000_000);
         bytes32 root = _currentRoot();
+        (Vault.OperatorAttestation memory att, bytes memory sig) = _filledAtt();
         vm.expectRevert(Vault.NotNA.selector);
-        vault.naCancellationCredit(DUMMY_PROOF, _naCancelInputs(root));
+        vault.naCancellationCredit(DUMMY_PROOF, _naCancelInputs(root), att, sig);
     }
 
     function test_naCancellationCredit_revert_nullifierSpent() public {
         _setupNAMarket();
         bytes32 root = _currentRoot();
-        vault.naCancellationCredit(DUMMY_PROOF, _naCancelInputs(root));
+        (Vault.OperatorAttestation memory att, bytes memory sig) = _filledAtt();
+        vault.naCancellationCredit(DUMMY_PROOF, _naCancelInputs(root), att, sig);
         // Second call with the same nullifier (NULLIFIER_2) → NullifierSpent
         bytes32 root2 = _currentRoot();
         vm.expectRevert(Vault.NullifierSpent.selector);
-        vault.naCancellationCredit(DUMMY_PROOF, _naCancelInputs(root2));
+        vault.naCancellationCredit(DUMMY_PROOF, _naCancelInputs(root2), att, sig);
     }
 
     function test_naCancellationCredit_revert_wrongMarket() public {
@@ -768,16 +811,48 @@ contract VaultTest is Test {
         bytes32 root = _currentRoot();
         Vault.NACancelPublicInputs memory inputs = _naCancelInputs(root);
         inputs.market_id = keccak256("wrong");
+        (Vault.OperatorAttestation memory att, bytes memory sig) = _filledAtt();
         vm.expectRevert(Vault.WrongMarket.selector);
-        vault.naCancellationCredit(DUMMY_PROOF, inputs);
+        vault.naCancellationCredit(DUMMY_PROOF, inputs, att, sig);
     }
 
     function test_naCancellationCredit_revert_invalidProof() public {
         _setupNAMarket();
         bytes32 root = _currentRoot();
         cancelCreditVerifier.setShouldPass(false);
+        (Vault.OperatorAttestation memory att, bytes memory sig) = _filledAtt();
         vm.expectRevert(Vault.InvalidProof.selector);
-        vault.naCancellationCredit(DUMMY_PROOF, _naCancelInputs(root));
+        vault.naCancellationCredit(DUMMY_PROOF, _naCancelInputs(root), att, sig);
+    }
+
+    // SEC-004: an ACTIVE bet with NO attestation must NOT be N/A-creditable — this prevents a
+    // full refund while a Polymarket fill could still be in flight (pool-accounting race).
+    function test_naCancellationCredit_revert_activeBet() public {
+        _authorizeBetAndGetNullifier(); // leaves the bet ACTIVE (no operator attestation)
+        uint256[] memory numerators = new uint256[](2);
+        numerators[0] = 0;
+        numerators[1] = 0;
+        ctf.setPayoutNumerators(MARKET_ID, numerators);
+        ctf.setPayoutDenominator(MARKET_ID, 1_000_000);
+        bytes32 root = _currentRoot();
+        (Vault.OperatorAttestation memory att, bytes memory sig) = _noAtt();
+        vm.expectRevert(Vault.AttestationMismatch.selector);
+        vault.naCancellationCredit(DUMMY_PROOF, _naCancelInputs(root), att, sig);
+    }
+
+    // SEC-004: a FAILED attestation is also accepted for the N/A credit path.
+    function test_naCancellationCredit_fromFailed_succeeds() public {
+        _authorizeBetAndGetNullifier();
+        uint256[] memory numerators = new uint256[](2);
+        numerators[0] = 0;
+        numerators[1] = 0;
+        ctf.setPayoutNumerators(MARKET_ID, numerators);
+        ctf.setPayoutDenominator(MARKET_ID, 1_000_000);
+        bytes32 root = _currentRoot();
+        (Vault.OperatorAttestation memory att, bytes memory sig) = _failedAtt();
+        vault.naCancellationCredit(DUMMY_PROOF, _naCancelInputs(root), att, sig);
+        (,,,,,, Vault.BetStatus status,,,,) = vault.betRecords(NULLIFIER_1);
+        assertEq(uint8(status), uint8(Vault.BetStatus.CANCELLED_CREDITED));
     }
 
     // =========================================================================
@@ -785,29 +860,28 @@ contract VaultTest is Test {
     // =========================================================================
 
     function test_oldRootStillAccepted() public {
-        // Store the initial root, then insert 29 more leaves (total 30 in window)
-        // The initial root should still be accepted
-        bytes32 initialRoot = tree.recentRoots(0);
+        // Capture the initial (empty-tree) root, then insert 29 more leaves.
+        // FC-3: with the 1024 window it is comfortably still accepted.
+        bytes32 initialRoot = tree.currentRoot();
 
         for (uint32 i = 0; i < 29; i++) {
             vm.prank(alice);
             vault.deposit(DUMMY_PROOF, bytes32(uint256(i + 1)), DEPOSIT_CAP / 30);
         }
-        // Initial root (slot 0) is still in the window
         assertTrue(tree.isKnownRoot(initialRoot));
     }
 
-    function test_evictedRootRejected() public {
-        // Need to advance 30 leaves so the initial root gets evicted
-        // but Alice cap is 50k. Use multiple addresses.
+    /// FC-3: a root far older than the legacy 30-root window is still accepted
+    /// (the liveness headroom the bigger window buys), while a never-seen root is
+    /// still rejected at the Vault entrypoint. Real eviction mechanics are covered
+    /// by the tree unit test (SmallWindowTree) without inserting 1024+ leaves here.
+    function test_rootPastLegacyWindowStillAccepted() public {
         vm.prank(alice);
         vault.deposit(DUMMY_PROOF, COMMITMENT_1, DEPOSIT_AMOUNT);
-        bytes32 firstLeafRoot = _currentRoot();
+        bytes32 oldRoot = _currentRoot();
 
-        // Insert 30 more leaves with different users to evict firstLeafRoot.
-        // firstLeafRoot is at slot 1; after 30 more inserts the ring wraps
-        // and slot 1 is overwritten (slots: 2..29, 0, 1).
-        for (uint256 i = 0; i < 30; i++) {
+        // 50 more inserts — well beyond the old 30-root window.
+        for (uint256 i = 0; i < 50; i++) {
             address user = address(uint160(0x1000 + i));
             usdc.mint(user, DEPOSIT_AMOUNT);
             vm.prank(user);
@@ -815,10 +889,10 @@ contract VaultTest is Test {
             vm.prank(user);
             vault.deposit(DUMMY_PROOF, bytes32(uint256(i + 100)), DEPOSIT_AMOUNT);
         }
+        assertTrue(tree.isKnownRoot(oldRoot), "root 50 inserts deep still in the 1024 window");
 
-        // firstLeafRoot is now evicted (30 inserts later)
-        assertFalse(tree.isKnownRoot(firstLeafRoot));
-        Vault.BetAuthPublicInputs memory inputs = _betAuthInputs(firstLeafRoot);
+        // A fabricated, never-inserted root is rejected.
+        Vault.BetAuthPublicInputs memory inputs = _betAuthInputs(keccak256("never_seen"));
         inputs.nullifier = keccak256("fresh_nullifier");
         vm.expectRevert(Vault.UnknownRoot.selector);
         vault.authorizeBet(DUMMY_PROOF, inputs);
@@ -828,31 +902,28 @@ contract VaultTest is Test {
     // Status transition safety
     // =========================================================================
 
+    // FC-9: ACTIVE bet -> FAILED attestation -> CANCELLED_CREDITED via betCancellationCredit.
     function test_statusTransition_activeToFailed() public {
         _authorizeBetAndGetNullifier();
-        vm.prank(operator);
-        vault.reportFOKFailure(NULLIFIER_1);
-        _setupFailedBetCancellation();
+        bytes32 root = _currentRoot();
+        (Vault.OperatorAttestation memory att, bytes memory sig) = _failedAtt();
+        vault.betCancellationCredit(DUMMY_PROOF, _betCancelInputs(root), att, sig);
         (,,,,,, Vault.BetStatus status,,,,) = vault.betRecords(NULLIFIER_1);
         assertEq(uint8(status), uint8(Vault.BetStatus.CANCELLED_CREDITED));
-    }
-
-    function _setupFailedBetCancellation() internal {
-        bytes32 root = _currentRoot();
-        vault.betCancellationCredit(DUMMY_PROOF, _betCancelInputs(root));
     }
 
     function test_cannotDoubleCreditAfterCancelledCredited() public {
         _setupFailedBet();
         bytes32 root = _currentRoot();
-        vault.betCancellationCredit(DUMMY_PROOF, _betCancelInputs(root));
+        (Vault.OperatorAttestation memory att, bytes memory sig) = _failedAtt();
+        vault.betCancellationCredit(DUMMY_PROOF, _betCancelInputs(root), att, sig);
 
         bytes32 root2 = _currentRoot();
         Vault.BetCancelPublicInputs memory inputs2 = _betCancelInputs(root2);
         inputs2.nullifier = keccak256("null_3");
-        // status is now CANCELLED_CREDITED, not FAILED -> revert BetNotFailed
+        // status is now CANCELLED_CREDITED, not ACTIVE/FAILED -> revert BetNotFailed
         vm.expectRevert(Vault.BetNotFailed.selector);
-        vault.betCancellationCredit(DUMMY_PROOF, inputs2);
+        vault.betCancellationCredit(DUMMY_PROOF, inputs2, att, sig);
     }
 
     // =========================================================================
@@ -886,6 +957,63 @@ contract VaultTest is Test {
         vault.setSigningLayerOperator(attacker);
     }
 
+    // SEC-006: accepting a verifier slot that was never proposed must revert (pending == 0),
+    // not silently blank the active verifier for that proof type.
+    function test_acceptVerifier_revert_neverProposed() public {
+        vm.prank(owner);
+        vm.expectRevert(Vault.ZeroAddress.selector);
+        vault.acceptVerifier(200); // slot 200 was never proposed
+    }
+
+    // =========================================================================
+    // fundPolymarketWallet (SEC-007)
+    // =========================================================================
+
+    function _fundVault() internal {
+        vm.prank(alice);
+        vault.deposit(DUMMY_PROOF, COMMITMENT_1, DEPOSIT_CAP); // vault now holds $50k USDC
+    }
+
+    function test_fundPolymarketWallet_happyPath() public {
+        _fundVault();
+        uint256 amount = 10_000 * 1e6;
+        vm.prank(operator);
+        vault.fundPolymarketWallet(amount);
+        assertEq(vault.deployedToPolymarket(), amount);
+        assertEq(usdc.balanceOf(address(vault)), DEPOSIT_CAP - amount);
+    }
+
+    function test_fundPolymarketWallet_revert_whenPaused() public {
+        _fundVault();
+        vm.prank(owner);
+        vault.pause();
+        vm.prank(operator);
+        vm.expectRevert(abi.encodeWithSignature("EnforcedPause()"));
+        vault.fundPolymarketWallet(1_000 * 1e6);
+    }
+
+    function test_fundPolymarketWallet_revert_capExceeded() public {
+        _fundVault();
+        vm.prank(owner);
+        vault.setDeploymentCap(5_000 * 1e6);
+        vm.prank(operator);
+        vm.expectRevert(Vault.DeployCapExceeded.selector);
+        vault.fundPolymarketWallet(5_000 * 1e6 + 1);
+    }
+
+    function test_fundPolymarketWallet_revert_onlyOperator() public {
+        _fundVault();
+        vm.prank(attacker);
+        vm.expectRevert(Vault.OnlyOperator.selector);
+        vault.fundPolymarketWallet(1_000 * 1e6);
+    }
+
+    function test_setDeploymentCap_onlyOwner() public {
+        vm.prank(attacker);
+        vm.expectRevert();
+        vault.setDeploymentCap(1);
+    }
+
     // =========================================================================
     // adminCancelBet
     // =========================================================================
@@ -909,10 +1037,12 @@ contract VaultTest is Test {
         vault.adminCancelBet(NULLIFIER_1);
     }
 
+    // FC-9: a credited bet is no longer ACTIVE, so adminCancelBet reverts BetNotActive.
     function test_adminCancelBet_revertNotActive() public {
-        _authorizeBetAndGetNullifier();
-        vm.prank(operator);
-        vault.reportFilled(NULLIFIER_1);
+        _setupFailedBet();
+        bytes32 root = _currentRoot();
+        (Vault.OperatorAttestation memory att, bytes memory sig) = _failedAtt();
+        vault.betCancellationCredit(DUMMY_PROOF, _betCancelInputs(root), att, sig); // -> CANCELLED_CREDITED
         vm.warp(block.timestamp + vault.adminCancelTimelock() + 1);
         vm.prank(owner);
         vm.expectRevert(Vault.BetNotActive.selector);
@@ -943,106 +1073,111 @@ contract VaultTest is Test {
         });
     }
 
-    function test_reportSold_succeeds_setsClosing() public {
-        _setupFilledBet();
-        vm.prank(operator);
-        vm.expectEmit(true, false, false, true);
-        emit Vault.BetSold(NULLIFIER_1, EXPECTED_SHARES, CLOSE_PROCEEDS);
-        vault.reportSold(NULLIFIER_1, EXPECTED_SHARES, CLOSE_PROCEEDS);
-        (,,, uint64 shares,,, Vault.BetStatus status, uint64 proceeds, uint64 sold,,) = vault.betRecords(NULLIFIER_1);
-        assertEq(uint8(status), uint8(Vault.BetStatus.CLOSING));
-        assertEq(proceeds, CLOSE_PROCEEDS);
-        assertEq(sold, EXPECTED_SHARES);
-        assertEq(shares, EXPECTED_SHARES);
-    }
-
-    function test_reportSold_revert_onlyOperator() public {
-        _setupFilledBet();
-        vm.prank(attacker);
-        vm.expectRevert(Vault.OnlyOperator.selector);
-        vault.reportSold(NULLIFIER_1, EXPECTED_SHARES, CLOSE_PROCEEDS);
-    }
-
-    function test_reportSold_revert_notFilled() public {
-        _authorizeBetAndGetNullifier(); // ACTIVE, not FILLED
-        vm.prank(operator);
-        vm.expectRevert(Vault.BetNotFilled.selector);
-        vault.reportSold(NULLIFIER_1, EXPECTED_SHARES, CLOSE_PROCEEDS);
-    }
-
-    function test_reportSold_revert_invalidShares_zero() public {
-        _setupFilledBet();
-        vm.prank(operator);
-        vm.expectRevert(Vault.InvalidSoldShares.selector);
-        vault.reportSold(NULLIFIER_1, 0, CLOSE_PROCEEDS);
-    }
-
-    function test_reportSold_revert_invalidShares_tooMany() public {
-        _setupFilledBet();
-        vm.prank(operator);
-        vm.expectRevert(Vault.InvalidSoldShares.selector);
-        vault.reportSold(NULLIFIER_1, EXPECTED_SHARES + 1, CLOSE_PROCEEDS);
-    }
-
-    // Settlement race: a resolved market settles, it cannot be closed.
-    function test_reportSold_revert_resolvedMarket() public {
-        _setupFilledAndResolvedBet();
-        vm.prank(operator);
-        vm.expectRevert(Vault.CannotCloseResolvedMarket.selector);
-        vault.reportSold(NULLIFIER_1, EXPECTED_SHARES, CLOSE_PROCEEDS);
+    // SOLD attestation covering the full position on NULLIFIER_1.
+    function _soldAtt(uint64 shares, uint64 proceeds)
+        internal
+        view
+        returns (Vault.OperatorAttestation memory att, bytes memory sig)
+    {
+        return _attest(NULLIFIER_1, vault.REPORT_SOLD(), shares, proceeds);
     }
 
     function test_closePosition_fullClose_credited() public {
-        _setupFilledBet();
-        vm.prank(operator);
-        vault.reportSold(NULLIFIER_1, EXPECTED_SHARES, CLOSE_PROCEEDS);
+        _setupFilledBet(); // ACTIVE (full fill)
         bytes32 root = _currentRoot();
+        (Vault.OperatorAttestation memory att, bytes memory sig) = _soldAtt(EXPECTED_SHARES, CLOSE_PROCEEDS);
 
+        vm.expectEmit(true, false, false, true);
+        emit Vault.BetSold(NULLIFIER_1, EXPECTED_SHARES, CLOSE_PROCEEDS);
         vm.expectEmit(true, false, false, true);
         emit Vault.PositionClosed(NULLIFIER_2, NULLIFIER_1, COMMITMENT_3, true);
-        vault.closePosition(DUMMY_PROOF, _closeInputs(root));
+        vault.closePosition(DUMMY_PROOF, _closeInputs(root), att, sig);
 
         assertTrue(registry.isSpent(NULLIFIER_2));
-        (,,, uint64 shares,,, Vault.BetStatus status, uint64 proceeds, uint64 sold,,) = vault.betRecords(NULLIFIER_1);
+        (,,, uint64 shares,,, Vault.BetStatus status,,,,) = vault.betRecords(NULLIFIER_1);
         assertEq(uint8(status), uint8(Vault.BetStatus.CLOSED_CREDITED));
         assertEq(shares, EXPECTED_SHARES); // unchanged on full close
-        assertEq(proceeds, 0);
-        assertEq(sold, 0);
     }
 
-    function test_closePosition_partialClose_returnsToFilled() public {
+    function test_closePosition_revert_onlyOperatorSig() public {
         _setupFilledBet();
-        uint64 soldShares = 120_000_000; // < EXPECTED_SHARES
-        vm.prank(operator);
-        vault.reportSold(NULLIFIER_1, soldShares, CLOSE_PROCEEDS);
         bytes32 root = _currentRoot();
-
-        vm.expectEmit(true, false, false, true);
-        emit Vault.PositionClosed(NULLIFIER_2, NULLIFIER_1, COMMITMENT_3, false);
-        vault.closePosition(DUMMY_PROOF, _closeInputs(root));
-
-        (,,, uint64 shares,,, Vault.BetStatus status, uint64 proceeds, uint64 sold,,) = vault.betRecords(NULLIFIER_1);
-        assertEq(uint8(status), uint8(Vault.BetStatus.FILLED));
-        assertEq(shares, EXPECTED_SHARES - soldShares); // reduced
-        assertEq(proceeds, 0);
-        assertEq(sold, 0);
+        // SOLD attestation signed by a non-operator key -> InvalidAttestation.
+        Vault.OperatorAttestation memory att =
+            Vault.OperatorAttestation({nullifierOfBet: NULLIFIER_1, reportType: vault.REPORT_SOLD(), amountA: EXPECTED_SHARES, amountB: CLOSE_PROCEEDS});
+        bytes32 structHash = keccak256(abi.encode(ATT_TYPEHASH, att.nullifierOfBet, att.reportType, att.amountA, att.amountB));
+        bytes32 digest = keccak256(abi.encodePacked("\x19\x01", _domainSeparator(), structHash));
+        (uint8 v, bytes32 r, bytes32 s) = vm.sign(uint256(0xBAD), digest);
+        bytes memory sig = abi.encodePacked(r, s, v);
+        vm.expectRevert(Vault.InvalidAttestation.selector);
+        vault.closePosition(DUMMY_PROOF, _closeInputs(root), att, sig);
     }
 
-    function test_closePosition_revert_notClosing() public {
-        _setupFilledBet(); // FILLED, no reportSold
+    function test_closePosition_revert_invalidShares_zero() public {
+        _setupFilledBet();
         bytes32 root = _currentRoot();
-        vm.expectRevert(Vault.BetNotClosing.selector);
-        vault.closePosition(DUMMY_PROOF, _closeInputs(root));
+        (Vault.OperatorAttestation memory att, bytes memory sig) = _soldAtt(0, CLOSE_PROCEEDS);
+        vm.expectRevert(Vault.InvalidSoldShares.selector);
+        vault.closePosition(DUMMY_PROOF, _closeInputs(root), att, sig);
+    }
+
+    function test_closePosition_revert_invalidShares_tooMany() public {
+        _setupFilledBet();
+        bytes32 root = _currentRoot();
+        (Vault.OperatorAttestation memory att, bytes memory sig) = _soldAtt(EXPECTED_SHARES + 1, CLOSE_PROCEEDS);
+        vm.expectRevert(Vault.InvalidSoldShares.selector);
+        vault.closePosition(DUMMY_PROOF, _closeInputs(root), att, sig);
+    }
+
+    // Full-close-only: a partial sell (sold_shares < expected_shares) must revert.
+    function test_closePosition_revert_partialClose() public {
+        _setupFilledBet();
+        bytes32 root = _currentRoot();
+        (Vault.OperatorAttestation memory att, bytes memory sig) = _soldAtt(120_000_000, CLOSE_PROCEEDS);
+        vm.expectRevert(Vault.InvalidSoldShares.selector);
+        vault.closePosition(DUMMY_PROOF, _closeInputs(root), att, sig);
+    }
+
+    // Settlement race: a resolved market settles, it cannot be closed.
+    function test_closePosition_revert_resolvedMarket() public {
+        _setupFilledAndResolvedBet();
+        bytes32 root = _currentRoot();
+        (Vault.OperatorAttestation memory att, bytes memory sig) = _soldAtt(EXPECTED_SHARES, CLOSE_PROCEEDS);
+        vm.expectRevert(Vault.CannotCloseResolvedMarket.selector);
+        vault.closePosition(DUMMY_PROOF, _closeInputs(root), att, sig);
+    }
+
+    // Double-credit regression: a fully-closed bet is terminal (CLOSED_CREDITED) and cannot
+    // be re-credited via any path (e.g. betCancellationCredit reverts BetNotFailed).
+    function test_closePosition_thenCancel_reverts() public {
+        _setupFilledBet();
+        (Vault.OperatorAttestation memory sold, bytes memory soldSig) = _soldAtt(EXPECTED_SHARES, CLOSE_PROCEEDS);
+        vault.closePosition(DUMMY_PROOF, _closeInputs(_currentRoot()), sold, soldSig);
+
+        bytes32 root = _currentRoot();
+        Vault.BetCancelPublicInputs memory inputs = _betCancelInputs(root);
+        inputs.nullifier = keccak256("cancel_after_close");
+        (Vault.OperatorAttestation memory att, bytes memory sig) = _failedAtt();
+        vm.expectRevert(Vault.BetNotFailed.selector);
+        vault.betCancellationCredit(DUMMY_PROOF, inputs, att, sig);
+    }
+
+    // A position with no SOLD attestation (empty att) cannot be closed.
+    function test_closePosition_revert_noAttestation() public {
+        _setupFilledBet();
+        bytes32 root = _currentRoot();
+        (Vault.OperatorAttestation memory att, bytes memory sig) = _noAtt();
+        vm.expectRevert(Vault.AttestationMismatch.selector);
+        vault.closePosition(DUMMY_PROOF, _closeInputs(root), att, sig);
     }
 
     // Double-close: after a full close the record is terminal; a second close with a
-    // fresh note nullifier reverts on the CLOSING guard (no second credit).
+    // fresh note nullifier reverts on the status guard (no second credit).
     function test_closePosition_revert_doubleClose() public {
         _setupFilledBet();
-        vm.prank(operator);
-        vault.reportSold(NULLIFIER_1, EXPECTED_SHARES, CLOSE_PROCEEDS);
+        (Vault.OperatorAttestation memory sold, bytes memory soldSig) = _soldAtt(EXPECTED_SHARES, CLOSE_PROCEEDS);
         bytes32 root = _currentRoot();
-        vault.closePosition(DUMMY_PROOF, _closeInputs(root));
+        vault.closePosition(DUMMY_PROOF, _closeInputs(root), sold, soldSig);
 
         Vault.ClosePublicInputs memory again = Vault.ClosePublicInputs({
             merkle_root: _currentRoot(),
@@ -1051,46 +1186,18 @@ contract VaultTest is Test {
             nullifier_of_bet: NULLIFIER_1
         });
         vm.expectRevert(Vault.BetNotClosing.selector);
-        vault.closePosition(DUMMY_PROOF, again);
-    }
-
-    // Partial close, then the remainder settles normally against reduced shares.
-    function test_closePosition_partialThenSettleRemainder() public {
-        _setupFilledBet();
-        uint64 soldShares = 120_000_000;
-        vm.prank(operator);
-        vault.reportSold(NULLIFIER_1, soldShares, CLOSE_PROCEEDS);
-        vault.closePosition(DUMMY_PROOF, _closeInputs(_currentRoot()));
-
-        // Now resolve the market and settle the remaining 80M shares.
-        _setupResolvableMarket();
-        vm.prank(operator);
-        vault.resolveMarket(MARKET_ID);
-
-        uint64 remaining = EXPECTED_SHARES - soldShares; // 80_000_000
-        Vault.SettlementPublicInputs memory s = Vault.SettlementPublicInputs({
-            merkle_root: _currentRoot(),
-            nullifier: keccak256("nullifier_settle"),
-            new_commitment: keccak256("commitment_settle"),
-            nullifier_of_bet: NULLIFIER_1,
-            market_id: MARKET_ID,
-            total_credit: remaining // payout_per_share = 1
-        });
-        vault.creditSettlement(DUMMY_PROOF, s);
-        (,,,,,, Vault.BetStatus status,,,,) = vault.betRecords(NULLIFIER_1);
-        assertEq(uint8(status), uint8(Vault.BetStatus.CREDITED));
+        vault.closePosition(DUMMY_PROOF, again, sold, soldSig);
     }
 
     function test_closePosition_revert_nullifierSpent() public {
         _setupFilledBet();
-        vm.prank(operator);
-        vault.reportSold(NULLIFIER_1, EXPECTED_SHARES, CLOSE_PROCEEDS);
+        (Vault.OperatorAttestation memory sold, bytes memory soldSig) = _soldAtt(EXPECTED_SHARES, CLOSE_PROCEEDS);
         bytes32 root = _currentRoot();
-        vault.closePosition(DUMMY_PROOF, _closeInputs(root));
+        vault.closePosition(DUMMY_PROOF, _closeInputs(root), sold, soldSig);
         // Re-using the same note nullifier must revert (it is already spent).
         Vault.ClosePublicInputs memory replay = _closeInputs(_currentRoot());
         vm.expectRevert(Vault.NullifierSpent.selector);
-        vault.closePosition(DUMMY_PROOF, replay);
+        vault.closePosition(DUMMY_PROOF, replay, sold, soldSig);
     }
 
     // ─── FC-4: native limit orders (RESTING / partial-fill credit) ───────────────
@@ -1107,104 +1214,23 @@ contract VaultTest is Test {
         });
     }
 
-    function test_reportResting_succeeds() public {
-        _authorizeBetAndGetNullifier(); // ACTIVE
-        vm.prank(operator);
-        vm.expectEmit(true, false, false, false);
-        emit Vault.BetResting(NULLIFIER_1);
-        vault.reportResting(NULLIFIER_1);
-        (,,,,,, Vault.BetStatus status,,,,) = vault.betRecords(NULLIFIER_1);
-        assertEq(uint8(status), uint8(Vault.BetStatus.RESTING));
-    }
-
-    function test_reportResting_revert_onlyOperator() public {
-        _authorizeBetAndGetNullifier();
-        vm.prank(attacker);
-        vm.expectRevert(Vault.OnlyOperator.selector);
-        vault.reportResting(NULLIFIER_1);
-    }
-
-    function test_reportResting_revert_notActive() public {
-        _setupFilledBet(); // FILLED, not ACTIVE
-        vm.prank(operator);
-        vm.expectRevert(Vault.BetNotActive.selector);
-        vault.reportResting(NULLIFIER_1);
-    }
-
-    function test_reportPartialFill_succeeds_fromActive() public {
-        _authorizeBetAndGetNullifier(); // ACTIVE
-        vm.prank(operator);
-        vm.expectEmit(true, false, false, true);
-        emit Vault.BetPartialFilled(NULLIFIER_1, PF_FILLED_SHARES, PF_SPENT_AMOUNT);
-        vault.reportPartialFill(NULLIFIER_1, PF_FILLED_SHARES, PF_SPENT_AMOUNT);
-        (,,,,,, Vault.BetStatus status,,, uint64 filled, uint64 spent) = vault.betRecords(NULLIFIER_1);
-        assertEq(uint8(status), uint8(Vault.BetStatus.PARTIAL_FILLED));
-        assertEq(filled, PF_FILLED_SHARES);
-        assertEq(spent, PF_SPENT_AMOUNT);
-    }
-
-    function test_reportPartialFill_succeeds_fromResting() public {
-        _authorizeBetAndGetNullifier();
-        vm.prank(operator);
-        vault.reportResting(NULLIFIER_1);
-        vm.prank(operator);
-        vault.reportPartialFill(NULLIFIER_1, PF_FILLED_SHARES, PF_SPENT_AMOUNT);
-        (,,,,,, Vault.BetStatus status,,,,) = vault.betRecords(NULLIFIER_1);
-        assertEq(uint8(status), uint8(Vault.BetStatus.PARTIAL_FILLED));
-    }
-
-    function test_reportPartialFill_revert_onlyOperator() public {
-        _authorizeBetAndGetNullifier();
-        vm.prank(attacker);
-        vm.expectRevert(Vault.OnlyOperator.selector);
-        vault.reportPartialFill(NULLIFIER_1, PF_FILLED_SHARES, PF_SPENT_AMOUNT);
-    }
-
-    // A terminal/credited state (here FILLED) is neither ACTIVE nor RESTING.
-    function test_reportPartialFill_revert_badStatus() public {
-        _setupFilledBet(); // FILLED
-        vm.prank(operator);
-        vm.expectRevert(Vault.BetNotPartialFillable.selector);
-        vault.reportPartialFill(NULLIFIER_1, PF_FILLED_SHARES, PF_SPENT_AMOUNT);
-    }
-
-    function test_reportPartialFill_revert_invalidFilledShares_zero() public {
-        _authorizeBetAndGetNullifier();
-        vm.prank(operator);
-        vm.expectRevert(Vault.InvalidFilledShares.selector);
-        vault.reportPartialFill(NULLIFIER_1, 0, PF_SPENT_AMOUNT);
-    }
-
-    function test_reportPartialFill_revert_invalidFilledShares_tooMany() public {
-        _authorizeBetAndGetNullifier();
-        vm.prank(operator);
-        vm.expectRevert(Vault.InvalidFilledShares.selector);
-        vault.reportPartialFill(NULLIFIER_1, EXPECTED_SHARES + 1, PF_SPENT_AMOUNT);
-    }
-
-    function test_reportPartialFill_revert_invalidSpentAmount_zero() public {
-        _authorizeBetAndGetNullifier();
-        vm.prank(operator);
-        vm.expectRevert(Vault.InvalidSpentAmount.selector);
-        vault.reportPartialFill(NULLIFIER_1, PF_FILLED_SHARES, 0);
-    }
-
-    function test_reportPartialFill_revert_invalidSpentAmount_tooMany() public {
-        _authorizeBetAndGetNullifier();
-        vm.prank(operator);
-        vm.expectRevert(Vault.InvalidSpentAmount.selector);
-        vault.reportPartialFill(NULLIFIER_1, PF_FILLED_SHARES, uint64(100 * 1e6) + 1);
+    // PARTIAL attestation on NULLIFIER_1 (filled_shares, spent_amount).
+    function _partialAtt(uint64 filled, uint64 spent)
+        internal
+        view
+        returns (Vault.OperatorAttestation memory att, bytes memory sig)
+    {
+        return _attest(NULLIFIER_1, vault.REPORT_PARTIAL(), filled, spent);
     }
 
     function test_partialFillCredit_succeeds_normalizesToFilled() public {
-        _authorizeBetAndGetNullifier();
-        vm.prank(operator);
-        vault.reportPartialFill(NULLIFIER_1, PF_FILLED_SHARES, PF_SPENT_AMOUNT);
+        _authorizeBetAndGetNullifier(); // ACTIVE
         bytes32 root = _currentRoot();
+        (Vault.OperatorAttestation memory att, bytes memory sig) = _partialAtt(PF_FILLED_SHARES, PF_SPENT_AMOUNT);
 
         vm.expectEmit(true, false, false, true);
         emit Vault.PartialFillCredited(NULLIFIER_2, NULLIFIER_1, COMMITMENT_3);
-        vault.partialFillCredit(DUMMY_PROOF, _partialInputs(root));
+        vault.partialFillCredit(DUMMY_PROOF, _partialInputs(root), att, sig);
 
         assertTrue(registry.isSpent(NULLIFIER_2));
         (,,, uint64 shares, uint64 amount,, Vault.BetStatus status,,, uint64 filled, uint64 spent) =
@@ -1216,42 +1242,77 @@ contract VaultTest is Test {
         assertEq(spent, 0);
     }
 
-    function test_partialFillCredit_revert_notPartialFilled() public {
-        _setupFilledBet(); // FILLED, no reportPartialFill
+    // Strict partial: filled_shares must be 0 < filled < expected_shares.
+    function test_partialFillCredit_revert_invalidFilledShares_zero() public {
+        _authorizeBetAndGetNullifier();
         bytes32 root = _currentRoot();
+        (Vault.OperatorAttestation memory att, bytes memory sig) = _partialAtt(0, PF_SPENT_AMOUNT);
+        vm.expectRevert(Vault.InvalidFilledShares.selector);
+        vault.partialFillCredit(DUMMY_PROOF, _partialInputs(root), att, sig);
+    }
+
+    function test_partialFillCredit_revert_invalidFilledShares_full() public {
+        _authorizeBetAndGetNullifier();
+        bytes32 root = _currentRoot();
+        (Vault.OperatorAttestation memory att, bytes memory sig) = _partialAtt(EXPECTED_SHARES, PF_SPENT_AMOUNT);
+        vm.expectRevert(Vault.InvalidFilledShares.selector);
+        vault.partialFillCredit(DUMMY_PROOF, _partialInputs(root), att, sig);
+    }
+
+    // Strict partial: spent_amount must be 0 < spent < bet_amount.
+    function test_partialFillCredit_revert_invalidSpentAmount_zero() public {
+        _authorizeBetAndGetNullifier();
+        bytes32 root = _currentRoot();
+        (Vault.OperatorAttestation memory att, bytes memory sig) = _partialAtt(PF_FILLED_SHARES, 0);
+        vm.expectRevert(Vault.InvalidSpentAmount.selector);
+        vault.partialFillCredit(DUMMY_PROOF, _partialInputs(root), att, sig);
+    }
+
+    function test_partialFillCredit_revert_invalidSpentAmount_full() public {
+        _authorizeBetAndGetNullifier();
+        bytes32 root = _currentRoot();
+        (Vault.OperatorAttestation memory att, bytes memory sig) = _partialAtt(PF_FILLED_SHARES, uint64(100 * 1e6));
+        vm.expectRevert(Vault.InvalidSpentAmount.selector);
+        vault.partialFillCredit(DUMMY_PROOF, _partialInputs(root), att, sig);
+    }
+
+    function test_partialFillCredit_revert_notActive() public {
+        // After a first partial credit the record is FILLED; a second partial credit reverts.
+        _authorizeBetAndGetNullifier();
+        (Vault.OperatorAttestation memory att, bytes memory sig) = _partialAtt(PF_FILLED_SHARES, PF_SPENT_AMOUNT);
+        vault.partialFillCredit(DUMMY_PROOF, _partialInputs(_currentRoot()), att, sig);
+
+        Vault.PartialFillPublicInputs memory inputs = _partialInputs(_currentRoot());
+        inputs.nullifier = keccak256("partial_again");
         vm.expectRevert(Vault.BetNotPartialFilled.selector);
-        vault.partialFillCredit(DUMMY_PROOF, _partialInputs(root));
+        vault.partialFillCredit(DUMMY_PROOF, inputs, att, sig);
+    }
+
+    function test_partialFillCredit_revert_invalidProof() public {
+        _authorizeBetAndGetNullifier();
+        bytes32 root = _currentRoot();
+        partialCreditVerifier.setShouldPass(false);
+        (Vault.OperatorAttestation memory att, bytes memory sig) = _partialAtt(PF_FILLED_SHARES, PF_SPENT_AMOUNT);
+        vm.expectRevert(Vault.InvalidProof.selector);
+        vault.partialFillCredit(DUMMY_PROOF, _partialInputs(root), att, sig);
     }
 
     function test_partialFillCredit_revert_nullifierSpent() public {
         _authorizeBetAndGetNullifier();
-        vm.prank(operator);
-        vault.reportPartialFill(NULLIFIER_1, PF_FILLED_SHARES, PF_SPENT_AMOUNT);
-        vault.partialFillCredit(DUMMY_PROOF, _partialInputs(_currentRoot()));
+        (Vault.OperatorAttestation memory att, bytes memory sig) = _partialAtt(PF_FILLED_SHARES, PF_SPENT_AMOUNT);
+        vault.partialFillCredit(DUMMY_PROOF, _partialInputs(_currentRoot()), att, sig);
         // Replaying the same note nullifier must revert (already spent).
         Vault.PartialFillPublicInputs memory replay = _partialInputs(_currentRoot());
         vm.expectRevert(Vault.NullifierSpent.selector);
-        vault.partialFillCredit(DUMMY_PROOF, replay);
-    }
-
-    // A legitimately resting limit order is exempt from adminCancelBet.
-    function test_adminCancelBet_restingExempt() public {
-        _authorizeBetAndGetNullifier();
-        vm.prank(operator);
-        vault.reportResting(NULLIFIER_1);
-        vm.warp(block.timestamp + vault.adminCancelTimelock() + 1);
-        vm.prank(owner);
-        vm.expectRevert(Vault.BetNotActive.selector);
-        vault.adminCancelBet(NULLIFIER_1);
+        vault.partialFillCredit(DUMMY_PROOF, replay, att, sig);
     }
 
     // After partial credit normalizes the record to FILLED, settlement works on the
-    // reduced (filled) shares exactly as for a normal filled bet.
+    // reduced (filled) shares with NO attestation (status is on-chain FILLED).
     function test_partialFillCredit_thenSettleRemainder() public {
         _authorizeBetAndGetNullifier();
-        vm.prank(operator);
-        vault.reportPartialFill(NULLIFIER_1, PF_FILLED_SHARES, PF_SPENT_AMOUNT);
-        vault.partialFillCredit(DUMMY_PROOF, _partialInputs(_currentRoot()));
+        (Vault.OperatorAttestation memory pAtt, bytes memory pSig) = _partialAtt(PF_FILLED_SHARES, PF_SPENT_AMOUNT);
+        vault.partialFillCredit(DUMMY_PROOF, _partialInputs(_currentRoot()), pAtt, pSig);
 
         _setupResolvableMarket();
         vm.prank(operator);
@@ -1265,8 +1326,217 @@ contract VaultTest is Test {
             market_id: MARKET_ID,
             total_credit: PF_FILLED_SHARES // payout_per_share = 1
         });
-        vault.creditSettlement(DUMMY_PROOF, s);
+        (Vault.OperatorAttestation memory att, bytes memory sig) = _noAtt();
+        vault.creditSettlement(DUMMY_PROOF, s, att, sig);
         (,,,,,, Vault.BetStatus status,,,,) = vault.betRecords(NULLIFIER_1);
         assertEq(uint8(status), uint8(Vault.BetStatus.CREDITED));
+    }
+
+    // =========================================================================
+    // Consolidate (FC-8: merge up to 4 notes into one)
+    // =========================================================================
+
+    function _consolidateInputs(bytes32[4] memory nulls, bytes32 newCommitment)
+        internal
+        view
+        returns (Vault.ConsolidatePublicInputs memory)
+    {
+        return Vault.ConsolidatePublicInputs({
+            merkle_root: _currentRoot(),
+            nullifier: nulls,
+            new_commitment: newCommitment
+        });
+    }
+
+    function test_consolidate_happyPath_twoActive() public {
+        uint64 idxBefore = tree.nextIndex();
+        bytes32[4] memory nulls;
+        nulls[0] = NULLIFIER_1;
+        nulls[1] = NULLIFIER_2;
+        // slots 2,3 left as bytes32(0) (inactive)
+
+        vm.expectEmit(false, false, false, true);
+        emit Vault.Consolidated(nulls, COMMITMENT_3);
+        vault.consolidate(DUMMY_PROOF, _consolidateInputs(nulls, COMMITMENT_3));
+
+        assertTrue(registry.isSpent(NULLIFIER_1), "slot 0 nullifier spent");
+        assertTrue(registry.isSpent(NULLIFIER_2), "slot 1 nullifier spent");
+        assertEq(tree.nextIndex(), idxBefore + 1, "exactly one new leaf inserted");
+    }
+
+    function test_consolidate_happyPath_fourActive() public {
+        bytes32 n3 = keccak256("consolidate_n3");
+        bytes32 n4 = keccak256("consolidate_n4");
+        bytes32[4] memory nulls = [NULLIFIER_1, NULLIFIER_2, n3, n4];
+
+        vault.consolidate(DUMMY_PROOF, _consolidateInputs(nulls, COMMITMENT_3));
+
+        assertTrue(registry.isSpent(NULLIFIER_1));
+        assertTrue(registry.isSpent(NULLIFIER_2));
+        assertTrue(registry.isSpent(n3));
+        assertTrue(registry.isSpent(n4));
+    }
+
+    function test_consolidate_noBetRecordNoTokenMovement() public {
+        uint256 vaultUsdcBefore = usdc.balanceOf(address(vault));
+        bytes32[4] memory nulls;
+        nulls[0] = NULLIFIER_1;
+        vault.consolidate(DUMMY_PROOF, _consolidateInputs(nulls, COMMITMENT_3));
+        // No bet record is created (market_id stays zero) and no USDC moves.
+        (bytes32 marketId,,,,,,,,,,) = vault.betRecords(NULLIFIER_1);
+        assertEq(marketId, bytes32(0), "consolidate must not create a bet record");
+        assertEq(usdc.balanceOf(address(vault)), vaultUsdcBefore, "consolidate must not move USDC");
+    }
+
+    function test_consolidate_duplicateNullifierReverts() public {
+        // Same note in two active slots -> identical nullifier -> second markSpent reverts.
+        bytes32[4] memory nulls;
+        nulls[0] = NULLIFIER_1;
+        nulls[1] = NULLIFIER_1;
+        // Build inputs first (reads the tree) so expectRevert targets only consolidate().
+        Vault.ConsolidatePublicInputs memory inputs = _consolidateInputs(nulls, COMMITMENT_3);
+        vm.expectRevert(NullifierRegistry.AlreadySpent.selector);
+        vault.consolidate(DUMMY_PROOF, inputs);
+    }
+
+    function test_consolidate_alreadySpentNullifierReverts() public {
+        bytes32[4] memory first;
+        first[0] = NULLIFIER_1;
+        vault.consolidate(DUMMY_PROOF, _consolidateInputs(first, COMMITMENT_2));
+
+        // Re-using NULLIFIER_1 in a later consolidate must revert at the pre-check.
+        bytes32[4] memory second;
+        second[0] = NULLIFIER_1;
+        second[1] = keccak256("fresh_nullifier");
+        Vault.ConsolidatePublicInputs memory inputs = _consolidateInputs(second, COMMITMENT_3);
+        vm.expectRevert(Vault.NullifierSpent.selector);
+        vault.consolidate(DUMMY_PROOF, inputs);
+    }
+
+    function test_consolidate_unknownRootReverts() public {
+        bytes32[4] memory nulls;
+        nulls[0] = NULLIFIER_1;
+        Vault.ConsolidatePublicInputs memory inputs = Vault.ConsolidatePublicInputs({
+            merkle_root: keccak256("bogus_root"),
+            nullifier: nulls,
+            new_commitment: COMMITMENT_3
+        });
+        vm.expectRevert(Vault.UnknownRoot.selector);
+        vault.consolidate(DUMMY_PROOF, inputs);
+    }
+
+    function test_consolidate_zeroSlot0Reverts() public {
+        // slot 0 inactive -> EmptyConsolidation (belt-and-suspenders; circuit also forbids it).
+        bytes32[4] memory nulls;
+        nulls[1] = NULLIFIER_1;
+        Vault.ConsolidatePublicInputs memory inputs = _consolidateInputs(nulls, COMMITMENT_3);
+        vm.expectRevert(Vault.EmptyConsolidation.selector);
+        vault.consolidate(DUMMY_PROOF, inputs);
+    }
+
+    function test_consolidate_invalidProofReverts() public {
+        consolidateVerifier.setShouldPass(false);
+        bytes32[4] memory nulls;
+        nulls[0] = NULLIFIER_1;
+        Vault.ConsolidatePublicInputs memory inputs = _consolidateInputs(nulls, COMMITMENT_3);
+        vm.expectRevert(Vault.InvalidProof.selector);
+        vault.consolidate(DUMMY_PROOF, inputs);
+    }
+
+    function test_consolidate_whenPausedReverts() public {
+        vm.prank(owner);
+        vault.pause();
+        bytes32[4] memory nulls;
+        nulls[0] = NULLIFIER_1;
+        Vault.ConsolidatePublicInputs memory inputs = _consolidateInputs(nulls, COMMITMENT_3);
+        vm.expectRevert(abi.encodeWithSignature("EnforcedPause()"));
+        vault.consolidate(DUMMY_PROOF, inputs);
+    }
+
+    // =========================================================================
+    // FC-9: operator attestation security
+    // =========================================================================
+
+    // A correctly-shaped attestation signed by a NON-operator key must be rejected.
+    function test_attestation_forgedSig_reverts() public {
+        _setupFilledAndResolvedBet(); // ACTIVE + resolved
+        bytes32 root = _currentRoot();
+        Vault.OperatorAttestation memory att =
+            Vault.OperatorAttestation({nullifierOfBet: NULLIFIER_1, reportType: vault.REPORT_FILLED(), amountA: 0, amountB: 0});
+        bytes32 structHash = keccak256(abi.encode(ATT_TYPEHASH, att.nullifierOfBet, att.reportType, att.amountA, att.amountB));
+        bytes32 digest = keccak256(abi.encodePacked("\x19\x01", _domainSeparator(), structHash));
+        (uint8 v, bytes32 r, bytes32 s) = vm.sign(uint256(0xBAD), digest); // non-operator key
+        bytes memory sig = abi.encodePacked(r, s, v);
+        vm.expectRevert(Vault.InvalidAttestation.selector);
+        vault.creditSettlement(DUMMY_PROOF, _settlementInputs(root), att, sig);
+    }
+
+    // A FILLED attestation presented to partialFillCredit (which expects PARTIAL) must revert.
+    function test_attestation_wrongType_reverts() public {
+        _authorizeBetAndGetNullifier(); // ACTIVE
+        bytes32 root = _currentRoot();
+        (Vault.OperatorAttestation memory att, bytes memory sig) = _filledAtt(); // type FILLED, not PARTIAL
+        vm.expectRevert(Vault.AttestationMismatch.selector);
+        vault.partialFillCredit(DUMMY_PROOF, _partialInputs(root), att, sig);
+    }
+
+    // An attestation bound to a different bet than the call's nullifier_of_bet must revert.
+    function test_attestation_crossBet_reverts() public {
+        _setupFilledAndResolvedBet(); // ACTIVE on NULLIFIER_1 + resolved
+        bytes32 root = _currentRoot();
+        // Valid FILLED attestation, but bound to a different nullifier_of_bet.
+        (Vault.OperatorAttestation memory att, bytes memory sig) =
+            _attest(keccak256("some_other_bet"), vault.REPORT_FILLED(), 0, 0);
+        vm.expectRevert(Vault.AttestationMismatch.selector);
+        vault.creditSettlement(DUMMY_PROOF, _settlementInputs(root), att, sig);
+    }
+
+    // Two-stage: ACTIVE bet -> partialFillCredit (PARTIAL att) normalizes to on-chain FILLED ->
+    // creditSettlement with NO attestation succeeds (status is already FILLED).
+    function test_partialThenSettle_twoStage() public {
+        _authorizeBetAndGetNullifier(); // ACTIVE
+        (Vault.OperatorAttestation memory pAtt, bytes memory pSig) = _partialAtt(PF_FILLED_SHARES, PF_SPENT_AMOUNT);
+        vault.partialFillCredit(DUMMY_PROOF, _partialInputs(_currentRoot()), pAtt, pSig);
+        (,,,,,, Vault.BetStatus statusAfterPartial,,,,) = vault.betRecords(NULLIFIER_1);
+        assertEq(uint8(statusAfterPartial), uint8(Vault.BetStatus.FILLED));
+
+        _setupResolvableMarket();
+        vm.prank(operator);
+        vault.resolveMarket(MARKET_ID);
+
+        Vault.SettlementPublicInputs memory s = Vault.SettlementPublicInputs({
+            merkle_root: _currentRoot(),
+            nullifier: keccak256("two_stage_settle"),
+            new_commitment: keccak256("two_stage_commit"),
+            nullifier_of_bet: NULLIFIER_1,
+            market_id: MARKET_ID,
+            total_credit: PF_FILLED_SHARES
+        });
+        (Vault.OperatorAttestation memory att, bytes memory sig) = _noAtt();
+        vault.creditSettlement(DUMMY_PROOF, s, att, sig);
+        (,,,,,, Vault.BetStatus status,,,,) = vault.betRecords(NULLIFIER_1);
+        assertEq(uint8(status), uint8(Vault.BetStatus.CREDITED));
+    }
+
+    // After a successful settlement (CREDITED), a second credit attempt on the same bet
+    // (here naCancellationCredit) reverts because the status is no longer ACTIVE/FILLED/FAILED.
+    function test_doubleCredit_blocked() public {
+        _setupFilledAndResolvedBet();
+        bytes32 root = _currentRoot();
+        (Vault.OperatorAttestation memory att, bytes memory sig) = _filledAtt();
+        vault.creditSettlement(DUMMY_PROOF, _settlementInputs(root), att, sig); // -> CREDITED
+
+        // Try to drain again via naCancellationCredit with a fresh note nullifier.
+        Vault.NACancelPublicInputs memory na = _naCancelInputs(_currentRoot());
+        na.nullifier = keccak256("double_credit_na");
+        (Vault.OperatorAttestation memory att2, bytes memory sig2) = _filledAtt();
+        vm.expectRevert(Vault.BetNotCancellable.selector);
+        vault.naCancellationCredit(DUMMY_PROOF, na, att2, sig2);
+    }
+
+    // initializeV2 is reinitializer(2): a second call must revert.
+    function test_initializeV2_onlyOnce() public {
+        vm.expectRevert();
+        vault.initializeV2();
     }
 }

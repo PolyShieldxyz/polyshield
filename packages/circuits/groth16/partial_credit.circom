@@ -67,6 +67,11 @@ template PartialCredit() {
     nextCommitment.owner_address <== owner_address;
     nextCommitment.out === new_commitment;
 
+    // SEC-002: require nonce >= 1 so `nonce - 1` cannot underflow to the field modulus (p-1).
+    component nonceNZ = AssertLessThan(64);
+    nonceNZ.lhs <== 0;
+    nonceNZ.rhs <== nonce;
+
     component preBetNullifier = NullifierHash();
     preBetNullifier.secret <== secret;
     preBetNullifier.nonce <== nonce - 1;

@@ -58,13 +58,14 @@ async function fetchLive(conditionId: string): Promise<{ market: LiveMarket | nu
 
 export async function GET(
   _req: NextRequest,
-  { params }: { params: { condition_id: string } },
+  { params }: { params: Promise<{ condition_id: string }> }, // Next 15: params is async
 ): Promise<NextResponse> {
+  const { condition_id } = await params
   const base = MARKETS.find((market) =>
-    market.conditionId.toLowerCase() === params.condition_id.toLowerCase() ||
-    market.id.toLowerCase() === params.condition_id.toLowerCase()
+    market.conditionId.toLowerCase() === condition_id.toLowerCase() ||
+    market.id.toLowerCase() === condition_id.toLowerCase()
   ) ?? MARKETS[0]
-  const { market: live, book } = await fetchLive(params.condition_id)
+  const { market: live, book } = await fetchLive(condition_id)
 
   return NextResponse.json({
     market: mergeFixture(base, live),

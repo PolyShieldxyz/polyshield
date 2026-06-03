@@ -242,6 +242,16 @@ pUSD is an internal implementation detail of the Polymarket integration. From th
 
 The conversion rate is 1:1 (pUSD is pegged to USDC). ZK circuits do not need to know about pUSD at all.
 
+**Deployment timing (2026-06-01):** *when* USDC is converted and sent to the Deposit Wallet is governed by the collateral-deployment strategy. **Option 3 (JIT) is implemented (FC-7):** the signing layer calls `Vault.fundPolymarketWallet(shortfall)` per bet, just before submitting the order, converting only the uncovered remainder. The conversion now runs as a relayer WALLET batch against the deposit-wallet proxy (`DepositWalletExecutor`), not the spec-only `_fundDepositWallet`/`_returnFundsFromDepositWallet` helpers above. See `collateral-deployment-strategy-comparison.md`.
+
+---
+
+### Q26 — Transition from JIT (Option 3) to base buffer + JIT overflow (Option 4)
+
+**Status:** Open (direction agreed: Option 4 is the successor)
+**Impact:** Collateral deployment policy, buffer-manager service, `deploymentCap` sizing
+**Question:** Option 3 (JIT) is live and already accretes a residual buffer (no sweep-back on no-fill). Moving to Option 4 means proactively managing that buffer (low/high-water top-ups in bulk, bleed-down during incidents) rather than relying on per-bet accretion. When do we cut over, what are the low/high-water marks and the target buffer as a fraction of TVL, and is the fenced deposit-wallet owner a prerequisite for raising the standing balance? See FC-6 (buffer policy) and FC-7 (JIT) in `future-changes.md`.
+
 ---
 
 ### Q14 — L2 API key management in the Signing Layer

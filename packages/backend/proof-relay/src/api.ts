@@ -1,5 +1,8 @@
 import express from "express";
+import rateLimit from "express-rate-limit";
 import pino from "pino";
+import crypto from "crypto";
+import { z } from "zod";
 import { ethers } from "ethers";
 import {
   relayAuthorizeBet,
@@ -9,31 +12,46 @@ import {
   relayNACancellationCredit,
   relayClosePosition,
   relayPartialFillCredit,
+  relayConsolidate,
 } from "./relayer";
 import { computeMerkleProof } from "./merkle";
 
 // Source IP is NEVER logged — see pino redact config in index.ts
 const logger = pino({ name: "proof-relay-api" });
 
+// API-004: allowlist of known Vault custom-error names. Any error whose message
+// contains one of these is surfaced verbatim (it leaks nothing sensitive); every
+// other error is collapsed to a generic message + correlation id. The full error
+// is always logged server-side under that id.
+const KNOWN_VAULT_ERRORS = [
+  "BetNotFilled",
+  "NullifierSpent",
+  "UnknownRoot",
+  "InvalidProof",
+  "BetNotFound",
+  "WrongMarket",
+  "BetNotCancellable",
+  "ConditionNotResolved",
+  "NotNA",
+] as const;
+
 /**
- * Extract a human-readable revert reason from an ethers.js error.
- * For `require(cond, "message")` reverts, err.reason contains the string.
- * For custom errors (revert BetNotFilled()), err.message contains the selector name.
- * Falls back to the full message truncated at 200 chars.
+ * API-004: produce a SAFE client-facing error response and log the full error
+ * server-side under a correlation id. Known Vault custom errors are mapped to
+ * their clean name; everything else returns a generic "relay failed".
  */
-function extractRevertReason(err: unknown): string {
+function safeError(logger: pino.Logger, context: string, err: unknown): { error: string; ref: string } {
+  const ref = crypto.randomBytes(8).toString("hex");
+  logger.error({ err, ref, context }, `${context} failed`);
+
+  let message = "";
   if (err && typeof err === "object") {
     const e = err as Record<string, unknown>;
-    if (typeof e["reason"] === "string" && e["reason"]) return e["reason"];
-    if (typeof e["message"] === "string") {
-      const msg = e["message"] as string;
-      // ethers wraps custom errors like: "execution reverted (unknown custom error)"
-      // or: 'execution reverted: "BetNotFilled()"'
-      // Surface the first 200 chars which usually contains the selector name.
-      return msg.slice(0, 200);
-    }
+    if (typeof e["reason"] === "string") message += e["reason"];
+    if (typeof e["message"] === "string") message += " " + (e["message"] as string);
   }
-  return "relay failed";
+  const matched = KNOWN_VAULT_ERRORS.find((name) => message.includes(name));
+  return { error: matched ?? "relay failed", ref };
 }
 
 let _provider: ethers.JsonRpcProvider | null = null;
@@ -67,6 +85,91 @@ async function checkBetFilled(nullifierOfBet: string): Promise<{ ok: boolean; st
   }
 }
 
+// API-003: zod schemas validating the public-input objects for each relay route,
+// applied BEFORE the relay function allocates a nonce. Numeric fields arrive as
+// decimal strings; HEX32 = 0x-prefixed 32-byte hex. Mirrors the rigor of the
+// /merkle-path/:commitment regex check below.
+const HEX32 = z.string().regex(/^0x[0-9a-fA-F]{64}$/);
+const NUM = z.string().regex(/^[0-9]+$/); // 1e6-scaled decimal integer string
+const PROOF = z.string().regex(/^0x[0-9a-fA-F]*$/); // 0x hex blob
+
+const betInputsSchema = z.object({
+  merkle_root: HEX32,
+  nullifier: HEX32,
+  new_commitment: HEX32,
+  bet_amount: NUM,
+  price: NUM,
+  expected_shares: NUM,
+  market_id: HEX32,
+  outcome_side: NUM,
+  position_id: HEX32,
+});
+const settlementInputsSchema = z.object({
+  merkle_root: HEX32,
+  nullifier: HEX32,
+  new_commitment: HEX32,
+  nullifier_of_bet: HEX32,
+  market_id: HEX32,
+  total_credit: NUM,
+});
+const withdrawalInputsSchema = z.object({
+  merkle_root: HEX32,
+  nullifier: HEX32,
+  withdrawal_amount: NUM,
+  recipient_hash: HEX32,
+  new_commitment: HEX32,
+});
+// bet-cancel / close / partial-credit all share the 4-field shape.
+const fourFieldInputsSchema = z.object({
+  merkle_root: HEX32,
+  nullifier: HEX32,
+  new_commitment: HEX32,
+  nullifier_of_bet: HEX32,
+});
+const naCancelInputsSchema = z.object({
+  merkle_root: HEX32,
+  nullifier: HEX32,
+  new_commitment: HEX32,
+  nullifier_of_bet: HEX32,
+  market_id: HEX32,
+});
+
+// FC-9: optional operator EIP-712 attestation forwarded with a credit proof. Present for an
+// ACTIVE bet (full fill / fail / partial / sold); absent when the bet is already FILLED/FAILED.
+const attestationSchema = z
+  .object({
+    nullifierOfBet: HEX32,
+    reportType: z.number().int().min(1).max(4),
+    amountA: NUM,
+    amountB: NUM,
+  })
+  .optional();
+const SIG = z.string().regex(/^0x[0-9a-fA-F]*$/).optional();
+
+const betSchema = z.object({ proof: PROOF, inputs: betInputsSchema });
+const settlementSchema = z.object({
+  proof: PROOF,
+  inputs: settlementInputsSchema,
+  attestation: attestationSchema,
+  signature: SIG,
+});
+const withdrawalSchema = z.object({
+  proof: PROOF,
+  inputs: withdrawalInputsSchema,
+  recipientAddress: z.string().regex(/^0x[0-9a-fA-F]{40}$/),
+});
+const betCancelSchema = z.object({ proof: PROOF, inputs: fourFieldInputsSchema, attestation: attestationSchema, signature: SIG });
+const naCancelSchema = z.object({ proof: PROOF, inputs: naCancelInputsSchema, attestation: attestationSchema, signature: SIG });
+const closeSchema = z.object({ proof: PROOF, inputs: fourFieldInputsSchema, attestation: attestationSchema, signature: SIG });
+const partialCreditSchema = z.object({ proof: PROOF, inputs: fourFieldInputsSchema, attestation: attestationSchema, signature: SIG });
+// FC-8: consolidate — exactly 4 nullifiers (HEX32 also matches the 0x00..00 inactive sentinel).
+const consolidateInputsSchema = z.object({
+  merkle_root: HEX32,
+  nullifiers: z.array(HEX32).length(4),
+  new_commitment: HEX32,
+});
+const consolidateSchema = z.object({ proof: PROOF, inputs: consolidateInputsSchema });
+
 export function createApp(): express.Application {
   const app = express();
   app.use(express.json({ limit: "1mb" }));
@@ -82,138 +185,167 @@ export function createApp(): express.Application {
     next();
   });
 
+  // API-002: rate-limit the relay surface (20 req/min per client) before routing.
+  app.use(
+    "/relay",
+    rateLimit({ windowMs: 60_000, max: 20, standardHeaders: true, legacyHeaders: false }),
+  );
+
   app.get("/health", (_req, res) => {
     res.status(200).json({ status: "ok" });
   });
 
   app.post("/relay/bet", async (req, res) => {
-    const { proof, inputs } = req.body;
-    if (!proof || !inputs) {
-      res.status(400).json({ error: "proof and inputs required" });
+    const parsed = betSchema.safeParse(req.body); // API-003
+    if (!parsed.success) {
+      res.status(400).json({ error: "invalid inputs" });
       return;
     }
+    const { proof, inputs } = parsed.data;
     try {
       const txHash = await relayAuthorizeBet(proof, inputs);
       logger.info({ txHash }, "authorizeBet relayed");
       res.json({ txHash });
     } catch (err) {
-      logger.error({ err }, "authorizeBet relay failed");
-      res.status(500).json({ error: extractRevertReason(err) });
+      res.status(500).json(safeError(logger, "authorizeBet relay", err)); // API-004
     }
   });
 
   app.post("/relay/settlement", async (req, res) => {
-    const { proof, inputs } = req.body;
-    if (!proof || !inputs) {
-      res.status(400).json({ error: "proof and inputs required" });
+    const parsed = settlementSchema.safeParse(req.body); // API-003
+    if (!parsed.success) {
+      res.status(400).json({ error: "invalid inputs" });
       return;
     }
-    // Pre-flight: confirm the signing layer has called reportFilled on-chain.
-    // If the bet is still ACTIVE the Vault will revert with BetNotFilled — surface
-    // a clear 409 instead of burning a nonce and returning an opaque 500.
+    const { proof, inputs, attestation, signature } = parsed.data;
+    // FC-9 pre-flight: settlement is valid for a FILLED bet (no attestation) OR an ACTIVE bet
+    // carrying a FILLED attestation. Only short-circuit clearly-terminal states (already
+    // claimed / FOK-failed) to avoid burning a nonce; everything else hits the Vault, which
+    // gives the precise revert.
     const nullifierOfBet = (inputs as Record<string, string>)["nullifier_of_bet"];
     if (nullifierOfBet) {
-      const { ok, status } = await checkBetFilled(nullifierOfBet);
-      if (!ok) {
-        const label = status === BET_STATUS.ACTIVE ? "not yet filled by signing layer — retry after reportFilled is confirmed"
-          : status === BET_STATUS.FAILED ? "bet was FOK-failed; use /relay/bet-cancel instead"
-          : status === BET_STATUS.CREDITED ? "settlement already claimed"
-          : `unexpected bet status ${status}`;
+      // API-008: reject a present-but-malformed nullifier before any contract read.
+      if (!/^0x[0-9a-fA-F]{64}$/.test(nullifierOfBet)) {
+        res.status(400).json({ error: "invalid inputs" });
+        return;
+      }
+      const { status } = await checkBetFilled(nullifierOfBet);
+      const terminal =
+        status === BET_STATUS.CREDITED ? "settlement already claimed"
+        : status === BET_STATUS.FAILED ? "bet was FOK-failed; use /relay/bet-cancel instead"
+        : status === BET_STATUS.ACTIVE && !attestation ? "not yet filled — include the operator fill attestation"
+        : null;
+      if (terminal) {
         logger.warn({ nullifierOfBet, betStatus: status }, "creditSettlement pre-flight failed");
-        res.status(409).json({ error: `bet ${label}` });
+        res.status(409).json({ error: `bet ${terminal}` });
         return;
       }
     }
     try {
-      const txHash = await relayCreditSettlement(proof, inputs);
+      const txHash = await relayCreditSettlement(proof, inputs, attestation, signature);
       logger.info({ txHash }, "creditSettlement relayed");
       res.json({ txHash });
     } catch (err) {
-      logger.error({ err }, "creditSettlement relay failed");
-      const msg = extractRevertReason(err);
-      res.status(500).json({ error: msg });
+      res.status(500).json(safeError(logger, "creditSettlement relay", err)); // API-004
     }
   });
 
   app.post("/relay/withdrawal", async (req, res) => {
-    const { proof, inputs, recipientAddress } = req.body;
-    if (!proof || !inputs || !recipientAddress) {
-      res.status(400).json({ error: "proof, inputs, and recipientAddress required" });
+    const parsed = withdrawalSchema.safeParse(req.body); // API-003
+    if (!parsed.success) {
+      res.status(400).json({ error: "invalid inputs" });
       return;
     }
+    const { proof, inputs, recipientAddress } = parsed.data;
     try {
       const txHash = await relayWithdraw(proof, inputs, recipientAddress);
       logger.info({ txHash }, "withdraw relayed");
       res.json({ txHash });
     } catch (err) {
-      logger.error({ err }, "withdraw relay failed");
-      res.status(500).json({ error: extractRevertReason(err) });
+      res.status(500).json(safeError(logger, "withdraw relay", err)); // API-004
     }
   });
 
   app.post("/relay/bet-cancel", async (req, res) => {
-    const { proof, inputs } = req.body;
-    if (!proof || !inputs) {
-      res.status(400).json({ error: "proof and inputs required" });
+    const parsed = betCancelSchema.safeParse(req.body); // API-003
+    if (!parsed.success) {
+      res.status(400).json({ error: "invalid inputs" });
       return;
     }
+    const { proof, inputs, attestation, signature } = parsed.data;
     try {
-      const txHash = await relayBetCancellationCredit(proof, inputs);
+      const txHash = await relayBetCancellationCredit(proof, inputs, attestation, signature);
       logger.info({ txHash }, "betCancellationCredit relayed");
       res.json({ txHash });
     } catch (err) {
-      logger.error({ err }, "betCancellationCredit relay failed");
-      res.status(500).json({ error: extractRevertReason(err) });
+      res.status(500).json(safeError(logger, "betCancellationCredit relay", err)); // API-004
     }
   });
 
   app.post("/relay/na-cancel", async (req, res) => {
-    const { proof, inputs } = req.body;
-    if (!proof || !inputs) {
-      res.status(400).json({ error: "proof and inputs required" });
+    const parsed = naCancelSchema.safeParse(req.body); // API-003
+    if (!parsed.success) {
+      res.status(400).json({ error: "invalid inputs" });
       return;
     }
+    const { proof, inputs, attestation, signature } = parsed.data;
     try {
-      const txHash = await relayNACancellationCredit(proof, inputs);
+      const txHash = await relayNACancellationCredit(proof, inputs, attestation, signature);
       logger.info({ txHash }, "naCancellationCredit relayed");
       res.json({ txHash });
     } catch (err) {
-      logger.error({ err }, "naCancellationCredit relay failed");
-      res.status(500).json({ error: extractRevertReason(err) });
+      res.status(500).json(safeError(logger, "naCancellationCredit relay", err)); // API-004
     }
   });
 
   // FC-1: relay a position-close credit proof (pre-settlement secondary sale).
   app.post("/relay/close", async (req, res) => {
-    const { proof, inputs } = req.body;
-    if (!proof || !inputs) {
-      res.status(400).json({ error: "proof and inputs required" });
+    const parsed = closeSchema.safeParse(req.body); // API-003
+    if (!parsed.success) {
+      res.status(400).json({ error: "invalid inputs" });
       return;
     }
+    const { proof, inputs, attestation, signature } = parsed.data;
     try {
-      const txHash = await relayClosePosition(proof, inputs);
+      const txHash = await relayClosePosition(proof, inputs, attestation, signature);
       logger.info({ txHash }, "closePosition relayed");
       res.json({ txHash });
     } catch (err) {
-      logger.error({ err }, "closePosition relay failed");
-      res.status(500).json({ error: extractRevertReason(err) });
+      res.status(500).json(safeError(logger, "closePosition relay", err)); // API-004
     }
   });
 
   // FC-4: relay a partial-fill credit proof (limit order partially filled then terminated).
   app.post("/relay/partial-credit", async (req, res) => {
-    const { proof, inputs } = req.body;
-    if (!proof || !inputs) {
-      res.status(400).json({ error: "proof and inputs required" });
+    const parsed = partialCreditSchema.safeParse(req.body); // API-003
+    if (!parsed.success) {
+      res.status(400).json({ error: "invalid inputs" });
       return;
     }
+    const { proof, inputs, attestation, signature } = parsed.data;
     try {
-      const txHash = await relayPartialFillCredit(proof, inputs);
+      const txHash = await relayPartialFillCredit(proof, inputs, attestation, signature);
       logger.info({ txHash }, "partialFillCredit relayed");
       res.json({ txHash });
     } catch (err) {
-      logger.error({ err }, "partialFillCredit relay failed");
-      res.status(500).json({ error: extractRevertReason(err) });
+      res.status(500).json(safeError(logger, "partialFillCredit relay", err)); // API-004
+    }
+  });
+
+  // FC-8: relay a note-consolidation proof (merge up to 4 notes into one).
+  app.post("/relay/consolidate", async (req, res) => {
+    const parsed = consolidateSchema.safeParse(req.body); // API-003
+    if (!parsed.success) {
+      res.status(400).json({ error: "invalid inputs" });
+      return;
+    }
+    const { proof, inputs } = parsed.data;
+    try {
+      const txHash = await relayConsolidate(proof, inputs);
+      logger.info({ txHash }, "consolidate relayed");
+      res.json({ txHash });
+    } catch (err) {
+      res.status(500).json(safeError(logger, "consolidate relay", err)); // API-004
     }
   });
 

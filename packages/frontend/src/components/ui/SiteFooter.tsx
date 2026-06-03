@@ -22,24 +22,30 @@ export function SiteFooter() {
               Zero-knowledge privacy infrastructure for prediction markets.
               Built for traders who treat conviction as an asset.
             </div>
+            {/* FINDING: FUNC-003 — no real social/column destinations exist yet, so
+                render placeholders as disabled "Coming soon" controls instead of
+                dead href="#" links that scroll to top. Spans keep the distinct
+                accessible names without being focusable navigation targets. */}
             <div className="row gap-3 mt-6">
-              <a className="btn btn-sm btn-ghost" href="#" aria-label="X / Twitter">
+              <span className="btn btn-sm btn-ghost" role="link" aria-disabled="true" title="Coming soon" aria-label="X / Twitter (coming soon)" style={{ cursor: 'not-allowed', opacity: 0.5 }}>
                 <Icon d={ICONS.twitter} />
-              </a>
-              <a className="btn btn-sm btn-ghost" href="#" aria-label="GitHub">
+              </span>
+              <span className="btn btn-sm btn-ghost" role="link" aria-disabled="true" title="Coming soon" aria-label="GitHub (coming soon)" style={{ cursor: 'not-allowed', opacity: 0.5 }}>
                 <Icon d={ICONS.github} />
-              </a>
-              <a className="btn btn-sm btn-ghost" href="#" aria-label="Discord">
+              </span>
+              <span className="btn btn-sm btn-ghost" role="link" aria-disabled="true" title="Coming soon" aria-label="Discord (coming soon)" style={{ cursor: 'not-allowed', opacity: 0.5 }}>
                 <Icon d={ICONS.discord} />
-              </a>
+              </span>
             </div>
           </div>
           {FOOTER_COLS.map((c) => (
             <div key={c.title}>
               <div className="micro">{c.title}</div>
               <div className="col gap-2 mt-3">
+                {/* FINDING: FUNC-003 — column links have no real destinations yet;
+                    render as disabled "Coming soon" text rather than dead anchors. */}
                 {c.links.map((l) => (
-                  <a key={l} href="#" className="small" style={{ color: 'var(--text-1)' }}>{l}</a>
+                  <span key={l} role="link" aria-disabled="true" title="Coming soon" className="small" style={{ color: 'var(--text-2)', cursor: 'not-allowed' }}>{l}</span>
                 ))}
               </div>
             </div>

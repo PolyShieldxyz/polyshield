@@ -146,6 +146,7 @@ export default function MarketsPage() {
               value={search}
               onChange={(event) => setSearch(event.target.value)}
               placeholder="Search markets..."
+              aria-label="Search markets"
               style={{ background: 'transparent', border: 'none', color: 'var(--text)', fontFamily: 'var(--mono)', fontSize: 12, width: 180 }}
             />
           </div>

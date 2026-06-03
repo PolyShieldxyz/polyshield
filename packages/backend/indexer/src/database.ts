@@ -9,7 +9,10 @@ export interface SettlementRecord {
   block_number: number;
   outcome: number; // 0=NO, 1=YES, -1=N/A
   created_at: number; // unix seconds
-  resolved_at: number; // unix seconds when Vault.resolveMarket confirmed (0 = unknown)
+  // unix seconds when Vault.resolveMarket confirmed. Unknown at CTF-resolution insert
+  // time (set later by setResolvedAt from the Vault listener), so optional on insert;
+  // rows read back from the DB always carry it (column is NOT NULL DEFAULT 0).
+  resolved_at?: number;
 }
 
 let db: Database.Database;

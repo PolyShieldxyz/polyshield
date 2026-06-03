@@ -54,9 +54,19 @@ Functions:
 
 #### Verifier Contracts
 
-Auto-generated from Noir circuits via `nargo codegen-verifier`. One per circuit type, or a single universal verifier if using a universal SNARK setup.
+Snarkjs-generated Groth16 verifiers (BN254), one per circuit type, built through the `Benchmarking/groth16` pipeline. Each generated file pairs a stateless `<Name>G16Base` (the pairing math + hardcoded verification key) with a UUPS-upgradeable `<Name>Verifier` adapter implementing `IVerifier`.
 
-Deployed separately from `Vault.sol` and registered via `Vault.setVerifier(proofType, verifierAddress)`.
+Deployed separately from `Vault.sol` (each behind its own proxy) and registered in the Vault verifier slots via the **48h-timelocked** `proposeVerifier` / `acceptVerifier` flow. Adopting a new verification key without a full proxy migration is also possible via the adapter's owner-only `setBase(address)` (an instant, separate lever).
+
+#### Upgradeability (UUPS / ERC-1967)
+
+Every deployed contract — `Vault`, `CommitmentMerkleTree`, `NullifierRegistry`, `PoseidonT3Hasher`, and all 8 verifier adapters — is a UUPS **implementation behind an `ERC1967Proxy`**. The **proxy addresses are the permanent protocol addresses**; the implementation behind each proxy can be replaced to ship logic fixes without migrating state. Mechanics:
+
+- Constructors are replaced by `initialize(...)` (guarded by OpenZeppelin's `initializer`); implementations call `_disableInitializers()` in their constructor so the logic contract itself can never be initialized.
+- `_authorizeUpgrade` is gated by **plain `onlyOwner`, instant — no timelock.** This is a deliberate trust trade-off for the initial mainnet test (immediate hotfix capability) and the single largest trust assumption in the system: **the owner can replace any contract's logic in one transaction**, which is a fund-drain and de-anonymization vector. The owner role MUST be a multisig/HSM in production. See `threat-model.md` (T21).
+- Storage is append-only: each contract reserves a trailing `__gap`, new state is added by shrinking the gap, and existing state is never reordered. `CommitmentMerkleTree`'s array layout (`poseidon, vault, zeros[32], filledSubtrees[32], recentRoots[30], currentRootIndex/nextIndex, __gap`) is frozen.
+- Reentrancy uses `ReentrancyGuardTransient` (EIP-1153 transient storage, proxy-safe with no initializer; `evm_version = "cancun"`, supported on Polygon since the Napoli hardfork) rather than the constructor-based guard.
+- Deployment uses the proxy pattern in `script/Deploy.s.sol` / `MockDeploy.s.sol` via `script/DeployLib.sol`, which predicts the Vault proxy address with `vm.computeCreateAddress` to resolve the Vault↔Tree↔NullifierRegistry initialization cycle.
 
 ### 2.2 Off-Chain Backend
 
@@ -65,6 +75,7 @@ Deployed separately from `Vault.sol` and registered via `Vault.setVerifier(proof
 A Node.js service that:
 1. Listens for `BetAuthorized` events from the Vault contract.
 2. Decodes the bet parameters (`market_id`, `position_id`, `bet_amount`, `price`, `expected_shares`) from the event.
+2a. **JIT collateral funding (Option 3 / FC-7).** Before submitting, ensures the Deposit Wallet holds enough pUSD buying power: if it is short of `bet_amount`, it calls `Vault.fundPolymarketWallet(shortfall)` (operator-only; USDC → pUSD via onramp → Deposit Wallet) and waits one confirmation. Nothing is pre-deployed at deposit time. pUSD left after a no-fill stays as a reused **residual buffer** (the stepping stone to Option 4); funding failures (cap reached / vault illiquid) are reported as recoverable FOK failures. `Vault.deployedToPolymarket` tracks the deployed amount, decremented at settlement by `acknowledgePolymarketReturn`; SEC-007 `deploymentCap` bounds it. See `collateral-deployment-strategy-comparison.md`. All Deposit-Wallet actions (this funding's downstream batches, redemption, offramp, approvals) go through a relayer → proxy abstraction (`DepositWalletExecutor`) so the same code path serves mock and mainnet.
 3. Constructs a Polymarket CLOB order using the official `@polymarket/clob-client-v2` SDK. Order type: **FOK (Fill-Or-Kill)** exclusively. Maker and signer are both set to the Deposit Wallet address.
 4. Signs the order using the **POLY_1271** signature type (ERC-7739-wrapped ERC-1271). The signing key is the vault EOA (owner of the Deposit Wallet).
 5. Sends the signed order to the Polymarket CLOB API using **L2 HMAC authentication** headers (`POLY_ADDRESS`, `POLY_SIGNATURE`, `POLY_TIMESTAMP`, `POLY_API_KEY`, `POLY_PASSPHRASE`). L2 API credentials are stored in secrets manager alongside the signing key.

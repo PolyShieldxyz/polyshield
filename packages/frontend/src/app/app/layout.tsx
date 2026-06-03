@@ -1,26 +1,39 @@
 'use client'
-import { useEffect } from 'react'
+import { useEffect, useRef } from 'react'
 import { useAccount } from 'wagmi'
 import { WalletConnect } from '@/components/ui/WalletConnect'
 import { Logo } from '@/components/ui/Logo'
-import { clearNoteCache } from '@/lib/notes'
+import { clearNoteCache, resetAllLocalState } from '@/lib/notes'
 import { useChainResetDetector } from '@/lib/accountState'
 import { initProver } from '@/lib/prover'
 
 export default function AppLayout({ children }: { children: React.ReactNode }) {
   const { isConnected, status } = useAccount()
   const chainWasReset = useChainResetDetector()
+  const prevConnected = useRef<boolean | null>(null)
 
-  // Start fetching all circuit .wasm and .zkey files as soon as the user enters
-  // the app, well before they reach any proof step.
+  // Start fetching the entry-flow circuit .wasm and .zkey files as soon as the
+  // user enters the app, well before they reach any proof step.
   useEffect(() => {
     initProver()
   }, [])
 
   useEffect(() => {
-    if (!isConnected) {
-      clearNoteCache()
+    // FINDING: PRIV-004 — only wipe persisted state on an actual connected→
+    // disconnected transition, never on the initial render (when isConnected may
+    // already be false during reconnect). Guarding with prevConnected mirrors the
+    // pattern in WalletConnect.tsx and avoids clobbering a returning user's cache.
+    if (prevConnected.current === null) {
+      prevConnected.current = isConnected
+      return
     }
+    if (prevConnected.current && !isConnected) {
+      clearNoteCache()
+      // Clear localStorage too so a shared device does not leak the prior user's
+      // notes/activity/deposit-index to the next connector.
+      resetAllLocalState()
+    }
+    prevConnected.current = isConnected
   }, [isConnected])
 
   // During initial hydration wagmi status is 'reconnecting' while it restores
@@ -63,7 +76,9 @@ export default function AppLayout({ children }: { children: React.ReactNode }) {
 
   return (
     <div className="app-shell">
-      <main style={{ minWidth: 0, overflow: 'hidden' }}>
+      {/* FINDING: A11Y-003 — distinct id ("app-main") to avoid duplicating the
+          root layout's #main skip-link target, which already wraps this subtree. */}
+      <main id="app-main" style={{ minWidth: 0, overflow: 'hidden' }}>
         {children}
       </main>
     </div>

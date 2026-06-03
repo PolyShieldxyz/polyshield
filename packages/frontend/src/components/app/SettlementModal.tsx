@@ -20,6 +20,7 @@ import {
   type ReadyToSettleBet,
 } from '@/lib/notes'
 import {
+  fetchAttestation,
   fetchMerklePath,
   relaySettlement,
   waitForTransactionConfirmation,
@@ -185,7 +186,10 @@ export function SettlementModal({
           marketId: receipt.marketId,
         })
 
-        const { txHash } = await relaySettlement(proof, inputs)
+        // FC-9: a full-fill bet is ACTIVE on-chain and needs the operator's FILLED attestation;
+        // a post-partial bet is already FILLED and ignores it. Pass whatever the operator signed.
+        const settleAtt = await fetchAttestation(nullifierOfBet as `0x${string}`)
+        const { txHash } = await relaySettlement(proof, inputs, settleAtt ?? undefined)
         await waitForTransactionConfirmation(txHash as `0x${string}`)
 
         markNoteSpent(currentFreeNote.commitment)

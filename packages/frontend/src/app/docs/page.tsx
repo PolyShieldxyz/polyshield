@@ -185,11 +185,14 @@ export default function DocsPage() {
         {NAV.map((sec) => (
           <div key={sec} style={{ marginBottom: 16 }}>
             <div style={{ fontSize: 11, fontWeight: 600, color: 'var(--text-2)', textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: 6 }}>{sec}</div>
+            {/* FINDING: A11Y-004 — real <button> instead of a clickable <div>, so
+                it is keyboard-focusable and Enter/Space activate it. Styled flat
+                to preserve the original look. */}
             {SECTIONS[sec].map(({ title }) => (
-              <div key={title} onClick={() => { setSection(sec); setPage(title) }}
-                style={{ padding: '6px 10px', borderRadius: 5, cursor: 'pointer', fontSize: 13, color: page === title && section === sec ? 'var(--cyan)' : 'var(--text-2)', background: page === title && section === sec ? 'oklch(0.82 0.13 210 / 0.08)' : 'transparent' }}>
+              <button key={title} type="button" onClick={() => { setSection(sec); setPage(title) }}
+                style={{ display: 'block', width: '100%', textAlign: 'left', border: 'none', cursor: 'pointer', padding: '6px 10px', borderRadius: 5, fontSize: 13, fontFamily: 'inherit', color: page === title && section === sec ? 'var(--cyan)' : 'var(--text-2)', background: page === title && section === sec ? 'oklch(0.82 0.13 210 / 0.08)' : 'transparent' }}>
                 {title}
-              </div>
+              </button>
             ))}
           </div>
         ))}

@@ -1,7 +1,7 @@
 'use client'
 
 import Link from 'next/link'
-import { useEffect, useMemo, useState } from 'react'
+import { Suspense, useEffect, useMemo, useState } from 'react'
 import { useParams, useRouter, useSearchParams } from 'next/navigation'
 import { Icon, ICONS } from '@/components/ui/Icon'
 import { BetModal } from '@/components/app/BetModal'
@@ -59,7 +59,18 @@ function FullChart({ trend }: { trend: number[] }) {
   )
 }
 
+// Next 15 requires any component calling useSearchParams() to be wrapped in a
+// Suspense boundary, or `next build` fails. The page content lives in
+// MarketDetailContent; this default export provides the boundary.
 export default function MarketDetailPage() {
+  return (
+    <Suspense fallback={null}>
+      <MarketDetailContent />
+    </Suspense>
+  )
+}
+
+function MarketDetailContent() {
   const params = useParams()
   const router = useRouter()
   const searchParams = useSearchParams()
@@ -286,11 +297,13 @@ export default function MarketDetailPage() {
                 <div className="micro">AMOUNT (USDC)</div>
                 <div style={{ display: 'flex', alignItems: 'center', background: 'var(--bg-1)', border: '1px solid var(--line-strong)', borderRadius: 6, padding: '0 12px', marginTop: 8 }}>
                   <span className="mono" style={{ color: 'var(--text-2)', fontSize: 18, marginRight: 6 }}>$</span>
+                  {/* FINDING: A11Y-002 aria-label; A11Y-001 dropped inline outline:none for global :focus-visible ring. */}
                   <input
                     type="number"
                     value={amount}
                     onChange={(e) => setAmount(Math.max(0, +e.target.value || 0))}
-                    style={{ background: 'transparent', border: 'none', outline: 'none', color: 'var(--text)', fontFamily: 'var(--mono)', fontSize: 22, padding: '10px 0', width: '100%' }}
+                    aria-label="Bet amount in USDC"
+                    style={{ background: 'transparent', border: 'none', color: 'var(--text)', fontFamily: 'var(--mono)', fontSize: 22, padding: '10px 0', width: '100%' }}
                   />
                   <span className="mono" style={{ color: 'var(--text-2)', fontSize: 12 }}>USDC</span>
                 </div>
@@ -309,7 +322,8 @@ export default function MarketDetailPage() {
               </div>
 
               <div className="hairline-t mt-4" style={{ paddingTop: 12 }}>
-                {[['Limit price', price.toFixed(3)], ['Expected shares', shares.toLocaleString()], ['Time in force', 'FOK'], ['Proof time', '~2 seconds']].map(([label, value]) => (
+                {/* FINDING: FUNC-001 — honest proof time (Groth16 in-browser proving is 30s–2min, not ~2s). */}
+                {[['Limit price', price.toFixed(3)], ['Expected shares', shares.toLocaleString()], ['Time in force', 'FOK'], ['Proof time', '30s–2min']].map(([label, value]) => (
                   <div key={label as string} className="row" style={{ justifyContent: 'space-between', padding: '6px 0', borderBottom: '1px solid var(--line)' }}>
                     <span className="small" style={{ fontSize: 12 }}>{label}</span>
                     <span className="mono" style={{ fontSize: 12 }}>{value}</span>

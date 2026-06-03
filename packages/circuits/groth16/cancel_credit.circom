@@ -60,11 +60,16 @@ template CancelCredit() {
     nextCommitment.owner_address <== owner_address;
     nextCommitment.out === new_commitment;
 
+    // SEC-002: require nonce >= 1 so `nonce - 1` cannot underflow to the field modulus (p-1).
+    component nonceNZ = AssertLessThan(64);
+    nonceNZ.lhs <== 0;
+    nonceNZ.rhs <== nonce;
+
     component preBetNullifier = NullifierHash();
     preBetNullifier.secret <== secret;
     preBetNullifier.nonce <== nonce - 1;
     preBetNullifier.out === nullifier_of_bet;
-    market_id === market_id;
+    // SEC-008: market_id stays public for on-chain binding only; intentionally unconstrained in-circuit.
 }
 
 component main {public [merkle_root, nullifier, new_commitment, nullifier_of_bet, market_id, bet_amount]} = CancelCredit();

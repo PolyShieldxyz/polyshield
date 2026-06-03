@@ -52,8 +52,8 @@ Polyshield's privacy guarantee is: **which depositor authorized which bet is hid
 ### T6 — Vault EOA Private Key Compromise
 **Severity:** CRITICAL
 **Description:** If the Polymarket signing EOA's private key is compromised, an attacker can drain the vault's Polymarket balance (place bets they control, or transfer USDC out of the Polymarket account). The Vault contract's USDC holdings (not yet sent to Polymarket) are unaffected.
-**Mitigation:** The blast radius is bounded to whatever sits in the Polymarket Deposit Wallet at the moment of compromise, NOT the whole pool: the Vault contract releases USDC only against ZK-verified proofs, so the EOA key alone cannot pull the at-rest majority. The primary lever is therefore bounding the in-flight float; FC-6's governance-set `maxInFlight` ceiling caps both this blast radius and T13's stuck-capital exposure. Secondary hardening (travels with the same collateral-model decision): KMS/HSM-backed signing so the raw key is never extractable (CLAUDE.md's "env var only" is acceptable for local dev only), plus an Indexer circuit breaker that halts signing on any EOA / Deposit-Wallet action lacking a matching on-chain event. EOA rotation is Q12 (v2).
-**Status:** PARKED on FC-6 (bounded working-buffer collateral model) pending Arya's manager's decision on the USDC/pUSD deposit algorithm. No separate question.
+**Mitigation:** The blast radius is bounded to whatever sits in the Polymarket Deposit Wallet at the moment of compromise, NOT the whole pool: the Vault contract releases USDC only against ZK-verified proofs, so the EOA key alone cannot pull the at-rest majority. The primary lever is bounding the in-flight float. **As built (FC-7, JIT — `collateral-deployment-strategy-comparison.md` Option 3): collateral is deployed only at bet time, so the exposed amount is just the small accreted residual buffer — this de-escalates the threat substantially in the current model.** The SEC-007 `deploymentCap` (the FC-6 `maxInFlight` ceiling) is the hard on-chain bound and remains the primary lever as the system moves to the Option-4 base-buffer model. Secondary hardening: KMS/HSM-backed signing so the raw key is never extractable (CLAUDE.md's "env var only" is acceptable for local dev only), the fenced deposit-wallet owner + relayer-only outbound path (the deposit wallet is now an executor-gated proxy, `MockDepositWallet` locally / Polymarket deposit-wallet proxy in prod), plus an Indexer circuit breaker that halts signing on any EOA / Deposit-Wallet action lacking a matching on-chain event. EOA rotation is Q12 (v2).
+**Status:** MITIGATED in the current model by FC-7 (JIT) — exposure is the residual buffer, bounded by `deploymentCap`. Residual risk tracked with the Option-4 buffer-management work (FC-6) and the TEE/fenced-owner roadmap.
 
 ---
 
@@ -68,14 +68,14 @@ Polyshield's privacy guarantee is: **which depositor authorized which bet is hid
 ### T8 — Stale Merkle Root
 **Severity:** HIGH
 **Description:** Between when a user generates their ZK proof (using a Merkle root) and when they submit the proof on-chain, other users may have made deposits or state transitions, each of which inserts a leaf and produces a new root. If the referenced root has been evicted from the history window by the time the tx executes, the proof is rejected (`UnknownRoot`).
-**Mitigation:** The Vault contract maintains a rolling window of the last 30 Merkle roots (`recentRoots[30]`). The proof is valid if its `merkle_root` matches any root in the window (`CommitmentMerkleTree.isKnownRoot`). This is the same approach as Tornado Cash's `MerkleTreeWithHistory`.
+**Mitigation:** The tree maintains a rolling window of the last **1024** Merkle roots (FC-3) with O(1) `mapping(bytes32 => bool) knownRoots` membership. The proof is valid if its `merkle_root` is in the window (`CommitmentMerkleTree.isKnownRoot`, a single mapping read). This is the Tornado-Cash `MerkleTreeWithHistory` approach with a larger, O(1) window.
 
-**Clarification (2026-05-30): this does NOT serialize state changes to one transaction per block.** The root changes on every `tree.insert` and `merkle_root` is a public input to every proof, but concurrency is safe for two reasons: (1) membership is monotonic, a leaf present under root R is present under every later root; (2) an old root plus its old path verify together, because the circuit checks `computed_root == merkle_root` and the contract accepts R as long as it is within the last 30 roots, so users never refresh their path mid-flight. Many state-changing transactions can therefore land in the same block, each carrying whatever recent root it was built against. The only true serialization point is per-note nullifier double-spend (T7), which is intended.
+**Clarification (2026-05-30): this does NOT serialize state changes to one transaction per block.** The root changes on every `tree.insert` and `merkle_root` is a public input to every proof, but concurrency is safe for two reasons: (1) membership is monotonic, a leaf present under root R is present under every later root; (2) an old root plus its old path verify together, because the circuit checks `computed_root == merkle_root` and the contract accepts R as long as it is within the last 1024 roots, so users never refresh their path mid-flight. Many state-changing transactions can therefore land in the same block, each carrying whatever recent root it was built against. The only true serialization point is per-note nullifier double-spend (T7), which is intended.
 
-**Real constraint:** the referenced root must still be among the last `HISTORY_SIZE` (currently 30) roots when the tx executes. Each successful state transition inserts exactly one leaf = one new root, so if more than 30 inserts land between proof-build and inclusion, the root is stale. With 30s-2min client proving times, 30 inserts under load is plausible and would cause stale-root reverts and forced rebuilds.
+**Real constraint:** the referenced root must still be among the last `ROOT_WINDOW` (now 1024) roots when the tx executes. Each successful state transition inserts exactly one leaf = one new root. A 30s-2min client proof straddles ≈15–60 Polygon blocks; the 1024 window gives ample headroom (~10 fully-saturated blocks at ~100 ZK txs/block, or far more at realistic load) so stale-root reverts are no longer a practical concern.
 
-**Scaling plan (FC-3 in `docs/future-changes.md`):** bump `HISTORY_SIZE` to a much larger value (e.g. 256) and switch `isKnownRoot` from the O(HISTORY_SIZE) array scan to a `mapping(bytes32 => bool)` lookup with a ring buffer for eviction, making a large window O(1) per verify. No circuit changes required.
-**Status:** DESIGN LEVEL (mitigation correct; window-scaling tracked as FC-3)
+**Resolved (FC-3, implemented 2026-06-03):** `ROOT_WINDOW` raised 30 → 1024 and `isKnownRoot` switched from the O(HISTORY_SIZE) array scan to a `mapping(bytes32 => bool)` lookup with a mapping-keyed ring buffer for eviction, making the large window O(1) per verify. No circuit changes. Widening the window is soundness-neutral (membership is monotonic; double-spend is nullifier-gated, T7).
+**Status:** RESOLVED (FC-3 implemented; window now 1024 with O(1) lookup)
 
 ### T9 — Withdrawal Front-Running
 **Severity:** HIGH
@@ -101,6 +101,17 @@ Polyshield's privacy guarantee is: **which depositor authorized which bet is hid
 
 ---
 
+### T21 — Instant Owner-Controlled Contract Upgrade (UUPS)
+**Severity:** CRITICAL
+**Description:** As of the UUPS conversion (2026-06-02), **every** production contract — `Vault`, `CommitmentMerkleTree`, `NullifierRegistry`, `PoseidonT3Hasher`, and all 8 Groth16 verifier adapters — is an implementation behind an `ERC1967Proxy`, and `_authorizeUpgrade` is gated by **plain `onlyOwner` with no timelock**. The owner can therefore replace any contract's logic in a single transaction. A malicious or compromised owner key can upgrade the `Vault` to a version that (a) transfers all USDC to an attacker (fund drain), (b) leaks the depositor↔bet linkage by logging or re-routing state (de-anonymization), or (c) disables nullifier/Merkle checks. This is strictly more powerful than the verifier-slot swap (which is 48h-timelocked) and the EOA-key risks in T6: it is total control over funds and the privacy invariant, effective immediately. The verifier adapters additionally expose an owner-only `setBase(address)` (adopt a new VK without a proxy migration) — a second, instant owner lever on proof verification.
+**Mitigation:**
+  - The owner role **MUST** be a multisig (e.g. Safe with a high threshold) or HSM-backed key in production — never a hot EOA. This is the only thing standing between the owner key and the entire pool.
+  - Consider adding an upgrade timelock (e.g. reuse the existing 48h `VERIFIER_TIMELOCK` pattern) so users can exit before a malicious upgrade lands. This was **deliberately not implemented** for the initial mainnet test (instant upgrades chosen to allow immediate hotfixes); revisit before scaling TVL.
+  - Storage-layout discipline: implementations disable initializers (`_disableInitializers()` in the constructor); each upgradeable contract reserves a trailing `__gap`; `CommitmentMerkleTree`'s array layout is frozen. A botched upgrade that reorders storage could corrupt the Merkle/nullifier state — mitigated by review + `forge inspect storageLayout` snapshots, not yet by automated `validateUpgrade` tooling.
+**Status:** ACCEPTED for the initial mainnet test, CONDITIONAL on a multisig/HSM owner. Trust assumption documented in CLAUDE.md and architecture.md. Timelock + automated storage-layout validation are recommended fast-follows.
+
+---
+
 ## 4. Economic Attacks
 
 ### T12 — Note Grinding / Pre-Image Attack
@@ -112,8 +123,8 @@ Polyshield's privacy guarantee is: **which depositor authorized which bet is hid
 ### T13 — Vault Undercollateralization
 **Severity:** HIGH
 **Description:** Users' USDC is partially held in the Vault contract and partially held in the Polymarket account (as active bet collateral). If users submit simultaneous Withdrawal proofs while the Vault's liquid USDC is low (most of it is in active Polymarket positions), withdrawals will revert.
-**Mitigation:** In the as-built model (FC-6, `collateral-flow-audit.md`) deposits rest as USDC in the Vault; capital reaches Polymarket only through a separate bulk operator call (`fundPolymarketWallet`), not per-deposit or per-bet. The note is debited at `authorizeBet` in the same step the funds are earmarked, so the bet leg is self-balancing (`liquid_USDC == sum(unspent note balances)` through the bet). The real exposure is bounded by how much capital is ever deployed to Polymarket at once, which FC-6's governance-set `maxInFlight` ceiling caps. The remaining ordering rule (settlement must not credit a note before the redeemed pUSD has offramped back to the Vault) is part of the same collateral-model work. `InsufficientLiquidity` in `withdraw` is the backstop.
-**Status:** PARKED on FC-6 (bounded working-buffer collateral model) pending Arya's manager's decision on the USDC/pUSD deposit algorithm. No separate question.
+**Mitigation:** In the as-built model deposits rest as USDC in the Vault; capital reaches Polymarket only via the operator `fundPolymarketWallet` call. **As built (FC-7, JIT) that call is now made per bet, for the exact uncovered shortfall, just before the order** — so almost all user funds stay at-rest and permissionlessly withdrawable; the deployed amount is the small residual buffer, bounded by the SEC-007 `deploymentCap`. The note is debited at `authorizeBet` in the same step the funds are earmarked, so the bet leg is self-balancing (`liquid_USDC == sum(unspent note balances)` through the bet). Settlement does not credit a note before the redeemed pUSD has offramped back to the Vault (`acknowledgePolymarketReturn` follows the offramp). `InsufficientLiquidity(available, requested)` in `withdraw` is the backstop. Moving to Option 4 raises the standing buffer (and thus this exposure) by design, capped by `deploymentCap`.
+**Status:** MITIGATED in the current JIT model (FC-7); exposure bounded by `deploymentCap`. Re-evaluate buffer sizing when the Option-4 base-buffer policy (FC-6) lands.
 
 ### T14 — Protocol Fee Claiming Bypass
 **Severity:** MEDIUM
@@ -184,14 +195,14 @@ Polyshield's privacy guarantee is: **which depositor authorized which bet is hid
 | T3 | Small anonymity set at launch | HIGH | Open |
 | T4 | Signing layer front-running (v1) | MEDIUM | Accepted v1 (FOK/limit cap; info-leak); v2 TEE (Q26) |
 | T5 | Signing layer censorship (v1) | HIGH | Accepted (v1) |
-| T6 | Vault EOA key compromise | CRITICAL | Parked on FC-6 (maxInFlight blast-radius cap) |
+| T6 | Vault EOA key compromise | CRITICAL | Mitigated by FC-7 (JIT) — exposure = residual buffer, capped by `deploymentCap` |
 | T7 | Nullifier double-spend | CRITICAL | Design correct |
-| T8 | Stale Merkle root | HIGH | Design correct |
+| T8 | Stale Merkle root | HIGH | Resolved (FC-3: 1024-root O(1) window) |
 | T9 | Withdrawal front-running | HIGH | Design correct (private recipient) |
 | T10 | Invalid proof spam | LOW | Accepted |
 | T11 | Circuit upgrade breaks commitments | HIGH | Design level (registry + pause, Q27) |
 | T12 | Note grinding | HIGH | Design level |
-| T13 | Vault undercollateralization | HIGH | Parked on FC-6 |
+| T13 | Vault undercollateralization | HIGH | Mitigated by FC-7 (JIT) — funds rest in Vault; `InsufficientLiquidity` backstop |
 | T14 | Fee bypass | MEDIUM | Open |
 | T15 | Polymarket account ban | HIGH | Open |
 | T16 | API downtime during bet window | MEDIUM | Open |
@@ -199,3 +210,16 @@ Polyshield's privacy guarantee is: **which depositor authorized which bet is hid
 | T18 | Proof Relay IP/timing correlation | HIGH | Open |
 | T19 | Frontend direct transaction (impl risk) | CRITICAL | Design level |
 | T20 | Deposit balance forgery (committed != deposited) | CRITICAL | Solved (mandatory deposit proof, FC-2) |
+| T21 | Instant owner-controlled UUPS upgrade (all contracts) | CRITICAL | Accepted for initial test, CONDITIONAL on multisig/HSM owner; timelock recommended fast-follow |
+| T22 | Operator signs two contradictory fill attestations (FC-9) | HIGH | Mitigated off-chain: single-write attestation store (sign exactly one terminal attestation per bet) |
+| T23 | adminCancelBet refunds a healthy filled-but-unclaimed bet (FC-9) | MEDIUM | Mitigated: 3-day timelock floor (7-day default) + owner-trusted; bounded by existing owner-upgrade trust |
+
+### T22 — FC-9 operator attestation: the single-terminal-signing invariant (load-bearing)
+
+Under FC-9 the operator reports fill status by signing an off-chain EIP-712 `OperatorAttestation` that the user submits with their credit proof; the Vault recovers the signer, requires it equals `signingLayerOperator`, then injects the attested values (filled/spent/sold/proceeds). This is gasless for the protocol and the trust class is unchanged from the old on-chain `report*` (operator-attested values), matching the v2 TEE-attested-value path.
+
+**The chain cannot adjudicate two *different* valid signatures for one bet.** The on-chain guards prevent replaying the *same* signature (the post-bet note nullifier is single-use, and the credit functions advance `BetStatus` to a terminal value that is never reset). But if the operator ever signed BOTH, say, a PARTIAL and a FILLED attestation for one bet, the user could choose whichever pays more (claim a partial refund and then settle the "full" position). Therefore the operator MUST sign **exactly one** terminal attestation per bet — enforced off-chain by a single-write attestation store (`signing-layer/src/attestationStore.ts`: `INSERT … ON CONFLICT DO NOTHING`, never re-sign). The chain is only a backstop against same-signature replay. A double-signing operator is the same trust failure as a misreporting operator; v2 (TEE/multisig operator) mitigates both.
+
+### T23 — FC-9 changes adminCancelBet's meaning
+
+With operator status reporting moved off-chain, an unclaimed-but-filled bet stays `ACTIVE` on-chain, so "ACTIVE == stuck" is no longer true, and a banned operator can still *sign* an attestation off-chain (a ban blocks order placement, not local signing). `adminCancelBet` is now an owner-trusted last resort for a permanently-gone operator (lost keys), with a 3-day timelock floor (7-day default via `initializeV2`). The owner must confirm off-chain that no fill/attestation occurred before cancelling; the residual power to refund a genuinely-filled bet is bounded by the fact that the owner can already UUPS-upgrade the whole Vault (T21).

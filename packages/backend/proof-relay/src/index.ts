@@ -32,6 +32,7 @@ if (TREE_ADDRESS) {
 }
 
 const app = createApp();
-app.listen(PORT, () => {
+// API-002/API-005: bind to loopback by default; override only via BIND_HOST.
+app.listen(PORT, process.env.BIND_HOST || "127.0.0.1", () => {
   logger.info({ port: PORT }, "Proof Relay listening");
 });

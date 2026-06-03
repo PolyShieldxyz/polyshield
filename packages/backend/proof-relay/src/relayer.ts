@@ -3,15 +3,32 @@ import pino from "pino";
 
 const logger = pino({ name: "relayer", level: "debug" });
 
+// FC-9: the 5 credit functions take an extra (OperatorAttestation att, bytes sig) for gasless
+// operator reporting. att = tuple(bytes32 nullifierOfBet, uint8 reportType, uint64 amountA, uint64 amountB).
+const ATT_TUPLE = "tuple(bytes32 nullifierOfBet, uint8 reportType, uint64 amountA, uint64 amountB)";
 const VAULT_ABI = [
   "function authorizeBet(bytes calldata proof, tuple(bytes32 merkle_root, bytes32 nullifier, bytes32 new_commitment, uint64 bet_amount, uint64 price, uint64 expected_shares, bytes32 market_id, uint8 outcome_side, bytes32 position_id) calldata inputs)",
-  "function creditSettlement(bytes calldata proof, tuple(bytes32 merkle_root, bytes32 nullifier, bytes32 new_commitment, bytes32 nullifier_of_bet, bytes32 market_id, uint64 total_credit) calldata inputs)",
+  `function creditSettlement(bytes calldata proof, tuple(bytes32 merkle_root, bytes32 nullifier, bytes32 new_commitment, bytes32 nullifier_of_bet, bytes32 market_id, uint64 total_credit) calldata inputs, ${ATT_TUPLE} att, bytes sig)`,
   "function withdraw(bytes calldata proof, tuple(bytes32 merkle_root, bytes32 nullifier, uint64 withdrawal_amount, bytes32 recipient_hash, bytes32 new_commitment) calldata inputs, address recipientAddress)",
-  "function betCancellationCredit(bytes calldata proof, tuple(bytes32 merkle_root, bytes32 nullifier, bytes32 new_commitment, bytes32 nullifier_of_bet) calldata inputs)",
-  "function naCancellationCredit(bytes calldata proof, tuple(bytes32 merkle_root, bytes32 nullifier, bytes32 new_commitment, bytes32 nullifier_of_bet, bytes32 market_id) calldata inputs)",
-  "function closePosition(bytes calldata proof, tuple(bytes32 merkle_root, bytes32 nullifier, bytes32 new_commitment, bytes32 nullifier_of_bet) calldata inputs)",
-  "function partialFillCredit(bytes calldata proof, tuple(bytes32 merkle_root, bytes32 nullifier, bytes32 new_commitment, bytes32 nullifier_of_bet) calldata inputs)",
+  `function betCancellationCredit(bytes calldata proof, tuple(bytes32 merkle_root, bytes32 nullifier, bytes32 new_commitment, bytes32 nullifier_of_bet) calldata inputs, ${ATT_TUPLE} att, bytes sig)`,
+  `function naCancellationCredit(bytes calldata proof, tuple(bytes32 merkle_root, bytes32 nullifier, bytes32 new_commitment, bytes32 nullifier_of_bet, bytes32 market_id) calldata inputs, ${ATT_TUPLE} att, bytes sig)`,
+  `function closePosition(bytes calldata proof, tuple(bytes32 merkle_root, bytes32 nullifier, bytes32 new_commitment, bytes32 nullifier_of_bet) calldata inputs, ${ATT_TUPLE} att, bytes sig)`,
+  `function partialFillCredit(bytes calldata proof, tuple(bytes32 merkle_root, bytes32 nullifier, bytes32 new_commitment, bytes32 nullifier_of_bet) calldata inputs, ${ATT_TUPLE} att, bytes sig)`,
+  "function consolidate(bytes calldata proof, tuple(bytes32 merkle_root, bytes32[4] nullifier, bytes32 new_commitment) calldata inputs)",
 ];
+
+// FC-9: optional operator attestation forwarded with a credit proof. When absent (the bet is
+// already on-chain FILLED/FAILED), the Vault ignores it, so we forward a zeroed att + empty sig.
+export interface RelayAttestation {
+  nullifierOfBet: string;
+  reportType: number;
+  amountA: string;
+  amountB: string;
+}
+const ZERO_ATT: RelayAttestation = { nullifierOfBet: ethers.ZeroHash, reportType: 0, amountA: "0", amountB: "0" };
+function attArgs(att?: RelayAttestation, sig?: string): [RelayAttestation, string] {
+  return [att ?? ZERO_ATT, sig ?? "0x"];
+}
 
 // ── Nonce manager ─────────────────────────────────────────────────────────────
 //
@@ -24,12 +41,28 @@ const VAULT_ABI = [
 class NonceManager {
   private nonce: number | null = null;
   private lastSeenBlock = 0;
+  // API-007: serialize acquisition through a promise-chain mutex so two concurrent
+  // first-calls cannot both observe nonce === null and both seed from the same
+  // getTransactionCount, reusing one slot and dropping a transaction.
+  private lock: Promise<void> = Promise.resolve();
 
   async getAndIncrement(provider: ethers.JsonRpcProvider, address: string): Promise<number> {
-    if (this.nonce === null) {
-      this.nonce = await provider.getTransactionCount(address, "pending");
-    }
-    return this.nonce++;
+    let allocated!: number;
+    // Chain the seed+increment so only one critical section runs at a time.
+    const run = this.lock.then(async () => {
+      if (this.nonce === null) {
+        this.nonce = await provider.getTransactionCount(address, "pending");
+      }
+      allocated = this.nonce++;
+    });
+    // Keep the chain alive even if this acquisition throws, so a failed seed
+    // doesn't permanently wedge subsequent callers.
+    this.lock = run.then(
+      () => undefined,
+      () => undefined,
+    );
+    await run;
+    return allocated;
   }
 
   // Call when a tx was never broadcast (e.g. estimateGas failed) so the nonce
@@ -148,7 +181,7 @@ export async function relayAuthorizeBet(proof: string, inputs: unknown): Promise
   return tx.hash;
 }
 
-export async function relayCreditSettlement(proof: string, inputs: unknown): Promise<string> {
+export async function relayCreditSettlement(proof: string, inputs: unknown, att?: RelayAttestation, sig?: string): Promise<string> {
   const start = Date.now();
   const inp = inputs as Record<string, unknown>;
   logger.info({
@@ -158,10 +191,11 @@ export async function relayCreditSettlement(proof: string, inputs: unknown): Pro
     nullifier_prefix: typeof inp["nullifier"] === "string" ? (inp["nullifier"] as string).slice(0, 10) : undefined,
   }, "relay:creditSettlement:start");
 
+  const [a, s] = attArgs(att, sig);
   const tx = await sendWithNonce((nonce) =>
     (vault as ethers.Contract & {
-      creditSettlement: (p: string, i: unknown, o: ethers.Overrides) => Promise<ethers.TransactionResponse>
-    }).creditSettlement(proof, inputs, { nonce }),
+      creditSettlement: (p: string, i: unknown, att: unknown, sig: string, o: ethers.Overrides) => Promise<ethers.TransactionResponse>
+    }).creditSettlement(proof, inputs, a, s, { nonce }),
   );
 
   logger.info({ event: "relay:creditSettlement:tx_sent", txHash: tx.hash, nonce: tx.nonce, elapsed_ms: Date.now() - start }, "relay:creditSettlement:tx_sent");
@@ -191,7 +225,7 @@ export async function relayWithdraw(proof: string, inputs: unknown, recipientAdd
   return tx.hash;
 }
 
-export async function relayBetCancellationCredit(proof: string, inputs: unknown): Promise<string> {
+export async function relayBetCancellationCredit(proof: string, inputs: unknown, att?: RelayAttestation, sig?: string): Promise<string> {
   const start = Date.now();
   const inp = inputs as Record<string, unknown>;
   logger.info({
@@ -201,10 +235,11 @@ export async function relayBetCancellationCredit(proof: string, inputs: unknown)
     nullifier_prefix: typeof inp["nullifier"] === "string" ? (inp["nullifier"] as string).slice(0, 10) : undefined,
   }, "relay:betCancellationCredit:start");
 
+  const [a, s] = attArgs(att, sig);
   const tx = await sendWithNonce((nonce) =>
     (vault as ethers.Contract & {
-      betCancellationCredit: (p: string, i: unknown, o: ethers.Overrides) => Promise<ethers.TransactionResponse>
-    }).betCancellationCredit(proof, inputs, { nonce }),
+      betCancellationCredit: (p: string, i: unknown, att: unknown, sig: string, o: ethers.Overrides) => Promise<ethers.TransactionResponse>
+    }).betCancellationCredit(proof, inputs, a, s, { nonce }),
   );
 
   logger.info({ event: "relay:betCancellationCredit:tx_sent", txHash: tx.hash, nonce: tx.nonce, elapsed_ms: Date.now() - start }, "relay:betCancellationCredit:tx_sent");
@@ -212,7 +247,7 @@ export async function relayBetCancellationCredit(proof: string, inputs: unknown)
   return tx.hash;
 }
 
-export async function relayNACancellationCredit(proof: string, inputs: unknown): Promise<string> {
+export async function relayNACancellationCredit(proof: string, inputs: unknown, att?: RelayAttestation, sig?: string): Promise<string> {
   const start = Date.now();
   const inp = inputs as Record<string, unknown>;
   logger.info({
@@ -222,10 +257,11 @@ export async function relayNACancellationCredit(proof: string, inputs: unknown):
     nullifier_prefix: typeof inp["nullifier"] === "string" ? (inp["nullifier"] as string).slice(0, 10) : undefined,
   }, "relay:naCancellationCredit:start");
 
+  const [a, s] = attArgs(att, sig);
   const tx = await sendWithNonce((nonce) =>
     (vault as ethers.Contract & {
-      naCancellationCredit: (p: string, i: unknown, o: ethers.Overrides) => Promise<ethers.TransactionResponse>
-    }).naCancellationCredit(proof, inputs, { nonce }),
+      naCancellationCredit: (p: string, i: unknown, att: unknown, sig: string, o: ethers.Overrides) => Promise<ethers.TransactionResponse>
+    }).naCancellationCredit(proof, inputs, a, s, { nonce }),
   );
 
   logger.info({ event: "relay:naCancellationCredit:tx_sent", txHash: tx.hash, nonce: tx.nonce, elapsed_ms: Date.now() - start }, "relay:naCancellationCredit:tx_sent");
@@ -235,7 +271,7 @@ export async function relayNACancellationCredit(proof: string, inputs: unknown):
 
 // FC-1: relay a position-close credit proof. sell_proceeds is Vault-injected from
 // the operator's reportSold, so the relay only forwards proof + the 4 public inputs.
-export async function relayClosePosition(proof: string, inputs: unknown): Promise<string> {
+export async function relayClosePosition(proof: string, inputs: unknown, att?: RelayAttestation, sig?: string): Promise<string> {
   const start = Date.now();
   const inp = inputs as Record<string, unknown>;
   logger.info({
@@ -245,10 +281,11 @@ export async function relayClosePosition(proof: string, inputs: unknown): Promis
     nullifier_prefix: typeof inp["nullifier"] === "string" ? (inp["nullifier"] as string).slice(0, 10) : undefined,
   }, "relay:closePosition:start");
 
+  const [a, s] = attArgs(att, sig);
   const tx = await sendWithNonce((nonce) =>
     (vault as ethers.Contract & {
-      closePosition: (p: string, i: unknown, o: ethers.Overrides) => Promise<ethers.TransactionResponse>
-    }).closePosition(proof, inputs, { nonce }),
+      closePosition: (p: string, i: unknown, att: unknown, sig: string, o: ethers.Overrides) => Promise<ethers.TransactionResponse>
+    }).closePosition(proof, inputs, a, s, { nonce }),
   );
 
   logger.info({ event: "relay:closePosition:tx_sent", txHash: tx.hash, nonce: tx.nonce, elapsed_ms: Date.now() - start }, "relay:closePosition:tx_sent");
@@ -259,7 +296,7 @@ export async function relayClosePosition(proof: string, inputs: unknown): Promis
 // FC-4: relay a partial-fill credit proof. refund_amount (bet_amount - spent_amount)
 // is Vault-injected from the operator's reportPartialFill, so the relay only forwards
 // the proof + the 4 public inputs (same shape as betCancellationCredit).
-export async function relayPartialFillCredit(proof: string, inputs: unknown): Promise<string> {
+export async function relayPartialFillCredit(proof: string, inputs: unknown, att?: RelayAttestation, sig?: string): Promise<string> {
   const start = Date.now();
   const inp = inputs as Record<string, unknown>;
   logger.info({
@@ -269,13 +306,45 @@ export async function relayPartialFillCredit(proof: string, inputs: unknown): Pr
     nullifier_prefix: typeof inp["nullifier"] === "string" ? (inp["nullifier"] as string).slice(0, 10) : undefined,
   }, "relay:partialFillCredit:start");
 
+  const [a, s] = attArgs(att, sig);
   const tx = await sendWithNonce((nonce) =>
     (vault as ethers.Contract & {
-      partialFillCredit: (p: string, i: unknown, o: ethers.Overrides) => Promise<ethers.TransactionResponse>
-    }).partialFillCredit(proof, inputs, { nonce }),
+      partialFillCredit: (p: string, i: unknown, att: unknown, sig: string, o: ethers.Overrides) => Promise<ethers.TransactionResponse>
+    }).partialFillCredit(proof, inputs, a, s, { nonce }),
   );
 
   logger.info({ event: "relay:partialFillCredit:tx_sent", txHash: tx.hash, nonce: tx.nonce, elapsed_ms: Date.now() - start }, "relay:partialFillCredit:tx_sent");
   trackReceipt("relay:partialFillCredit", tx, start);
+  return tx.hash;
+}
+
+// FC-8: relay a note-consolidation proof. Merges up to 4 same-owner notes into one.
+// `inputs.nullifiers` is a length-4 array (zeros for inactive slots); it maps to the
+// Vault tuple's `nullifier` (bytes32[4]) field positionally.
+export async function relayConsolidate(
+  proof: string,
+  inputs: { merkle_root: string; nullifiers: string[]; new_commitment: string },
+): Promise<string> {
+  const start = Date.now();
+  logger.info({
+    event: "relay:consolidate:start",
+    proof_bytes: proofBytes(proof),
+    proof_fingerprint: fingerprint(proof),
+    active_inputs: inputs.nullifiers.filter((n) => n !== ethers.ZeroHash).length,
+  }, "relay:consolidate:start");
+
+  const tuple = {
+    merkle_root: inputs.merkle_root,
+    nullifier: inputs.nullifiers,
+    new_commitment: inputs.new_commitment,
+  };
+  const tx = await sendWithNonce((nonce) =>
+    (vault as ethers.Contract & {
+      consolidate: (p: string, i: unknown, o: ethers.Overrides) => Promise<ethers.TransactionResponse>
+    }).consolidate(proof, tuple, { nonce }),
+  );
+
+  logger.info({ event: "relay:consolidate:tx_sent", txHash: tx.hash, nonce: tx.nonce, elapsed_ms: Date.now() - start }, "relay:consolidate:tx_sent");
+  trackReceipt("relay:consolidate", tx, start);
   return tx.hash;
 }

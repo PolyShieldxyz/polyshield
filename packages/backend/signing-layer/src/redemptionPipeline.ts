@@ -2,6 +2,7 @@ import { ethers } from "ethers";
 import pino from "pino";
 import { config } from "./config";
 import { signingLayerNonceManager } from "./nonceManager";
+import { getDepositWalletExecutor, DepositWalletExecutor, WalletCall } from "./depositWalletExecutor";
 
 const logger = pino({ name: "redemption-pipeline" });
 
@@ -18,6 +19,8 @@ const CTF_ABI = [
 const VAULT_ABI = [
   "function resolveMarket(bytes32 market_id) external",
   "function pendingCredit(bytes32 market_id, uint8 outcome_side) view returns (uint64)",
+  "function deployedToPolymarket() view returns (uint256)",
+  "function acknowledgePolymarketReturn(uint256 amount) external",
   // M2: outcome_side now included in BetAuthorized event — avoids per-bet betRecords() RPC call.
   "event BetAuthorized(bytes32 indexed nullifier, bytes32 market_id, bytes32 position_id, uint64 expected_shares, uint256 bet_amount, uint64 price, uint8 outcome_side, bytes32 new_commitment)",
 ];
@@ -31,30 +34,6 @@ const ERC20_ABI = [
 ];
 
 const OFFRAMP_ABI = ["function withdraw(uint256 amount) external"];
-
-/**
- * Return a signer for the deposit wallet.
- * In local dev: uses DEPOSIT_WALLET_KEY to sign transactions directly.
- * In production: wallet actions must go through the Polymarket relayer WALLET batch
- * (see BUG-H2 in collateral-flow-audit.md). The fallback to operatorWallet is intentional
- * only as a last-resort guard to surface a clear error rather than silently no-op.
- */
-function depositWalletSigner(
-  provider: ethers.JsonRpcProvider,
-  operatorWallet: ethers.Wallet
-): ethers.Wallet {
-  if (config.depositWalletKey) {
-    return new ethers.Wallet(config.depositWalletKey, provider);
-  }
-  // Production path: relayer WALLET batch not yet implemented. Log a clear error so it's
-  // not silently skipped. Callers should gate on this before proceeding.
-  logger.error(
-    "DEPOSIT_WALLET_KEY not set and relayer client not configured — " +
-    "deposit wallet transactions will be sent from operator EOA (WRONG in production). " +
-    "Set DEPOSIT_WALLET_KEY for local dev or wire the Polymarket relayer for production."
-  );
-  return operatorWallet;
-}
 
 async function hasVaultShares(
   ctf: ethers.Contract,
@@ -111,17 +90,12 @@ async function computeRedemptionAmount(
 }
 
 /**
- * C2 + H2 fix: all pUSD operations (approve, offramp withdraw, USDC transfer to vault)
- * must originate from the deposit wallet, not the operator EOA.
- *
- * Local dev: uses DEPOSIT_WALLET_KEY to sign directly.
- * Production: must use Polymarket relayer WALLET batch (not yet implemented — see H2).
+ * C2 + H2: all pUSD operations (approve, offramp withdraw, USDC transfer to vault)
+ * must originate from the deposit wallet, executed as a single relayer WALLET batch.
+ * The DepositWalletExecutor runs the same path against the mock relayer locally and
+ * the Polymarket builder relayer in production.
  */
-async function offrampPusdToVault(
-  provider: ethers.JsonRpcProvider,
-  operatorWallet: ethers.Wallet,
-  amount: bigint
-): Promise<void> {
+async function offrampPusdToVault(executor: DepositWalletExecutor, amount: bigint): Promise<void> {
   if (!config.offrampAddress || config.offrampAddress === ethers.ZeroAddress) {
     logger.warn("offramp address not set — skipping offramp step");
     return;
@@ -132,45 +106,34 @@ async function offrampPusdToVault(
     return;
   }
 
-  const dwSigner = depositWalletSigner(provider, operatorWallet);
-  let dwNonce = await provider.getTransactionCount(dwSigner.address);
+  const erc20Iface = new ethers.Interface(ERC20_ABI);
+  const offrampIface = new ethers.Interface(OFFRAMP_ABI);
+  const calls: WalletCall[] = [
+    // 1) approve offramp to pull pUSD from the deposit wallet
+    { target: config.pusdAddress, value: 0n, data: erc20Iface.encodeFunctionData("approve", [config.offrampAddress, amount]) },
+    // 2) offramp.withdraw — burns pUSD, sends USDC to the deposit wallet
+    { target: config.offrampAddress, value: 0n, data: offrampIface.encodeFunctionData("withdraw", [amount]) },
+    // 3) transfer USDC from the deposit wallet to the Vault
+    { target: config.usdcAddress, value: 0n, data: erc20Iface.encodeFunctionData("transfer", [config.vaultContractAddress, amount]) },
+  ];
 
-  const pusd = new ethers.Contract(config.pusdAddress, ERC20_ABI, dwSigner);
-  const offramp = new ethers.Contract(config.offrampAddress, OFFRAMP_ABI, dwSigner);
-  const usdc = new ethers.Contract(config.usdcAddress, ERC20_ABI, dwSigner);
-
-  // Step 1: approve offramp to spend pUSD from depositWallet
-  logger.info({ amount: amount.toString() }, "offramp step 1: approve pUSD from depositWallet");
-  await (await pusd.approve(config.offrampAddress, amount, { nonce: dwNonce++ })).wait(1);
-
-  // Step 2: call offramp.withdraw — burns pUSD, sends USDC to depositWallet
-  logger.info({ amount: amount.toString() }, "offramp step 2: withdraw → depositWallet receives USDC");
-  await (await offramp.withdraw(amount, { nonce: dwNonce++ })).wait(1);
-
-  // Step 3: transfer USDC from depositWallet to Vault
-  logger.info({ amount: amount.toString() }, "offramp step 3: transfer USDC to Vault");
-  const tx = await usdc.transfer(config.vaultContractAddress, amount, { nonce: dwNonce++ });
-  await tx.wait(1);
-
-  logger.info({ amount: amount.toString(), txHash: tx.hash }, "offramp complete — USDC in vault");
+  logger.info({ amount: amount.toString() }, "offramp: approve → withdraw → transfer-to-vault via WALLET batch");
+  await executor.executeBatch(calls);
+  logger.info({ amount: amount.toString() }, "offramp complete — USDC in vault");
 }
 
 /**
- * M1 fix: derive index sets from the number of outcome slots rather than hardcoding [1, 2].
- * Direct on-chain redemption via deposit wallet — Q18 fallback for local dev.
- * In production this must be submitted as a relayer WALLET batch (see BUG-H2).
+ * Redeem winning CTF shares from the deposit wallet via the executor (relayer WALLET
+ * batch in production, mock relayer locally). M1: index sets derived from outcome count.
  */
-async function tryDirectDepositWalletRedeem(
-  provider: ethers.JsonRpcProvider,
-  operatorWallet: ethers.Wallet,
+async function redeemViaExecutor(
+  executor: DepositWalletExecutor,
   conditionId: string,
   numerators: bigint[]
 ): Promise<boolean> {
   if (!config.depositWalletAddress || !config.pusdAddress) return false;
 
-  // Derive index sets from outcome count — fixes M1 hardcoded [1, 2].
   const indexSets = Array.from({ length: numerators.length }, (_, i) => 1 << i);
-
   const ctfIface = new ethers.Interface(CTF_ABI);
   const redeemData = ctfIface.encodeFunctionData("redeemPositions", [
     config.pusdAddress,
@@ -179,55 +142,15 @@ async function tryDirectDepositWalletRedeem(
     indexSets,
   ]);
 
-  const dwSigner = depositWalletSigner(provider, operatorWallet);
-
   try {
-    logger.warn({ conditionId, indexSets }, "B3 fallback: calling redeemPositions from depositWallet");
-
-    if (config.depositWalletKey) {
-      // Local dev: deposit wallet is an EOA — call CTF directly, no execute() wrapper needed.
-      const ctf = new ethers.Contract(config.ctfAddress, CTF_ABI, dwSigner);
-      const dwNonce = await provider.getTransactionCount(dwSigner.address);
-      const tx = await ctf.redeemPositions(
-        config.pusdAddress, ZERO_BYTES32, conditionId, indexSets, { nonce: dwNonce }
-      );
-      await tx.wait(1);
-      logger.info({ conditionId, txHash: tx.hash }, "redeemPositions confirmed from depositWallet EOA");
-    } else {
-      // Production: deposit wallet is an ERC-1967 proxy — must use relayer WALLET batch.
-      // TODO (H2): submit via @polymarket/builder-relayer-client instead.
-      // For now attempt the legacy execute() interface and log clearly if it fails.
-      const depositWalletContract = new ethers.Contract(
-        config.depositWalletAddress,
-        ["function execute(address to, uint256 value, bytes calldata data) external returns (bytes memory)"],
-        dwSigner
-      );
-      const dwNonce = await provider.getTransactionCount(dwSigner.address);
-      const tx = await depositWalletContract.execute(config.ctfAddress, 0, redeemData, { nonce: dwNonce });
-      await tx.wait(1);
-      logger.info({ conditionId, txHash: tx.hash }, "B3 fallback: execute confirmed");
-    }
+    logger.info({ conditionId, indexSets, executor: executor.kind }, "redeem: redeemPositions via deposit-wallet executor");
+    await executor.execute({ target: config.ctfAddress, value: 0n, data: redeemData });
+    logger.info({ conditionId }, "redeem: redeemPositions confirmed");
     return true;
   } catch (err) {
-    logger.warn({ err, conditionId }, "B3 fallback: redeemPositions from depositWallet failed");
+    logger.warn({ err, conditionId }, "redeem: redeemPositions via executor failed");
     return false;
   }
-}
-
-async function runRelayerRedeemWithTimeout(
-  provider: ethers.JsonRpcProvider,
-  wallet: ethers.Wallet,
-  conditionId: string,
-  startedBlock: number,
-  numerators: bigint[]
-): Promise<boolean> {
-  // Relayer integration placeholder — production uses @polymarket/builder-relayer-client.
-  const current = await provider.getBlockNumber();
-  if (current - startedBlock >= config.redemptionRelayTimeoutBlocks) {
-    return tryDirectDepositWalletRedeem(provider, wallet, conditionId, numerators);
-  }
-  logger.info({ conditionId }, "Relayer redeem not configured — will use direct fallback on next retry");
-  return false;
 }
 
 /**
@@ -238,7 +161,7 @@ export async function runRedemptionPipeline(
   provider: ethers.JsonRpcProvider,
   operatorWallet: ethers.Wallet,
   conditionId: string,
-  eventBlock: number
+  _eventBlock: number
 ): Promise<void> {
   const vault = new ethers.Contract(config.vaultContractAddress, VAULT_ABI, operatorWallet);
   const ctf = new ethers.Contract(config.ctfAddress, CTF_ABI, provider);
@@ -265,16 +188,14 @@ export async function runRedemptionPipeline(
   // Determine winning outcome side: YES=0 if numerators[0]>0, else NO=1.
   const winningSide = numerators[0] > 0n ? 0 : 1;
 
+  const executor = getDepositWalletExecutor(provider);
   const usdcBefore: bigint = await usdcRo.balanceOf(config.vaultContractAddress);
   const positionIds = await collectPositionIds(provider, config.vaultContractAddress, conditionId);
   const hasShares = await hasVaultShares(ctf, conditionId, positionIds);
 
   try {
     if (hasShares) {
-      const redeemed = await runRelayerRedeemWithTimeout(provider, operatorWallet, conditionId, eventBlock, numerators);
-      if (!redeemed) {
-        await tryDirectDepositWalletRedeem(provider, operatorWallet, conditionId, numerators);
-      }
+      await redeemViaExecutor(executor, conditionId, numerators);
 
       // C3 fix: use expected_shares of winning-side bets, not bet_amount of all bets.
       const redemptionAmount = await computeRedemptionAmount(
@@ -283,7 +204,7 @@ export async function runRedemptionPipeline(
         conditionId,
         winningSide
       );
-      await offrampPusdToVault(provider, operatorWallet, redemptionAmount);
+      await offrampPusdToVault(executor, redemptionAmount);
     } else {
       logger.warn(
         { conditionId },
@@ -298,6 +219,22 @@ export async function runRedemptionPipeline(
       throw new Error(
         `Vault USDC did not increase after redemption (before=${usdcBefore} after=${usdcAfter})`
       );
+    }
+
+    // Acknowledge returned capital so deployedToPolymarket decrements. Use the measured
+    // USDC delta (robust to rounding), clamped to the currently-deployed amount. The
+    // residual buffer left by no-fills is intentionally NOT acknowledged here.
+    const returned = usdcAfter - usdcBefore;
+    if (returned > 0n) {
+      const deployed: bigint = await vault.deployedToPolymarket();
+      const ack = returned < deployed ? returned : deployed;
+      if (ack > 0n) {
+        const ackTx = await signingLayerNonceManager.send(provider, operatorWallet, (nonce) =>
+          vault.acknowledgePolymarketReturn(ack, { nonce }),
+        );
+        await ackTx.wait(1);
+        logger.info({ ack: ack.toString() }, "acknowledgePolymarketReturn confirmed");
+      }
     }
 
     logger.info({ conditionId }, "Calling Vault.resolveMarket");

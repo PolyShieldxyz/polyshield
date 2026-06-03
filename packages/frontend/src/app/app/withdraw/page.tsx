@@ -14,8 +14,10 @@ import {
   formatUsdc,
   markNoteSpent,
   recordWalletActivity,
+  selectNotesForAmount,
   type Note,
 } from '@/lib/notes'
+import { consolidateNotes } from '@/lib/consolidate'
 import { usePortfolioState } from '@/lib/accountState'
 import {
   fetchMerklePath,
@@ -104,15 +106,29 @@ export default function WithdrawPage() {
     setTxHash('')
 
     try {
+      // FC-8: a single note need not cover the amount — merge up to 4 notes first.
+      let spendNote = cashNote
+      if (requestedAmount > spendNote.balance) {
+        const sel = selectNotesForAmount(address, requestedAmount)
+        if (!sel.ok) throw new Error(sel.error)
+        setStatusMsg('Step 1 of 2: merging notes…')
+        spendNote = await consolidateNotes({
+          wallet: address,
+          signMessageAsync,
+          notes: sel.selection.notes,
+          onProgress: setStatusMsg,
+        })
+      }
+
       const recipient = address
       const recipientField = `0x${BigInt(recipient).toString(16).padStart(64, '0')}` as `0x${string}`
       const recipientHash = computeRecipientHash(recipient)
 
-      const secret = await deriveSecret(signMessageAsync, address, cashNote.depositIndex)
+      const secret = await deriveSecret(signMessageAsync, address, spendNote.depositIndex)
       setStatusMsg('Fetching Merkle path...')
       let merkle
       try {
-        merkle = await fetchMerklePath(cashNote.commitment)
+        merkle = await fetchMerklePath(spendNote.commitment)
       } catch (e) {
         const msg = e instanceof Error ? e.message : String(e)
         if (msg.includes('not found')) {
@@ -121,8 +137,8 @@ export default function WithdrawPage() {
         throw e
       }
 
-      const remainingBalance = cashNote.balance - requestedAmount
-      const nextNonce = cashNote.nonce + 1n
+      const remainingBalance = spendNote.balance - requestedAmount
+      const nextNonce = spendNote.nonce + 1n
       const newCommitment =
         remainingBalance > 0n
           ? computeCommitment(secret, remainingBalance, nextNonce, address)
@@ -133,14 +149,14 @@ export default function WithdrawPage() {
         type: 'withdrawal',
         inputs: {
           secret,
-          final_balance: cashNote.balance,
-          nonce: cashNote.nonce,
+          final_balance: spendNote.balance,
+          nonce: spendNote.nonce,
           merkle_path: merkle.path,
           merkle_path_indices: merkle.pathIndices,
           owner_address: address,
           recipient_address: recipientField,
           merkle_root: merkle.root,
-          nullifier: cashNote.nullifier,
+          nullifier: spendNote.nullifier,
           withdrawal_amount: requestedAmount,
           recipient_hash: recipientHash,
           new_commitment: newCommitment,
@@ -149,7 +165,7 @@ export default function WithdrawPage() {
 
       const inputs: RelayWithdrawalInputs = {
         merkle_root: merkle.root,
-        nullifier: cashNote.nullifier,
+        nullifier: spendNote.nullifier,
         withdrawal_amount: requestedAmount.toString(),
         recipient_hash: recipientHash,
         new_commitment: newCommitment,
@@ -169,8 +185,8 @@ export default function WithdrawPage() {
       setStatusMsg('Waiting for on-chain confirmation...')
       await waitForTransactionConfirmation(nextTxHash as `0x${string}`)
 
-      // Mark the old cash note spent and materialize the remainder note locally.
-      markNoteSpent(cashNote.commitment)
+      // Mark the spent note (the merged note, if we consolidated) and materialize the remainder.
+      markNoteSpent(spendNote.commitment)
       recordWalletActivity({
         id: `withdrawal-${nextTxHash}`,
         wallet: address,
@@ -186,7 +202,7 @@ export default function WithdrawPage() {
           id: newCommitment,
           kind: 'BET_OUTPUT',
           owner_address: address,
-          depositIndex: cashNote.depositIndex,
+          depositIndex: spendNote.depositIndex,
           balance: remainingBalance,
           nonce: nextNonce,
           commitment: newCommitment,
@@ -244,6 +260,7 @@ export default function WithdrawPage() {
                 value={amountInput}
                 onChange={(event) => setAmountInput(event.target.value)}
                 placeholder="0.00"
+                aria-label="Withdrawal amount in USDC"
                 disabled={status === 'running' || loading || !cashNote}
                 style={{
                   flex: 1,

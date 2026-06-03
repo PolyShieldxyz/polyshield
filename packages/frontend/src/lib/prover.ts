@@ -149,9 +149,25 @@ export interface PositionCloseInputs {
   sell_proceeds: bigint
 }
 
+/** FC-8: consolidate up to 4 same-owner notes into one. Arrays are length-4; inactive
+ *  slots have is_active=0 (and nullifier "0"), and their other fields may be dummy zeros. */
+export interface ConsolidateInputs {
+  secret: string[]               // length 4
+  balance: bigint[]              // length 4
+  nonce: bigint[]                // length 4
+  merkle_path: string[][]        // [4][32]
+  merkle_path_indices: number[][] // [4][32]
+  is_active: number[]            // length 4 (0 or 1; slot 0 must be 1)
+  owner_address: string
+  // public
+  merkle_root: string
+  nullifier: string[]            // length 4 (inactive slots "0")
+  new_commitment: string
+}
+
 // ── Internals ────────────────────────────────────────────────────────────────
 
-const CIRCUIT_NAMES = ['bet_auth', 'withdrawal', 'settlement_credit', 'bet_cancel', 'cancel_credit', 'deposit', 'position_close', 'partial_credit'] as const
+const CIRCUIT_NAMES = ['bet_auth', 'withdrawal', 'settlement_credit', 'bet_cancel', 'cancel_credit', 'deposit', 'position_close', 'partial_credit', 'consolidate'] as const
 type CircuitName = typeof CIRCUIT_NAMES[number]
 
 const wasmCache = new Map<CircuitName, Promise<Uint8Array>>()
@@ -197,7 +213,7 @@ function signalToHex(sig: string): string {
   return `0x${BigInt(sig).toString(16).padStart(64, '0')}`
 }
 
-type SnarkjsInputs = Record<string, string | string[]>
+type SnarkjsInputs = Record<string, string | string[] | string[][]>
 
 async function prove(name: CircuitName, inputs: SnarkjsInputs): Promise<ProofResult> {
   ensurePreloaded(name)
@@ -209,7 +225,9 @@ async function prove(name: CircuitName, inputs: SnarkjsInputs): Promise<ProofRes
   ])
 
   const { proof, publicSignals } = await snarkjs.groth16.fullProve(
-    inputs,
+    // snarkjs accepts nested arrays (e.g. consolidate's merkle_path[4][32]) at runtime;
+    // its TS signature is narrower, so cast through unknown.
+    inputs as unknown as Record<string, string | string[]>,
     { type: 'mem', data: wasm },
     { type: 'mem', data: zkey },
   )
@@ -222,20 +240,27 @@ async function prove(name: CircuitName, inputs: SnarkjsInputs): Promise<ProofRes
 
 // ── Lifecycle ─────────────────────────────────────────────────────────────────
 
+// FINDING: PERF-001 — only the circuits needed for the entry flow are preloaded.
+// Eagerly fetching all 8 circuits pulled ~90 MB on app entry; the remaining
+// circuits are fetched lazily by ensurePreloaded() the first time prove() needs
+// them. Long-lived immutable caching (next.config.js headers) keeps repeat loads
+// instant.
+const PRELOAD_CIRCUITS: readonly CircuitName[] = ['deposit', 'bet_auth']
+
 /**
- * Eagerly fetch all circuit .wasm and .zkey files in the background.
- * Call once at app entry. Fires-and-forgets — the user can still prove before
- * completion (assets will just be fetched on-demand at that point).
+ * Fetch the entry-flow circuit .wasm and .zkey files in the background.
+ * Call once at app entry. Fires-and-forgets — the user can still prove with any
+ * circuit before completion (other assets are fetched on-demand at that point).
  */
 export function initProver(): void {
-  // Kick off all 5 × 2 = 10 asset fetches in parallel
-  for (const name of CIRCUIT_NAMES) ensurePreloaded(name)
+  // Kick off the entry-flow asset fetches in parallel; others load on demand.
+  for (const name of PRELOAD_CIRCUITS) ensurePreloaded(name)
 
   void (async () => {
     try {
       await Promise.all([
-        ...CIRCUIT_NAMES.map(n => wasmCache.get(n)!),
-        ...CIRCUIT_NAMES.map(n => zkeyCache.get(n)!),
+        ...PRELOAD_CIRCUITS.map(n => wasmCache.get(n)!),
+        ...PRELOAD_CIRCUITS.map(n => zkeyCache.get(n)!),
       ])
       _isReady = true
       _readyCallbacks.splice(0).forEach(cb => cb())
@@ -387,6 +412,21 @@ export async function generatePartialCreditProof(inputs: PartialCreditInputs): P
   })
 }
 
+export async function generateConsolidateProof(inputs: ConsolidateInputs): Promise<ProofResult> {
+  return prove('consolidate', {
+    secret:               inputs.secret,
+    balance:              inputs.balance.map(String),
+    nonce:                inputs.nonce.map(String),
+    merkle_path:          inputs.merkle_path,
+    merkle_path_indices:  inputs.merkle_path_indices.map((arr) => arr.map(String)),
+    is_active:            inputs.is_active.map(String),
+    owner_address:        inputs.owner_address,
+    merkle_root:          inputs.merkle_root,
+    nullifier:            inputs.nullifier,
+    new_commitment:       inputs.new_commitment,
+  })
+}
+
 // ── Web Worker proof runner ───────────────────────────────────────────────────
 
 import type { ProverWorkerMessage, ProverWorkerResult } from '../workers/prover.worker'
@@ -446,5 +486,6 @@ function runProofMainThread(message: ProverWorkerMessage): Promise<ProofResult> 
     case 'deposit':        return generateDepositProof(message.inputs)
     case 'position_close': return generatePositionCloseProof(message.inputs)
     case 'partial_credit': return generatePartialCreditProof(message.inputs)
+    case 'consolidate':    return generateConsolidateProof(message.inputs)
   }
 }

@@ -188,6 +188,49 @@ export function getCurrentCashNote(wallet: `0x${string}`): Note | null {
   return freeNotes.sort((a, b) => (a.balance > b.balance ? -1 : 1))[0] ?? null
 }
 
+/** Max input notes a single consolidate proof can merge (matches consolidate.circom K). */
+export const MAX_CONSOLIDATE_INPUTS = 4
+
+export interface NoteSelection {
+  notes: Note[]
+  total: bigint
+}
+
+/**
+ * FC-8: pick up to MAX_CONSOLIDATE_INPUTS free notes (largest-first) whose balances
+ * sum to >= `amount`, for a consolidate-then-spend flow. Returns an error when even the
+ * largest 4 notes cannot cover the amount in one merge. The largest selected note is
+ * placed first (slot 0) so the merged note continues its lineage.
+ */
+export function selectNotesForAmount(
+  wallet: `0x${string}`,
+  amount: bigint,
+): { ok: true; selection: NoteSelection } | { ok: false; error: string } {
+  const free = getFreeNotes(wallet).sort((a, b) => (a.balance > b.balance ? -1 : 1))
+  if (free.length === 0) return { ok: false, error: 'No spendable notes.' }
+
+  const picked: Note[] = []
+  let total = 0n
+  for (const n of free) {
+    if (total >= amount) break
+    if (picked.length >= MAX_CONSOLIDATE_INPUTS) break
+    picked.push(n)
+    total += n.balance
+  }
+
+  if (total < amount) {
+    const top = free.slice(0, MAX_CONSOLIDATE_INPUTS).reduce((s, n) => s + n.balance, 0n)
+    return {
+      ok: false,
+      error:
+        `This amount is split across too many notes to combine in one step ` +
+        `(your ${Math.min(free.length, MAX_CONSOLIDATE_INPUTS)} largest total ${top}, need ${amount}). ` +
+        `Withdraw or spend some notes to consolidate further, or use a smaller amount.`,
+    }
+  }
+  return { ok: true, selection: { notes: picked, total } }
+}
+
 /**
  * Return the current free note for a specific deposit index — i.e., the
  * highest-nonce unspent note in that deposit's chain. Used by settlement to
@@ -324,6 +367,25 @@ const betSoldEvent = parseAbiItem(
 const positionClosedEvent = parseAbiItem(
   'event PositionClosed(bytes32 indexed nullifier, bytes32 nullifier_of_bet, bytes32 new_commitment, bool fullClose)',
 )
+// FC-8: note consolidation. Carries all 4 input nullifiers (zeros for inactive slots)
+// and the merged output commitment, so recovery can merge the spent lineages.
+const consolidatedEvent = parseAbiItem(
+  'event Consolidated(bytes32[4] nullifiers, bytes32 new_commitment)',
+)
+
+// Chronological comparator for on-chain logs: by blockNumber, then by logIndex
+// within a block. Used both for the per-bet BetSold queue and for the merged
+// recovery event timeline, so operator-reported proceeds pair to the matching
+// PositionClosed even when several events land in the same block.
+export function byBlockThenLogIndex(
+  a: { blockNumber?: bigint | null; logIndex?: number | null },
+  b: { blockNumber?: bigint | null; logIndex?: number | null },
+): number {
+  const ab = a.blockNumber ?? 0n
+  const bb = b.blockNumber ?? 0n
+  if (ab === bb) return (a.logIndex ?? 0) - (b.logIndex ?? 0)
+  return Number(ab - bb)
+}
 
 /**
  * Reconstruct notes by scanning on-chain Vault events and replaying state per deposit index.
@@ -350,7 +412,7 @@ export async function recoverNotesWithClient(
   hardCap = 1000,
 ): Promise<Note[]> {
   const fromBlock = 0n
-  const [deposits, bets, settlements, betCancels, naCancels, withdrawals, betSolds, positionCloseds] =
+  const [deposits, bets, settlements, betCancels, naCancels, withdrawals, betSolds, positionCloseds, consolidations] =
     await Promise.all([
       client.getLogs({ address: vaultAddress, event: depositedEvent, args: { depositor: address }, fromBlock }),
       client.getLogs({ address: vaultAddress, event: betAuthorizedEvent, fromBlock }),
@@ -360,12 +422,13 @@ export async function recoverNotesWithClient(
       client.getLogs({ address: vaultAddress, event: withdrawnEvent, fromBlock }),
       client.getLogs({ address: vaultAddress, event: betSoldEvent, fromBlock }),
       client.getLogs({ address: vaultAddress, event: positionClosedEvent, fromBlock }),
+      client.getLogs({ address: vaultAddress, event: consolidatedEvent, fromBlock }),
     ])
 
   // FC-5 gap 4: real timestamps. Prefetch the block timestamp for every referenced
   // block once, so recovered notes/activity carry true on-chain times (not Date.now()).
   const blockNums = new Set<bigint>()
-  for (const e of [...deposits, ...bets, ...settlements, ...betCancels, ...naCancels, ...withdrawals, ...positionCloseds]) {
+  for (const e of [...deposits, ...bets, ...settlements, ...betCancels, ...naCancels, ...withdrawals, ...positionCloseds, ...consolidations]) {
     if (e.blockNumber != null) blockNums.add(e.blockNumber)
   }
   const tsByBlock = new Map<bigint, number>()
@@ -379,31 +442,45 @@ export async function recoverNotesWithClient(
   }))
   const tsOf = (bn?: bigint): number => (bn != null ? tsByBlock.get(bn) ?? Date.now() : Date.now())
 
-  // FC-1: queue of operator-reported sale proceeds per bet, consumed in block order
-  // by each PositionClosed (handles repeated partial closes against the same bet).
-  const soldByBet = new Map<string, Array<{ proceeds: bigint; soldShares: bigint }>>()
-  for (const s of [...betSolds].sort((a, b) => Number((a.blockNumber ?? 0n) - (b.blockNumber ?? 0n)))) {
-    const k = (s.args.nullifier_of_bet as string).toLowerCase()
-    const arr = soldByBet.get(k) ?? []
-    arr.push({ proceeds: s.args.proceeds as bigint, soldShares: s.args.sold_shares as bigint })
-    soldByBet.set(k, arr)
+  // FC-8: consolidate merges several lineages into one, so a single replay in
+  // deposit-index order can't know the merged balance (a contributor may have a
+  // higher index than slot 0). We replay twice: a DISCOVERY pass records each
+  // consolidate input's balance into balanceByNullifier (treating consolidate as a
+  // terminal spend), then a FINAL pass emits notes and resolves slot-0 sums from the
+  // now-complete map. Secrets are derived once (cached) so the wallet is prompted once
+  // per index. Nested consolidations (a merged note re-consolidated) are not tracked
+  // by the discovery pass and would under-count; that is an accepted v1 limitation.
+  const ZERO_NULL = `0x${'00'.repeat(32)}`.toLowerCase()
+  const balanceByNullifier = new Map<string, bigint>()
+
+  const buildSoldByBet = (): Map<string, Array<{ proceeds: bigint; soldShares: bigint }>> => {
+    // FC-1: queue of operator-reported sale proceeds per bet, consumed in block order
+    // by each PositionClosed (handles repeated partial closes against the same bet).
+    const m = new Map<string, Array<{ proceeds: bigint; soldShares: bigint }>>()
+    for (const s of [...betSolds].sort(byBlockThenLogIndex)) {
+      const k = (s.args.nullifier_of_bet as string).toLowerCase()
+      const arr = m.get(k) ?? []
+      arr.push({ proceeds: s.args.proceeds as bigint, soldShares: s.args.sold_shares as bigint })
+      m.set(k, arr)
+    }
+    return m
   }
 
-  const recovered: Note[] = []
-  const receiptByBetNullifier = new Map<string, Note>()
-  // FC-5 gap 1: rebuild the activity log from chain so realized P&L / history survive a wipe.
-  const activity: WalletActivityEvent[] = []
+  type ReplayOut = {
+    recovered: Note[]
+    activity: WalletActivityEvent[]
+    soldByBet: Map<string, Array<{ proceeds: bigint; soldShares: bigint }>>
+  }
 
-  let consecutiveEmpty = 0
-  for (let index = 0; index < hardCap && consecutiveEmpty < gapLimit; index++) {
-    const secret = await deriveSecret(signMessageAsync, address, index)
-    const deposit = deposits.find((d) => {
-      const amt = d.args.amount!
-      const c = computeCommitment(secret, amt, 0n, address)
-      return c.toLowerCase() === d.args.commitment!.toLowerCase()
-    })
-    if (!deposit) { consecutiveEmpty++; continue }
-    consecutiveEmpty = 0
+  const replayLineage = async (
+    index: number,
+    secret: `0x${string}`,
+    deposit: (typeof deposits)[number],
+    mode: 'discover' | 'final',
+    out: ReplayOut,
+  ): Promise<void> => {
+    const { recovered, activity, soldByBet } = out
+    const receiptByBetNullifier = new Map<string, Note>()
 
     const depositTs = tsOf(deposit.blockNumber ?? undefined)
     activity.push({
@@ -444,16 +521,20 @@ export async function recoverNotesWithClient(
     }
 
     const events = [
-      ...bets.map((e) => ({ type: 'bet' as const, block: e.blockNumber!, tx: e.transactionHash, args: e.args })),
-      ...settlements.map((e) => ({ type: 'settle' as const, block: e.blockNumber!, tx: e.transactionHash, args: e.args })),
-      ...betCancels.map((e) => ({ type: 'betCancel' as const, block: e.blockNumber!, tx: e.transactionHash, args: e.args })),
-      ...naCancels.map((e) => ({ type: 'naCancel' as const, block: e.blockNumber!, tx: e.transactionHash, args: e.args })),
-      ...positionCloseds.map((e) => ({ type: 'close' as const, block: e.blockNumber!, tx: e.transactionHash, args: e.args })),
+      ...bets.map((e) => ({ type: 'bet' as const, block: e.blockNumber!, idx: e.logIndex, tx: e.transactionHash, args: e.args })),
+      ...settlements.map((e) => ({ type: 'settle' as const, block: e.blockNumber!, idx: e.logIndex, tx: e.transactionHash, args: e.args })),
+      ...betCancels.map((e) => ({ type: 'betCancel' as const, block: e.blockNumber!, idx: e.logIndex, tx: e.transactionHash, args: e.args })),
+      ...naCancels.map((e) => ({ type: 'naCancel' as const, block: e.blockNumber!, idx: e.logIndex, tx: e.transactionHash, args: e.args })),
+      ...positionCloseds.map((e) => ({ type: 'close' as const, block: e.blockNumber!, idx: e.logIndex, tx: e.transactionHash, args: e.args })),
+      ...consolidations.map((e) => ({ type: 'consolidate' as const, block: e.blockNumber!, idx: e.logIndex, tx: e.transactionHash, args: e.args })),
       ...withdrawals
         .filter((e) => sameAddress(e.args.recipient!, address))
-        .map((e) => ({ type: 'withdraw' as const, block: e.blockNumber!, tx: e.transactionHash, args: e.args })),
+        .map((e) => ({ type: 'withdraw' as const, block: e.blockNumber!, idx: e.logIndex, tx: e.transactionHash, args: e.args })),
     ].sort((a, b) => {
+      // Match the per-bet BetSold queue ordering (block, then logIndex) so each
+      // PositionClosed consumes the proceeds reported for it; tx hash is a final tiebreak.
       if (a.block !== b.block) return Number(a.block - b.block)
+      if ((a.idx ?? 0) !== (b.idx ?? 0)) return (a.idx ?? 0) - (b.idx ?? 0)
       return (a.tx ?? '').localeCompare(b.tx ?? '')
     })
 
@@ -665,12 +746,93 @@ export async function recoverNotesWithClient(
           spent: false,
           createdAt: evTs,
         }
+      } else if (ev.type === 'consolidate') {
+        // FC-8: this lineage's current note is one of the (up to 4) consolidate inputs.
+        const nl = (ev.args.nullifiers as readonly string[]).map((n) => n.toLowerCase())
+        const cur = state.nullifier.toLowerCase()
+        if (!nl.includes(cur) || state.spent) continue
+
+        // Record this input's balance so a slot-0 lineage can sum the merged note.
+        balanceByNullifier.set(cur, state.balance)
+        state.spent = true
+        pushFree(state, ev.tx)
+
+        const slot0 = nl[0]
+        if (cur !== slot0 || mode === 'discover') {
+          // Contributor (non-slot-0), or discovery pass: lineage ends here. The merged
+          // note is materialized by slot 0's lineage in the final pass.
+          state = { ...state, spent: true }
+          continue
+        }
+
+        // Slot 0, final pass: continue the lineage with the merged balance.
+        let sum = 0n
+        for (const n of nl) {
+          if (n === ZERO_NULL) continue
+          sum += balanceByNullifier.get(n) ?? 0n
+        }
+        const mergedNonce = state.nonce + 1n
+        const mergedCommitment = ev.args.new_commitment as `0x${string}`
+        state = {
+          secret,
+          depositIndex: index,
+          balance: sum,
+          nonce: mergedNonce,
+          commitment: mergedCommitment,
+          nullifier: computeNullifier(secret, mergedNonce),
+          kind: 'BET_OUTPUT',
+          spent: false,
+          createdAt: evTs,
+        }
       }
     }
 
     if (!state.spent && state.balance > 0n) {
       pushFree(state, undefined)
     }
+  }
+
+  // Gap-scan to find this wallet's deposit indices. Secrets are derived once and cached
+  // so the two replay passes prompt the wallet only on the first pass.
+  const depositByIndex = new Map<number, (typeof deposits)[number]>()
+  const secretByIndex = new Map<number, `0x${string}`>()
+  let consecutiveEmpty = 0
+  for (let index = 0; index < hardCap && consecutiveEmpty < gapLimit; index++) {
+    const secret = await deriveSecret(signMessageAsync, address, index)
+    secretByIndex.set(index, secret)
+    const deposit = deposits.find((d) => {
+      const amt = d.args.amount!
+      const c = computeCommitment(secret, amt, 0n, address)
+      return c.toLowerCase() === d.args.commitment!.toLowerCase()
+    })
+    if (!deposit) { consecutiveEmpty++; continue }
+    consecutiveEmpty = 0
+    depositByIndex.set(index, deposit)
+  }
+  const indices = [...depositByIndex.keys()].sort((a, b) => a - b)
+
+  // Pass 1 (discovery): populate balanceByNullifier with consolidate input balances.
+  // Output is discarded; the only durable side effect is the balance map.
+  const discardR: Note[] = []
+  const discardA: WalletActivityEvent[] = []
+  const discardSold = buildSoldByBet()
+  for (const index of indices) {
+    await replayLineage(
+      index, secretByIndex.get(index)!, depositByIndex.get(index)!, 'discover',
+      { recovered: discardR, activity: discardA, soldByBet: discardSold },
+    )
+  }
+
+  // Pass 2 (final): emit notes + activity, resolving consolidate slot-0 sums.
+  const recovered: Note[] = []
+  // FC-5 gap 1: rebuild the activity log from chain so realized P&L / history survive a wipe.
+  const activity: WalletActivityEvent[] = []
+  const finalSold = buildSoldByBet()
+  for (const index of indices) {
+    await replayLineage(
+      index, secretByIndex.get(index)!, depositByIndex.get(index)!, 'final',
+      { recovered, activity, soldByBet: finalSold },
+    )
   }
 
   saveAll(recovered)

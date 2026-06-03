@@ -8,6 +8,7 @@ import {SettlementCreditVerifier} from "../src/verifiers/SettlementCreditVerifie
 import {WithdrawalVerifier}       from "../src/verifiers/WithdrawalVerifier.sol";
 import {BetCancelVerifier}        from "../src/verifiers/BetCancelVerifier.sol";
 import {CancelCreditVerifier}     from "../src/verifiers/CancelCreditVerifier.sol";
+import {DeployLib}                from "../script/DeployLib.sol";
 
 /// @notice On-chain verification gas benchmark for all 5 Polyshield Groth16 circuits.
 /// Proofs are ABI-encoded 256-byte Groth16 proofs loaded from bench_out/.
@@ -24,11 +25,12 @@ contract ZkGasBenchTest is Test {
     CancelCreditVerifier     v_cancel_credit;
 
     function setUp() public {
-        v_bet_auth      = new BetAuthVerifier();
-        v_settlement    = new SettlementCreditVerifier();
-        v_withdrawal    = new WithdrawalVerifier();
-        v_bet_cancel    = new BetCancelVerifier();
-        v_cancel_credit = new CancelCreditVerifier();
+        // UUPS verifiers: deploy impl + ERC1967 proxy (owner = address(this)).
+        v_bet_auth      = BetAuthVerifier(DeployLib.deployOwnedProxy(address(new BetAuthVerifier()), address(this)));
+        v_settlement    = SettlementCreditVerifier(DeployLib.deployOwnedProxy(address(new SettlementCreditVerifier()), address(this)));
+        v_withdrawal    = WithdrawalVerifier(DeployLib.deployOwnedProxy(address(new WithdrawalVerifier()), address(this)));
+        v_bet_cancel    = BetCancelVerifier(DeployLib.deployOwnedProxy(address(new BetCancelVerifier()), address(this)));
+        v_cancel_credit = CancelCreditVerifier(DeployLib.deployOwnedProxy(address(new CancelCreditVerifier()), address(this)));
     }
 
     // ── Public input builders ─────────────────────────────────────────────────

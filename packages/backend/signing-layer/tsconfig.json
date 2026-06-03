@@ -4,5 +4,7 @@
     "outDir": "dist",
     "rootDir": "src"
   },
-  "include": ["src/**/*"]
+  "include": ["src/**/*"],
+  "_comment": "Tests run via jest/ts-jest, not the production build. They use dynamic `await import()` (to apply jest mocks before import), which trips TS2835 under moduleResolution Node16; exclude them so `tsc` emits production JS only and does not pollute dist with test copies.",
+  "exclude": ["node_modules", "dist", "src/**/*.test.ts", "src/__tests__/**"]
 }

@@ -1,7 +1,7 @@
 'use client'
 
 import Link from 'next/link'
-import { useEffect, useMemo, useState } from 'react'
+import { Suspense, useEffect, useMemo, useState } from 'react'
 import { useAccount } from 'wagmi'
 import { useRouter, useSearchParams } from 'next/navigation'
 import { SettlementModal } from '@/components/app/SettlementModal'
@@ -10,7 +10,10 @@ import { PartialFillCreditModal } from '@/components/app/PartialFillCreditModal'
 import { Icon, ICONS } from '@/components/ui/Icon'
 import { log } from '@/lib/logger'
 import { formatUsdc, type Note } from '@/lib/notes'
-import { BET_STATUS, fetchBetStatus } from '@/lib/api'
+import { BET_STATUS, fetchAttestation, fetchBetStatus } from '@/lib/api'
+
+// FC-9 attestation reportType (off-chain operator fill report).
+const REPORT_PARTIAL = 3
 import { portfolioSummaryRows, usePortfolioState } from '@/lib/accountState'
 
 const VAULT_ADDRESS = (process.env.NEXT_PUBLIC_VAULT_ADDRESS ??
@@ -20,7 +23,17 @@ function formatDate(timestamp: number): string {
   return new Date(timestamp).toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' })
 }
 
+// Next 15 requires any component calling useSearchParams() to be wrapped in a
+// Suspense boundary, or `next build` fails. Content lives in PortfolioContent.
 export default function PortfolioPage() {
+  return (
+    <Suspense fallback={null}>
+      <PortfolioContent />
+    </Suspense>
+  )
+}
+
+function PortfolioContent() {
   const { address } = useAccount()
   const router = useRouter()
   const searchParams = useSearchParams()
@@ -28,8 +41,11 @@ export default function PortfolioPage() {
   const [closeLostOpen, setCloseLostOpen] = useState(false)
   const [closeReceipt, setCloseReceipt] = useState<Note | null>(null)
   const [partialReceipt, setPartialReceipt] = useState<Note | null>(null)
-  // nullifier_of_bet → on-chain BetStatus, for surfacing RESTING / PARTIAL_FILLED actions.
+  // receipt.id → on-chain BetStatus.
   const [betStatuses, setBetStatuses] = useState<Record<string, number>>({})
+  // FC-9: receipt.id → whether the operator has signed a PARTIAL fill attestation off-chain
+  // (the partial-fill refund is now driven by the attestation, not an on-chain status).
+  const [partialFlags, setPartialFlags] = useState<Record<string, boolean>>({})
   const { state, loading, refresh } = usePortfolioState(address)
 
   useEffect(() => {
@@ -50,20 +66,30 @@ export default function PortfolioPage() {
   )
   useEffect(() => {
     const receipts = state?.openReceipts ?? []
-    if (receipts.length === 0) { setBetStatuses({}); return }
+    if (receipts.length === 0) { setBetStatuses({}); setPartialFlags({}); return }
     let cancelled = false
     void (async () => {
       const entries = await Promise.all(
         receipts.map(async (r) => {
           const n = (r.nullifier_of_bet ?? r.nullifier) as `0x${string}`
-          try {
-            return [r.id, await fetchBetStatus(VAULT_ADDRESS, n)] as const
-          } catch {
-            return [r.id, -1] as const
+          let status = -1
+          let partial = false
+          try { status = await fetchBetStatus(VAULT_ADDRESS, n) } catch { /* leave -1 */ }
+          // FC-9: a partial-fill refund is available when the operator has signed a PARTIAL
+          // attestation AND the bet has not yet been credited (still ACTIVE on-chain).
+          if (status === BET_STATUS.ACTIVE) {
+            try {
+              const att = await fetchAttestation(n)
+              partial = !!att && att.reportType === REPORT_PARTIAL
+            } catch { /* no attestation yet */ }
           }
+          return [r.id, status, partial] as const
         }),
       )
-      if (!cancelled) setBetStatuses(Object.fromEntries(entries))
+      if (!cancelled) {
+        setBetStatuses(Object.fromEntries(entries.map((e) => [e[0], e[1]])))
+        setPartialFlags(Object.fromEntries(entries.map((e) => [e[0], e[2]])))
+      }
     })()
     return () => { cancelled = true }
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -160,12 +186,11 @@ export default function PortfolioPage() {
                   )}
                   {state.openReceipts.filter((r) => !lostBetIds.has(r.id)).map((receipt) => {
                     const ready = readyByReceiptId.has(receipt.id)
-                    const status = betStatuses[receipt.id]
-                    const isPartial = status === BET_STATUS.PARTIAL_FILLED
-                    const isResting = status === BET_STATUS.RESTING
+                    // FC-9: partial-fill refund is signalled by an off-chain PARTIAL attestation,
+                    // not an on-chain status (operator reporting is now gasless).
+                    const isPartial = partialFlags[receipt.id] === true
                     const label = ready ? 'READY TO SETTLE'
                       : isPartial ? 'PARTIAL FILL'
-                      : isResting ? 'RESTING'
                       : 'OPEN'
                     const pillClass = ready ? 'pill-green' : isPartial ? 'pill-amber' : 'pill-soft'
                     return (
@@ -188,8 +213,6 @@ export default function PortfolioPage() {
                           <button className="btn btn-sm btn-primary" onClick={() => setPartialReceipt(receipt)}>
                             Claim refund
                           </button>
-                        ) : isResting ? (
-                          <span className="small" style={{ color: 'var(--text-3)', fontSize: 11 }}>Limit order live</span>
                         ) : receipt.position_id ? (
                           <button className="btn btn-sm" onClick={() => setCloseReceipt(receipt)}>
                             Close

@@ -66,6 +66,12 @@ template BetAuth() {
     remainderCheck.lhs <== share_remainder;
     remainderCheck.rhs <== price;
 
+    // SEC-003: explicitly require price > 0 rather than relying on the emergent
+    // `share_remainder < price` bound to reject a zero price.
+    component priceNZ = AssertLessThan(64);
+    priceNZ.lhs <== 0;
+    priceNZ.rhs <== price;
+
     component constants = Groth16Constants();
     signal scaled_amount;
     signal computed_shares;
@@ -91,8 +97,8 @@ template BetAuth() {
     nextCommitment.owner_address <== owner_address;
     nextCommitment.out === new_commitment;
 
-    market_id === market_id;
-    position_id === position_id;
+    // SEC-008: market_id and position_id stay public for on-chain binding only; they are
+    // intentionally unconstrained in-circuit (the Vault binds them on-chain). No tautology.
 }
 
 component main {public [merkle_root, nullifier, new_commitment, bet_amount, price, expected_shares, market_id, outcome_side, position_id]} = BetAuth();

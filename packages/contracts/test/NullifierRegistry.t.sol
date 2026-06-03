@@ -3,6 +3,7 @@ pragma solidity ^0.8.24;
 
 import {Test} from "forge-std/Test.sol";
 import {NullifierRegistry} from "../src/NullifierRegistry.sol";
+import {DeployLib} from "../script/DeployLib.sol";
 
 contract NullifierRegistryTest is Test {
     NullifierRegistry public registry;
@@ -12,7 +13,12 @@ contract NullifierRegistryTest is Test {
     bytes32 constant NULLIFIER = keccak256("test_nullifier");
 
     function setUp() public {
-        registry = new NullifierRegistry(vault);
+        // UUPS proxy: impl + ERC1967 proxy.
+        registry = NullifierRegistry(
+            DeployLib.deployProxy(
+                address(new NullifierRegistry()), abi.encodeCall(NullifierRegistry.initialize, (vault, address(this)))
+            )
+        );
     }
 
     function test_initiallyNotSpent() public view {

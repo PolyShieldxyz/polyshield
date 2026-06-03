@@ -67,6 +67,17 @@ template PositionClose() {
     nextCommitment.owner_address <== owner_address;
     nextCommitment.out === new_commitment;
 
+    // SEC-001: constrain bet_nonce so it is no longer a fully free witness. As with settlement,
+    // the close design spends the current free note on the bet's deposit chain (see
+    // ClosePositionModal.tsx), which may be several nonces ahead of the bet, so we CANNOT bind
+    // bet_nonce == nonce - 1. Instead require bet_nonce < nonce: the referenced bet must sit at a
+    // strictly earlier nonce on the same secret's chain. Holds in every legitimate flow; forces nonce >= 1.
+    component betNonceBits = AssertBits(64);
+    betNonceBits.in <== bet_nonce;
+    component betNonceOrder = AssertLessThan(64);
+    betNonceOrder.lhs <== bet_nonce;
+    betNonceOrder.rhs <== nonce;
+
     component preBetNullifier = NullifierHash();
     preBetNullifier.secret <== secret;
     preBetNullifier.nonce <== bet_nonce;

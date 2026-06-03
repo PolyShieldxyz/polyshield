@@ -68,6 +68,10 @@ template Withdrawal() {
     isPartial.in[0] <== withdrawal_amount;
     isPartial.in[1] <== final_balance;
 
+    // SEC-010: make the partial/full selector self-evidently boolean (defends the multiplicative
+    // commitment selector below if the upstream u64 range checks are ever weakened).
+    isPartial.out * (isPartial.out - 1) === 0;
+
     component nextNonce = IncrementU64();
     nextNonce.in <== nonce;
 

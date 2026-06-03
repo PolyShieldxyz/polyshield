@@ -3,7 +3,7 @@ import { useEffect, useRef } from 'react'
 import { ConnectKitButton } from 'connectkit'
 import { useAccount } from 'wagmi'
 import { log } from '@/lib/logger'
-import { clearNoteCache } from '@/lib/notes'
+import { clearNoteCache, resetAllLocalState } from '@/lib/notes'
 
 // Used in two places:
 // 1. Gate panel (app/layout.tsx) — shows "Connect Wallet" when not connected
@@ -23,7 +23,13 @@ export function WalletConnect({ variant = 'gate' }: { variant?: 'gate' | 'sideba
       log('wallet_connected', { address, ens: null })
     } else if (prevConnected.current && !isConnected) {
       log('wallet_disconnected', { prevAddress: prevAddress.current })
+      // FINDING: PRIV-004 — on an actual connected→disconnected transition (guarded
+      // by prevConnected so it never fires on first mount), wipe persisted note
+      // state from localStorage, not just the in-memory cache. On a shared device,
+      // leaving notes/activity/deposit-index in localStorage would expose the prior
+      // user's pseudonymous trading history to the next connector.
       clearNoteCache()
+      resetAllLocalState()
     } else if (isConnected && address && address !== prevAddress.current) {
       log('wallet_address_changed', { from: prevAddress.current, to: address })
     }

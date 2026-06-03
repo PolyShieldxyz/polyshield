@@ -17,9 +17,10 @@ const RELAY_URL = process.env.PROOF_RELAY_URL ?? 'http://127.0.0.1:3002'
 
 export async function POST(
   req: NextRequest,
-  { params }: { params: { slug: string[] } },
+  { params }: { params: Promise<{ slug: string[] }> }, // Next 15: params is async
 ): Promise<NextResponse> {
-  const action = params.slug.join('/')
+  const { slug } = await params
+  const action = slug.join('/')
   const target = `${RELAY_URL}/relay/${action}`
 
   console.log(`[api/relay] → POST ${target}`)
@@ -37,6 +38,7 @@ export async function POST(
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
+      cache: 'no-store', // Next 15: don't cache user-request forwards
     })
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err)

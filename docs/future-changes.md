@@ -100,9 +100,25 @@ The "Proof 1: Deposit" that prior docs called optional/trivial is load-bearing f
 
 ## FC-3: Merkle root history scaling for throughput
 
-**Status:** Approved, not implemented
+**Status:** IMPLEMENTED (2026-06-03) — Solidity, contract-only
 **Driver:** T8 (clarified), see `threat-model.md`
-**Solution:** Bump `HISTORY_SIZE` and switch `isKnownRoot` lookup to a much larger window with O(1) lookup
+**Solution:** Replace the 30-root linear-scan window with a 1024-root O(1) `mapping` window
+
+> **As built:** `CommitmentMerkleTree.sol` window machinery rewritten. `ROOT_WINDOW = 1024`
+> (was `HISTORY_SIZE = 30`). Membership is now `mapping(bytes32 => bool) knownRoots` (single
+> SLOAD in `isKnownRoot`); eviction uses `mapping(uint256 => bytes32) rootRing` keyed by
+> `seq % _rootWindow()` with a dedicated `uint64 rootCount` sequence counter. The old
+> `recentRoots[30]` + `currentRootIndex` were removed; a new `bytes32 public currentRoot`
+> is the single source of truth for the latest root. Window size is an `internal virtual
+> _rootWindow()` so a test subclass (`SmallWindowTree`, window 4) exercises eviction without
+> 1024+ inserts. Decisions taken at build time: **A2** (clean `currentRoot` getter; the one
+> dead off-chain reader `fetchCurrentMerkleRoot` in `frontend/src/lib/api.ts` was repointed at
+> `currentRoot()` and its `% 30` hardcode dropped) and **B2** (frozen-layout rule waived
+> pre-mainnet → fresh redeploy, no migration). The live proof path is unchanged: it sources its
+> root from the proof-relay's event reconstruction (`proof-relay/src/merkle.ts`), which is
+> window-agnostic — the wider window simply keeps that reconstructed root valid on-chain longer.
+> `knownRoots` is a `bool` (eviction-by-clear); a `mapping(bytes32 => uint256)` refcount is the
+> noted mainnet-hardening option.
 
 ### Problem
 
@@ -304,3 +320,100 @@ Buffer size. Larger = always-instant fills, more exposed/stuck capital. Smaller 
 ### Relationships
 
 Bounds the blast radius for Q4 (key fencing) and the stuck-capital ceiling for Q3 (escape hatch / `sweepResolvedToVault`). Independent of FC-2 (deposit proof) but both touch `deposit`/funding code.
+
+---
+
+## FC-7: JIT (just-in-time) collateral deployment — Option 3
+
+**Status:** IMPLEMENTED 2026-06-01 (mock stack; mainnet-ready via the relayer/proxy abstraction)
+**Driver:** `collateral-deployment-strategy-comparison.md` Option 3; readiness for a live Polymarket money-path test with the smallest possible at-risk capital.
+**Goal:** Deploy collateral only at bet time so almost nothing is ever exposed or stuck, while reusing the exact production deposit-wallet model (proxy + relayer) so the same code serves the live mainnet test.
+
+### What was built
+
+- **Per-bet JIT funding.** `packages/backend/signing-layer/src/jitFunding.ts` (`ensureDepositWalletFunded`) reads the deposit wallet's pUSD balance before each order; if it is short of `bet_amount`, it calls `Vault.fundPolymarketWallet(shortfall)` (operator-only, already present) and waits one confirmation. Wired into `submitFOKOrder` and `submitLimitOrder` in `orderBuilder.ts`. A funding failure (DeployCapExceeded / InsufficientVaultLiquidity) is reported as a recoverable FOK failure — the note is reclaimable via `betCancellationCredit`, never silently debited. Calls are serialized so concurrent bets don't double-read the balance.
+- **Residual buffer (the Option-3 → Option-4 stepping stone).** On a FOK no-fill the JIT-funded pUSD is **left in the deposit wallet**, not swept back. The next bet's balance check reuses it and onramps only the new shortfall, so exposure accretes toward a small self-provisioned base buffer. `deployedToPolymarket` grows on funding and is decremented at settlement by `acknowledgePolymarketReturn` (measured USDC delta, clamped); the SEC-007 `deploymentCap` is the on-chain ceiling.
+- **Deposit-wallet proxy + relayer abstraction (closes H2/H3).** `packages/backend/signing-layer/src/depositWalletExecutor.ts` (`DepositWalletExecutor`: `execute` / `executeBatch` / `ensureApprovals`) with three impls: `MockRelayerExecutor` (local), `PolymarketRelayerExecutor` (production, thin placeholder pending live-API validation), `EoaExecutor` (legacy fallback). Redemption/settlement (`redemptionPipeline.ts`) and the one-time pUSD approvals (`index.ts`) now run through it, so the same path serves mock and mainnet. Mock twin: `MockDepositWallet.sol` (relayer-gated `execute`/`executeBatch`) + the `POST /relayer/wallet-batch` route in the mock CLOB server. `MockDeploy.s.sol`/`mock-env` deploy the proxy and point `Vault.depositWallet` at it; the mock CLOB debits the proxy's pUSD on fill so fills consume the buffer and no-fills leave residual.
+
+### Successor
+
+This is the on-ramp to **Option 4 (base buffer + JIT overflow)** — the planned direction. Option 4 adds a low/high-water buffer manager (FC-6) that proactively maintains the buffer in bulk instead of relying on per-bet accretion, bounded by the same `deploymentCap`/`maxInFlight` ceiling. No circuit or note-structure change is involved in either FC-6 or FC-7.
+
+### Relationships
+
+Builds directly on FC-6 (bounded working-buffer): FC-7 is the per-bet funding mechanism, FC-6 is the bulk buffer policy that supersedes it. Reuses the `fundPolymarketWallet`/`acknowledgePolymarketReturn`/`deploymentCap` primitives. Closes `collateral-flow-audit.md` H2 (relayer WALLET batch) and H3 (one-time approval).
+
+---
+
+## FC-8: Note consolidation (multi-note merge)
+
+**Status:** IMPLEMENTED — Circom/groth16
+**Driver:** UX — fragmentation is unspendable (every spend circuit is single-input)
+**Decision:** standalone `consolidate` circuit, K=4, with frontend auto-merge before a big spend
+
+### Problem
+
+Every circuit is strictly single-input-note → ≤1 output. A user whose balance is split across several notes (e.g. $100/$50/$75 from multiple deposits) cannot bet or withdraw more than the largest single note ($100) — there is no circuit or Vault function that combines notes. Bad UX, especially for betting.
+
+### Design
+
+A new circuit `packages/circuits/groth16/consolidate.circom` (`Consolidate(4)`) spends up to **4 same-owner notes** and emits **one** merged note whose balance is the sum, continuing **slot 0's lineage** (`secret[0]`, `nonce[0]+1`). Pure value-preserving merge: no bet, no withdrawal, no token movement. `bet_auth`/`withdrawal` are unchanged; the frontend auto-merges fragmented notes (greedy largest-first, up to 4) before a bet/withdrawal that exceeds the largest single note, then runs the normal single-input flow on the merged note (two txs for the fragmented case).
+
+**Public inputs (6):** `merkle_root, nullifier[0..3], new_commitment`. Verifier slot `CONSOLIDATE = 8`.
+
+**Padding soundness (fixed-size circuit, variable real inputs):** `is_active[j]` is a strict boolean; an active slot enforces Merkle membership gated by `is_active[j]*(root_j − merkle_root) === 0` and publishes its real nullifier `nullifier[j] === is_active[j] * Poseidon2(secret,nonce)`; an inactive slot contributes `eff[j] = is_active[j]*balance[j] = 0` and publishes `nullifier[j] = 0` (the Vault's skip sentinel). `is_active[0] === 1` forbids an all-inactive forge. The summed balance is range-checked u64. **Double-counting one note in two active slots is blocked ON-CHAIN:** both slots publish the same nullifier and the second `markSpent` reverts `AlreadySpent`, so the Vault MUST mark every non-zero nullifier spent without de-duplication. ~34k constraints (well under the 2^17 ptau).
+
+### As built
+
+- Circuit `consolidate.circom` + snarkjs Groth16 verifier `ConsolidateVerifier.sol` (slot 8), registered in `Benchmarking/groth16/src/constants.ts`/`interfaces.ts` (with a multi-leaf fixture builder in `generateTestProofs.ts`). An `ONLY_CIRCUIT` env filter was added to the pipeline CLIs so a single circuit can be (re)built in isolation without re-keying the others.
+- Vault `consolidate(bytes proof, ConsolidatePublicInputs inputs)` (`bytes32[4] nullifier`), `Consolidated(bytes32[4] nullifiers, bytes32 new_commitment)` event, `EmptyConsolidation` guard, slot constant `CONSOLIDATE = 8`. No `betRecords`, no token movement. Wired into `MockDeploy`/`MockAcceptVerifiers`.
+- Proof relay `POST /relay/consolidate` + `relayConsolidate`. Frontend `generateConsolidateProof` (array witness) + worker case; `selectNotesForAmount` (notes.ts); `consolidateNotes` orchestration (`lib/consolidate.ts`); consolidate-then-act in `BetModal` + withdraw page.
+- Recovery (`notes.ts`) replays a `Consolidated` event via a two-pass scheme (discovery populates a `balanceByNullifier` map; final pass merges slot-0's lineage and ends contributors). FC-5 acceptance test extended. **Limitation:** nested consolidations (re-consolidating a merged note) are not tracked by the discovery pass — accepted v1 limitation.
+
+### Tests
+
+`RealVerifier.t.sol` (real proof verifies on-chain), `Vault.t.sol` consolidate suite (happy 2/4-active, duplicate-nullifier revert, already-spent, unknown-root, zero-slot0, invalid-proof, paused, no-token/no-betRecord), recovery acceptance test (deposit×2 → consolidate → bet → recover).
+
+---
+
+## FC-9: Gasless operator reporting (EIP-712 fill attestations)
+
+**Status:** IMPLEMENTED
+**Driver:** cost — the operator paid one on-chain tx per bet terminal event (`reportFilled`/`reportFOKFailure`/`reportResting`/`reportPartialFill`/`reportSold`); at scale this is large protocol-borne gas, and a slow-filling limit order generated several reports before the user ever acted.
+**Decision:** replace on-chain operator pushes with OFF-CHAIN EIP-712 attestations the user submits at action time.
+
+### Design
+
+The operator no longer pushes fill status on-chain. It signs an **`OperatorAttestation`** off-chain (EIP-712) and the user submits that signature with their credit/cancel/settle/close proof; the Vault recovers the signer, requires it equals `signingLayerOperator`, and uses the attested values. Operator reporting now costs the protocol **zero gas** (the cost folds into the user's own credit tx, which they pay anyway), and a slow-filling order needs **no interim on-chain writes** — only the single terminal attestation, consumed at action time, matters. Abandoned losing bets cost nothing (no one acts). Trust model is unchanged (operator-attested values), matching the documented v2 TEE-attested-value path.
+
+**Struct:** `OperatorAttestation { bytes32 nullifierOfBet; uint8 reportType; uint64 amountA; uint64 amountB; }` — `reportType` 1=FILLED, 2=FAILED, 3=PARTIAL (A=filled_shares, B=spent_amount), 4=SOLD (A=sold_shares, B=proceeds). EIP-712 domain `{name:"Polyshield", version:"1", chainId, verifyingContract: Vault proxy}` (set by `initializeV2()` reinitializer; `EIP712Upgradeable` uses ERC-7201 storage so it does not disturb the frozen layout/`__gap`).
+
+**The five `report*` functions are REMOVED.** On-chain `BetStatus` is now advanced only by `authorizeBet` (→ACTIVE) and the credit functions. Per-function gates:
+
+| Function | Gate | Notes |
+|---|---|---|
+| `creditSettlement` | `FILLED` (no att) **or** `ACTIVE` + FILLED att | shares_held from `expected_shares`; payout from on-chain `pendingCredit` |
+| `betCancellationCredit` | `FAILED` (no att) **or** `ACTIVE` + FAILED att | refunds `bet_amount` |
+| `naCancellationCredit` | `FILLED\|FAILED` (no att) **or** `ACTIVE` + FILLED/FAILED att | on-chain CTF N/A check unchanged |
+| `partialFillCredit` | `ACTIVE` + PARTIAL att | inject filled/spent from att; strict-partial; normalize → FILLED |
+| `closePosition` | `ACTIVE\|FILLED` + SOLD att (amountA == expected_shares) | inject proceeds; emits `BetSold` then `PositionClosed`; market must be unresolved |
+
+**Double-credit safety:** terminal statuses (`CREDITED`/`CANCELLED_CREDITED`/`CLOSED_CREDITED`) are reachable once each and never reset; the post-bet note nullifier is single-use. The ONLY transition into on-chain `FILLED` is `partialFillCredit`'s normalization (after consuming a real PARTIAL att) — which is what makes the no-attestation FILLED branches safe.
+
+### HARD INVARIANT (load-bearing)
+
+The operator MUST sign **exactly one** terminal attestation per bet. The on-chain guards prevent replaying the *same* signature (single-use note + terminal status) but **cannot adjudicate two *different* valid signatures for one bet** — a user would pick whichever pays most (e.g. a PARTIAL + a FILLED). Enforced off-chain by a **single-write** attestation store (`signing-layer/src/attestationStore.ts`: `INSERT … ON CONFLICT DO NOTHING`, never re-sign). The chain is only a backstop. See `threat-model.md`.
+
+### `adminCancelBet` change
+
+Under gasless reporting an unclaimed-but-filled bet stays `ACTIVE` on-chain, so "ACTIVE == stuck" is no longer true and a banned operator can still *sign* off-chain (a ban blocks order placement, not local signing). `adminCancelBet` is therefore now an **owner-trusted last resort** for a permanently-gone operator, with the timelock floor raised to **3 days** (default 7 days via `initializeV2`); the owner must confirm off-chain that no fill/attestation occurred before cancelling. Bounded by the existing owner-upgrade trust.
+
+### As built
+
+- Vault: `EIP712Upgradeable` + `ECDSA`, `OperatorAttestation` struct + typehash + `_verifyOperatorAttestation`/`_checkAttestation`, `initializeV2()` reinitializer, the per-function gates above, removed `report*`, longer `adminCancelBet` timelock.
+- Signing layer: `attestationStore.ts` (single-write sqlite), `orderBuilder.ts` signs+persists instead of sending report* txs, `eventListener` catch-up dedupes on the attestation store, `autoSettlement` `GET /attestation/:nullifier` (public read; nullifier already public).
+- Proof relay: the 5 credit routes accept optional `attestation`+`signature` and thread them to the Vault; the settlement pre-flight is relaxed (ACTIVE + attestation is valid). Frontend: `fetchAttestation`, attestation-threaded relay calls, modals (PartialFill/Close/Settlement) read injected values from the attestation, portfolio surfaces "Claim refund" from a PARTIAL attestation.
+
+### Tests
+
+`Vault.t.sol` attestation suite: forged-sig revert, wrong-type revert, cross-bet revert, partial-then-settle two-stage, double-credit blocked, `initializeV2` once-only; the existing credit/cancel/close/partial/settlement tests reworked onto the attestation flow. `Upgrade.t.sol` validates the V2 upgrade preserves storage.

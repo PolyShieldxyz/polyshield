@@ -27,6 +27,7 @@ import {
   getWalletActivity,
   getSpendableNotes,
   clearNoteCache,
+  byBlockThenLogIndex,
 } from '../notes'
 
 const WALLET = '0x15d34AAf54267DB7D7c367839AAf71A00a2C6A65' as const
@@ -129,6 +130,54 @@ describe('FC-5 recovery', () => {
     expect(balances).toContain(700_000_000n) // recovered despite empty index 1
   })
 
+  it('FC-8: rebuilds a consolidate (merge two deposits) then bet from the merged note', async () => {
+    const s0 = await deriveSecret(sign, WALLET, 0)
+    const s1 = await deriveSecret(sign, WALLET, 1)
+    const amt0 = 600_000_000n // $600
+    const amt1 = 400_000_000n // $400
+    const merged = amt0 + amt1 // $1000
+    const bet = 100_000_000n
+
+    const dep0 = computeCommitment(s0, amt0, 0n, WALLET)
+    const dep1 = computeCommitment(s1, amt1, 0n, WALLET)
+    const null0 = computeNullifier(s0, 0n) // slot 0 (anchors merged lineage)
+    const null1 = computeNullifier(s1, 0n) // contributor
+    // merged note continues slot-0's lineage: (s0, merged, nonce 1)
+    const mergedC = computeCommitment(s0, merged, 1n, WALLET)
+    // bet spends the merged note (s0, nonce 1) -> change note (s0, merged-bet, nonce 2)
+    const betNull = computeNullifier(s0, 1n)
+    const betOutC = computeCommitment(s0, merged - bet, 2n, WALLET)
+
+    const logs: Record<string, Log[]> = {
+      Deposited: [
+        { blockNumber: 1n, transactionHash: '0xd0', args: { depositor: WALLET, commitment: dep0, amount: amt0 } },
+        { blockNumber: 2n, transactionHash: '0xd1', args: { depositor: WALLET, commitment: dep1, amount: amt1 } },
+      ],
+      Consolidated: [
+        { blockNumber: 3n, transactionHash: '0xcons', args: { nullifiers: [null0, null1, ZERO, ZERO], new_commitment: mergedC } },
+      ],
+      BetAuthorized: [
+        { blockNumber: 4n, transactionHash: '0xbet', args: { nullifier: betNull, market_id: b32(3n), position_id: b32(9n), expected_shares: 200_000_000n, bet_amount: bet, price: 50_000_000n, outcome_side: 0, new_commitment: betOutC } },
+      ],
+      BetSold: [], PositionClosed: [], SettlementCredited: [], BetCancellationCredited: [], NACancellationCredited: [], Withdrawn: [],
+    }
+    const blockTs = { '1': 1, '2': 2, '3': 3, '4': 4 }
+    const notes = await recoverNotesWithClient(WALLET, sign, makeClient(logs, blockTs), VAULT)
+
+    // The merged lineage's free note holds (600 + 400 - 100) = 900 after the bet.
+    const spendable = getSpendableNotes(WALLET).filter((n) => !n.spent)
+    expect(spendable.length).toBe(1)
+    expect(spendable[0].balance).toBe(merged - bet)
+
+    // Both deposit lineages are consumed (spent) by the consolidation.
+    const deposits = notes.filter((n) => n.kind === 'DEPOSIT')
+    expect(deposits.length).toBe(2)
+    expect(deposits.every((n) => n.spent)).toBe(true)
+
+    // The bet against the merged note produced a receipt.
+    expect(notes.some((n) => n.kind === 'BET_RECEIPT' && n.nullifier === betNull)).toBe(true)
+  })
+
   it('partial close reduces receipt shares and keeps it open', async () => {
     const s = await deriveSecret(sign, WALLET, 0)
     const dep = 1_000_000_000n, bet = 100_000_000n, shares = 200_000_000n, sold = 120_000_000n, proceeds = 72_000_000n
@@ -148,5 +197,37 @@ describe('FC-5 recovery', () => {
     const receipt = notes.find((n) => n.kind === 'BET_RECEIPT')!
     expect(receipt.spent).toBe(false)                       // still open
     expect(receipt.expectedShares).toBe(shares - sold)      // reduced by sold portion
+  })
+})
+
+// FC-1 regression: BetSold proceeds must pair to the matching PositionClosed by
+// (blockNumber, logIndex), the SAME ordering the merged event timeline uses. A
+// block-only sort could mis-pair two events of one bet that land in the same block.
+describe('byBlockThenLogIndex (recovery pairing order)', () => {
+  interface L { blockNumber?: bigint | null; logIndex?: number | null; tag: string }
+
+  it('orders by blockNumber first', () => {
+    const logs: L[] = [
+      { blockNumber: 20n, logIndex: 0, tag: 'b' },
+      { blockNumber: 10n, logIndex: 5, tag: 'a' },
+    ]
+    expect([...logs].sort(byBlockThenLogIndex).map((l) => l.tag)).toEqual(['a', 'b'])
+  })
+
+  it('breaks ties within a block by logIndex (same-block earlier then later sale)', () => {
+    const earlier: L = { blockNumber: 100n, logIndex: 2, tag: 'first:40' }
+    const later: L = { blockNumber: 100n, logIndex: 7, tag: 'second:70' }
+    expect([later, earlier].sort(byBlockThenLogIndex).map((l) => l.tag)).toEqual([
+      'first:40',
+      'second:70',
+    ])
+  })
+
+  it('treats missing block/index as 0 without throwing', () => {
+    const logs: L[] = [
+      { logIndex: 3, tag: 'noBlock' },
+      { blockNumber: 1n, logIndex: 0, tag: 'block1' },
+    ]
+    expect([...logs].sort(byBlockThenLogIndex).map((l) => l.tag)).toEqual(['noBlock', 'block1'])
   })
 })

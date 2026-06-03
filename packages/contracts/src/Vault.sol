@@ -1,11 +1,15 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.24;
 
-import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
-import {Ownable2Step, Ownable} from "@openzeppelin/contracts/access/Ownable2Step.sol";
-import {Pausable} from "@openzeppelin/contracts/utils/Pausable.sol";
+import {Initializable} from "@openzeppelin/contracts/proxy/utils/Initializable.sol";
+import {UUPSUpgradeable} from "@openzeppelin/contracts/proxy/utils/UUPSUpgradeable.sol";
+import {ReentrancyGuardTransient} from "@openzeppelin/contracts/utils/ReentrancyGuardTransient.sol";
+import {Ownable2StepUpgradeable} from "@openzeppelin-upgradeable/access/Ownable2StepUpgradeable.sol";
+import {PausableUpgradeable} from "@openzeppelin-upgradeable/utils/PausableUpgradeable.sol";
+import {EIP712Upgradeable} from "@openzeppelin-upgradeable/utils/cryptography/EIP712Upgradeable.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
+import {ECDSA} from "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
 
 import {CommitmentMerkleTree} from "./CommitmentMerkleTree.sol";
 import {NullifierRegistry} from "./NullifierRegistry.sol";
@@ -17,7 +21,14 @@ import {ICTF} from "./interfaces/ICTF.sol";
 /// @notice Privacy-preserving vault for Polymarket positions.
 /// Users deposit USDC, then authorize bets, credit settlements, and withdraw
 /// using ZK proofs that hide which depositor authorized which bet.
-contract Vault is ReentrancyGuard, Ownable2Step, Pausable {
+contract Vault is
+    Initializable,
+    UUPSUpgradeable,
+    ReentrancyGuardTransient,
+    Ownable2StepUpgradeable,
+    PausableUpgradeable,
+    EIP712Upgradeable
+{
     using SafeERC20 for IERC20;
 
     // -------------------------------------------------------------------------
@@ -31,6 +42,7 @@ contract Vault is ReentrancyGuard, Ownable2Step, Pausable {
     uint8 public constant DEPOSIT = 5;        // FC-2: mandatory deposit binding proof
     uint8 public constant POSITION_CLOSE = 6; // FC-1: secondary-sale position close
     uint8 public constant PARTIAL_CREDIT = 7; // FC-4: limit-order partial-fill refund
+    uint8 public constant CONSOLIDATE = 8;    // FC-8: K=4 note consolidation (merge)
 
     // -------------------------------------------------------------------------
     // Types
@@ -126,6 +138,32 @@ contract Vault is ReentrancyGuard, Ownable2Step, Pausable {
         // refund_amount is NOT here — injected as (bet_amount - spent_amount) from betRecords (FC-4)
     }
 
+    struct ConsolidatePublicInputs {
+        bytes32 merkle_root;
+        bytes32[4] nullifier;   // FC-8: one per input slot; inactive slots are bytes32(0)
+        bytes32 new_commitment; // merged note continuing slot 0's lineage
+    }
+
+    // FC-9: gasless operator reporting. Instead of paying gas to push fill status on-chain,
+    // the operator signs this struct OFF-CHAIN (EIP-712) and the user submits the signature
+    // with their credit/cancel/close proof. The Vault recovers the signer and verifies it is
+    // signingLayerOperator. reportType: 1=FILLED, 2=FAILED, 3=PARTIAL, 4=SOLD.
+    // For PARTIAL: amountA=filled_shares, amountB=spent_amount.
+    // For SOLD:    amountA=sold_shares,  amountB=proceeds.
+    // For FILLED/FAILED: amountA/amountB are unused (0).
+    struct OperatorAttestation {
+        bytes32 nullifierOfBet;
+        uint8 reportType;
+        uint64 amountA;
+        uint64 amountB;
+    }
+
+    // Report-type constants for OperatorAttestation.reportType.
+    uint8 public constant REPORT_FILLED = 1;
+    uint8 public constant REPORT_FAILED = 2;
+    uint8 public constant REPORT_PARTIAL = 3;
+    uint8 public constant REPORT_SOLD = 4;
+
     // -------------------------------------------------------------------------
     // Constants
     // -------------------------------------------------------------------------
@@ -133,6 +171,9 @@ contract Vault is ReentrancyGuard, Ownable2Step, Pausable {
     // BN254 scalar field prime — conditionIds that exceed this are reduced before
     // use as circuit Field inputs and as pendingCredit keys.
     uint256 private constant BN254_P = 21888242871839275222246405745257275088548364400416034343698204186575808495617;
+    // FC-9: EIP-712 type hash for the operator's off-chain fill attestation.
+    bytes32 private constant OPERATOR_ATTESTATION_TYPEHASH =
+        keccak256("OperatorAttestation(bytes32 nullifierOfBet,uint8 reportType,uint64 amountA,uint64 amountB)");
 
     // -------------------------------------------------------------------------
     // State
@@ -158,8 +199,16 @@ contract Vault is ReentrancyGuard, Ownable2Step, Pausable {
     mapping(bytes32 => mapping(uint8 => uint64)) public pendingCredit;
     mapping(bytes32 => uint64) public marketResolvedAt; // conditionId => block.timestamp
     mapping(bytes32 => uint64) public betCreatedAt;    // nullifier_of_bet => block.timestamp at authorizeBet
-    uint256 public adminCancelTimelock = 86_400;        // seconds; default 24 hours; governance-mutable
+    uint256 public adminCancelTimelock;                 // seconds; set to 24h in initialize(); governance-mutable
     uint256 public deployedToPolymarket;               // USDC-equivalent currently held in depositWallet
+    // SEC-007: aggregate cap on USDC deployed to Polymarket via fundPolymarketWallet.
+    // Defaults to "unlimited" to preserve existing behaviour; governance should set a
+    // concrete limit post-deploy via setDeploymentCap to bound a compromised operator.
+    uint256 public deploymentCap; // set to type(uint256).max in initialize()
+
+    /// @dev Reserved storage slots for future UUPS upgrades. Append new state by
+    /// shrinking this gap; never reorder or remove the state variables declared above.
+    uint256[50] private __gap;
 
     // -------------------------------------------------------------------------
     // Errors
@@ -184,6 +233,7 @@ contract Vault is ReentrancyGuard, Ownable2Step, Pausable {
     error InsufficientVaultLiquidity();
     error InsufficientLiquidity(uint256 available, uint256 requested);
     error InvalidAmount();
+    error DeployCapExceeded();      // SEC-007: fundPolymarketWallet would exceed deploymentCap
     error ZeroAddress();
     error VerifierTimelockActive();
     error PayoutRoundsToZero();
@@ -192,8 +242,13 @@ contract Vault is ReentrancyGuard, Ownable2Step, Pausable {
     error CannotCloseResolvedMarket(); // FC-1: resolved markets settle, they do not close
     error BetNotPartialFillable();  // FC-4: reportPartialFill requires status ACTIVE or RESTING
     error BetNotPartialFilled();    // FC-4: partialFillCredit requires status PARTIAL_FILLED
-    error InvalidFilledShares();    // FC-4: filled_shares must be > 0 and <= expected_shares
-    error InvalidSpentAmount();     // FC-4: spent_amount must be > 0 and <= bet_amount
+    error BetNotReportable();       // FC-4: reportFilled/reportFOKFailure require ACTIVE or RESTING
+    error InvalidFilledShares();    // FC-4: filled_shares must be > 0 and < expected_shares (strict partial)
+    error InvalidSpentAmount();     // FC-4: spent_amount must be > 0 and < bet_amount (strict partial)
+    error EmptyConsolidation();     // FC-8: consolidate requires slot 0 active (nullifier[0] != 0)
+    error InvalidAttestation();     // FC-9: operator signature did not recover to signingLayerOperator
+    error AttestationMismatch();    // FC-9: attestation nullifier/type does not match the call
+    error AttestationRequired();    // FC-9: an ACTIVE bet needs an operator attestation to credit
 
     // -------------------------------------------------------------------------
     // Events
@@ -226,11 +281,21 @@ contract Vault is ReentrancyGuard, Ownable2Step, Pausable {
     event BetResting(bytes32 indexed nullifier_of_bet);
     event BetPartialFilled(bytes32 indexed nullifier_of_bet, uint64 filled_shares, uint64 spent_amount);
     event PartialFillCredited(bytes32 indexed nullifier, bytes32 nullifier_of_bet, bytes32 new_commitment);
+    // FC-8: carries all 4 input nullifiers (zeros for inactive slots) + the merged output
+    // commitment. Recovery matches a wallet's lineage by membership in `nullifiers`.
+    event Consolidated(bytes32[4] nullifiers, bytes32 new_commitment);
 
     // -------------------------------------------------------------------------
-    // Constructor
+    // Initializer (UUPS)
     // -------------------------------------------------------------------------
-    constructor(
+    /// @custom:oz-upgrades-unsafe-allow constructor
+    constructor() {
+        _disableInitializers();
+    }
+
+    /// @notice Initialize the Vault proxy. Replaces the former constructor.
+    /// Callable exactly once (through the ERC1967 proxy), never on the implementation.
+    function initialize(
         address _usdc,
         address _tree,
         address _nullifiers,
@@ -240,11 +305,17 @@ contract Vault is ReentrancyGuard, Ownable2Step, Pausable {
         address _signingLayerOperator,
         address _depositWallet,
         address _owner
-    ) Ownable(_owner) {
+    ) external initializer {
         if (_usdc == address(0) || _tree == address(0) || _nullifiers == address(0) ||
             _onramp == address(0) || _offramp == address(0) || _ctf == address(0) ||
             _signingLayerOperator == address(0) || _depositWallet == address(0) ||
             _owner == address(0)) revert ZeroAddress();
+        __Ownable_init(_owner);
+        __Ownable2Step_init();
+        __Pausable_init();
+        // ReentrancyGuardTransient is stateless (transient storage) — no init required.
+        // UUPSUpgradeable has no initializer in OZ v5.
+
         usdc = IERC20(_usdc);
         tree = CommitmentMerkleTree(_tree);
         nullifiers = NullifierRegistry(_nullifiers);
@@ -253,7 +324,49 @@ contract Vault is ReentrancyGuard, Ownable2Step, Pausable {
         ctf = ICTF(_ctf);
         signingLayerOperator = _signingLayerOperator;
         depositWallet = _depositWallet;
+
+        // Defaults formerly set via inline initializers (which do not run in a proxy).
+        adminCancelTimelock = 86_400;          // 24 hours
+        deploymentCap = type(uint256).max;     // unlimited until governance sets a cap (SEC-007)
     }
+
+    /// @notice FC-9 upgrade initializer. Sets up the EIP-712 domain used to verify operator
+    /// fill attestations. Run exactly once, after the implementation upgrade that introduces
+    /// gasless operator reporting. EIP712Upgradeable uses ERC-7201 namespaced storage, so this
+    /// does not disturb the existing sequential layout or __gap.
+    function initializeV2() external reinitializer(2) {
+        __EIP712_init("Polyshield", "1");
+        // FC-9: lengthen the adminCancelBet timelock (see setAdminCancelTimelock) since an
+        // ACTIVE bet may now be a healthy filled-but-unclaimed position.
+        adminCancelTimelock = 7 days;
+    }
+
+    /// @dev FC-9: recover the operator attestation signer and require it equals the operator.
+    function _verifyOperatorAttestation(OperatorAttestation calldata att, bytes calldata sig) internal view {
+        bytes32 structHash = keccak256(
+            abi.encode(OPERATOR_ATTESTATION_TYPEHASH, att.nullifierOfBet, att.reportType, att.amountA, att.amountB)
+        );
+        if (ECDSA.recover(_hashTypedDataV4(structHash), sig) != signingLayerOperator) revert InvalidAttestation();
+    }
+
+    /// @dev FC-9: verify an attestation bound to `nullifierOfBet` whose reportType is in the
+    /// {primaryType, altType} set (pass altType == primaryType when only one type is allowed).
+    function _checkAttestation(
+        OperatorAttestation calldata att,
+        bytes calldata sig,
+        bytes32 nullifierOfBet,
+        uint8 primaryType,
+        uint8 altType
+    ) internal view {
+        if (att.nullifierOfBet != nullifierOfBet) revert AttestationMismatch();
+        if (att.reportType != primaryType && att.reportType != altType) revert AttestationMismatch();
+        _verifyOperatorAttestation(att, sig);
+    }
+
+    /// @notice UUPS upgrade authorization. Owner-gated, instant (no timelock).
+    /// @dev See docs/threat-model.md — the owner can replace Vault logic in one tx;
+    /// the owner role should be a multisig/HSM in production.
+    function _authorizeUpgrade(address newImplementation) internal override onlyOwner {}
 
     // -------------------------------------------------------------------------
     // Admin
@@ -268,6 +381,10 @@ contract Vault is ReentrancyGuard, Ownable2Step, Pausable {
 
     /// @notice Accept a proposed verifier after the timelock has elapsed.
     function acceptVerifier(uint8 proofType) external onlyOwner {
+        // SEC-006: never finalize a slot that was never proposed. An un-proposed slot has
+        // verifierUpdateAt == 0 (timelock check would pass) and pendingVerifiers == address(0),
+        // which would otherwise blank the active verifier and brick that proof type.
+        if (pendingVerifiers[proofType] == address(0)) revert ZeroAddress();
         if (block.timestamp < verifierUpdateAt[proofType]) revert VerifierTimelockActive();
         verifiers[proofType] = pendingVerifiers[proofType];
         emit VerifierAccepted(proofType, verifiers[proofType]);
@@ -277,9 +394,17 @@ contract Vault is ReentrancyGuard, Ownable2Step, Pausable {
         signingLayerOperator = operator;
     }
 
+    /// @notice Update the aggregate cap on USDC deployed to Polymarket. Owner-controlled (SEC-007).
+    function setDeploymentCap(uint256 _cap) external onlyOwner {
+        deploymentCap = _cap;
+    }
+
     /// @notice Update the timelock duration for adminCancelBet. Owner-controlled.
+    /// FC-9: floor raised to 3 days — under gasless reporting an ACTIVE bet may be a healthy
+    /// filled-but-unclaimed position, so adminCancelBet is an owner-trusted last resort and
+    /// must give ample time before a force-cancel is permitted.
     function setAdminCancelTimelock(uint256 _seconds) external onlyOwner {
-        require(_seconds >= 1 hours, "timelock too short");
+        require(_seconds >= 3 days, "timelock too short");
         adminCancelTimelock = _seconds;
     }
 
@@ -288,9 +413,12 @@ contract Vault is ReentrancyGuard, Ownable2Step, Pausable {
 
     /// @notice Convert vault USDC to pUSD via onramp and forward to the Polymarket
     /// deposit wallet. Operator-callable; tracks deployed amount in deployedToPolymarket.
-    function fundPolymarketWallet(uint256 amount) external nonReentrant {
+    function fundPolymarketWallet(uint256 amount) external nonReentrant whenNotPaused {
         if (msg.sender != signingLayerOperator) revert OnlyOperator();
         if (usdc.balanceOf(address(this)) < amount) revert InsufficientVaultLiquidity();
+        // SEC-007: bound aggregate deployment to Polymarket so a compromised operator cannot
+        // drain the vault in one move; combined with whenNotPaused, blocks deployment during a pause.
+        if (deployedToPolymarket + amount > deploymentCap) revert DeployCapExceeded();
         deployedToPolymarket += amount;
 
         IERC20 pusd = IERC20(onramp.pusdAddress());
@@ -389,49 +517,36 @@ contract Vault is ReentrancyGuard, Ownable2Step, Pausable {
     }
 
     // -------------------------------------------------------------------------
-    // Operator: FOK status reporting
+    // Operator: fill reporting (FC-9 — GASLESS via off-chain EIP-712 attestations)
     // -------------------------------------------------------------------------
+    //
+    // The operator no longer pushes fill status on-chain (reportFilled / reportFOKFailure /
+    // reportResting / reportPartialFill / reportSold are removed). Instead it signs an
+    // OperatorAttestation off-chain and the user submits that signature with their
+    // credit/cancel/close proof; the relevant function verifies sig == signingLayerOperator
+    // and uses the attested values. This makes operator reporting cost the protocol ZERO gas
+    // (the cost folds into the user's own credit tx, which they pay anyway) and means a
+    // slow-filling limit order needs no interim on-chain writes — only the single terminal
+    // attestation, consumed at action time, matters.
+    //
+    // HARD INVARIANT (enforced off-chain by the signing layer, see docs/threat-model.md):
+    // the operator MUST sign EXACTLY ONE terminal attestation per bet. The on-chain guards
+    // below prevent replaying the SAME signature (single-use post-bet note + terminal status)
+    // but CANNOT adjudicate two DIFFERENT valid signatures for one bet — the user would pick
+    // whichever pays them most. Single-terminal-signing is therefore a load-bearing operator
+    // requirement, not a nicety.
 
-    /// @notice Called by the Signing Layer when a FOK order is confirmed filled.
-    /// Intentionally not gated by whenNotPaused: in-flight bets must be resolvable
-    /// even during an emergency pause so the operator can record fill status and
-    /// users can proceed to creditSettlement after unpause.
-    function reportFilled(bytes32 nullifier_of_bet) external {
-        if (msg.sender != signingLayerOperator) revert OnlyOperator();
-        BetRecord storage rec = betRecords[nullifier_of_bet];
-        if (rec.market_id == bytes32(0)) revert BetNotFound();
-        rec.status = BetStatus.FILLED;
-        emit BetFilled(nullifier_of_bet);
-    }
-
-    /// @notice Called by the Signing Layer when a FOK order was not filled.
-    /// Intentionally not gated by whenNotPaused: same rationale as reportFilled —
-    /// FOK failures must be recordable during a pause so users can reclaim funds
-    /// via betCancellationCredit after the vault is unpaused.
-    function reportFOKFailure(bytes32 nullifier_of_bet) external {
-        if (msg.sender != signingLayerOperator) revert OnlyOperator();
-        BetRecord storage rec = betRecords[nullifier_of_bet];
-        if (rec.market_id == bytes32(0)) revert BetNotFound();
-        rec.status = BetStatus.FAILED;
-        emit FOKFailed(nullifier_of_bet);
-    }
-
-    /// @notice Emergency cancel for in-flight bets when the Signing Layer EOA is
-    /// banned or otherwise unable to report fill status. Sets the bet to FAILED so
-    /// the depositor can call betCancellationCredit to recover their funds.
+    /// @notice Emergency cancel for in-flight bets when the Signing Layer is permanently
+    /// gone (lost keys / fully unresponsive) and cannot even sign an off-chain attestation.
+    /// Sets the bet to FAILED so the depositor can call betCancellationCredit to recover funds.
     ///
-    /// Only callable on ACTIVE bets (not yet reported by the operator). A 24-hour
-    /// timelock (adminCancelTimelock) prevents the owner from cancelling bets
-    /// before the signing layer has had a reasonable chance to submit or report.
-    /// See docs/open-questions.md Q14.
-    ///
-    /// FC-4: RESTING limit orders are intentionally NOT cancellable here. A healthy
-    /// resting GTC/GTD is legitimately long-lived (status RESTING, not ACTIVE), so it
-    /// must not be force-failed. Residual risk: if the operator dies entirely while an
-    /// order rests, Polymarket's ~10s heartbeat lapse auto-cancels the order on their
-    /// side, but the on-chain record stays RESTING with no on-chain rescue path; this
-    /// is the accepted v1 trade-off (a malicious/absent operator can already grief by
-    /// never reporting, and the worst case is locked-then-eventually-refundable funds).
+    /// FC-9 CAUTION: under gasless reporting, an unclaimed-but-filled bet stays ACTIVE
+    /// on-chain (the operator no longer writes FILLED), so "ACTIVE" no longer means "stuck".
+    /// A banned operator can still SIGN an attestation off-chain (a ban blocks order placement,
+    /// not local signing), so the original stuck-funds scenario is largely gone. This is now an
+    /// OWNER-TRUSTED last resort: the owner must confirm off-chain that no fill occurred / no
+    /// attestation was issued before cancelling, and the timelock is deliberately long. The
+    /// power is bounded by the existing owner trust (the owner can already UUPS-upgrade the Vault).
     function adminCancelBet(bytes32 nullifier_of_bet) external onlyOwner {
         BetRecord storage rec = betRecords[nullifier_of_bet];
         if (rec.market_id == bytes32(0)) revert BetNotFound();
@@ -440,69 +555,6 @@ contract Vault is ReentrancyGuard, Ownable2Step, Pausable {
             revert BetTimeoutNotElapsed();
         rec.status = BetStatus.FAILED;
         emit AdminBetCancelled(nullifier_of_bet);
-    }
-
-    /// @notice FC-1: report a FOK SELL fill for a pre-settlement position close.
-    /// Operator-only and called only AFTER the SELL actually fills, so `proceeds`
-    /// is real (same trust class as reportFilled / acknowledgePolymarketReturn). A
-    /// false report would let a user credit funds that were never realized. Sets the
-    /// record to CLOSING; the depositor then calls closePosition to credit the note.
-    /// Not gated by whenNotPaused for the same reason as reportFilled: in-flight
-    /// positions must remain resolvable during an emergency pause.
-    /// @param sold_shares shares sold (<= expected_shares; full vs partial accounting)
-    /// @param proceeds USDC proceeds (6dp) returned to the pool via the offramp
-    function reportSold(bytes32 nullifier_of_bet, uint64 sold_shares, uint64 proceeds) external {
-        if (msg.sender != signingLayerOperator) revert OnlyOperator();
-        BetRecord storage rec = betRecords[nullifier_of_bet];
-        if (rec.market_id == bytes32(0)) revert BetNotFound();
-        if (rec.status != BetStatus.FILLED) revert BetNotFilled();
-        if (sold_shares == 0 || sold_shares > rec.expected_shares) revert InvalidSoldShares();
-        // Resolved markets settle (creditSettlement); they do not close.
-        bytes32 circuit_key = bytes32(uint256(rec.market_id) % BN254_P);
-        if (marketResolvedAt[circuit_key] != 0) revert CannotCloseResolvedMarket();
-
-        rec.sell_proceeds = proceeds;
-        rec.sold_shares = sold_shares;
-        rec.status = BetStatus.CLOSING;
-        emit BetSold(nullifier_of_bet, sold_shares, proceeds);
-    }
-
-    /// @notice FC-4: mark a GTC/GTD limit order as resting (live on the book).
-    /// Operator-only, called once the CLOB confirms the order is live. RESTING is
-    /// intentionally exempt from adminCancelBet (a healthy resting order is not
-    /// "stuck"). Not gated by whenNotPaused — in-flight orders stay resolvable
-    /// during an emergency pause, same rationale as reportFilled.
-    function reportResting(bytes32 nullifier_of_bet) external {
-        if (msg.sender != signingLayerOperator) revert OnlyOperator();
-        BetRecord storage rec = betRecords[nullifier_of_bet];
-        if (rec.market_id == bytes32(0)) revert BetNotFound();
-        if (rec.status != BetStatus.ACTIVE) revert BetNotActive();
-        rec.status = BetStatus.RESTING;
-        emit BetResting(nullifier_of_bet);
-    }
-
-    /// @notice FC-4: report a partial fill of a GTC/GTD limit order that then
-    /// terminated (expired/cancelled) with shares still unfilled. Operator-only and
-    /// called only AFTER the real fill, so `filled_shares`/`spent_amount` are real
-    /// (same trust class as reportFilled / reportSold). A false report could refund
-    /// more than the truly unfilled remainder or credit shares not held. Sets the
-    /// record to PARTIAL_FILLED; the depositor then calls partialFillCredit to refund
-    /// the remainder and normalize the record to a clean FILLED state.
-    /// Not gated by whenNotPaused for the same reason as reportFilled.
-    /// @param filled_shares shares actually bought (> 0 and <= expected_shares)
-    /// @param spent_amount  bet_amount portion consumed (> 0 and <= bet_amount)
-    function reportPartialFill(bytes32 nullifier_of_bet, uint64 filled_shares, uint64 spent_amount) external {
-        if (msg.sender != signingLayerOperator) revert OnlyOperator();
-        BetRecord storage rec = betRecords[nullifier_of_bet];
-        if (rec.market_id == bytes32(0)) revert BetNotFound();
-        if (rec.status != BetStatus.ACTIVE && rec.status != BetStatus.RESTING) revert BetNotPartialFillable();
-        if (filled_shares == 0 || filled_shares > rec.expected_shares) revert InvalidFilledShares();
-        if (spent_amount == 0 || spent_amount > rec.bet_amount) revert InvalidSpentAmount();
-
-        rec.filled_shares = filled_shares;
-        rec.spent_amount = spent_amount;
-        rec.status = BetStatus.PARTIAL_FILLED;
-        emit BetPartialFilled(nullifier_of_bet, filled_shares, spent_amount);
     }
 
     // -------------------------------------------------------------------------
@@ -536,7 +588,11 @@ contract Vault is ReentrancyGuard, Ownable2Step, Pausable {
         // and their bet is treated as worthless (no settlement needed).
         bool anyNonZeroAfterDiv = false;
         for (uint256 i = 0; i < numerators.length; i++) {
-            uint64 pps = uint64(numerators[i] / denominator);
+            // SEC-005: division can exceed uint64 for non-binary markets; revert instead of
+            // silently truncating, which would corrupt settlement math.
+            uint256 ratio = numerators[i] / denominator;
+            require(ratio <= type(uint64).max, "pps overflow");
+            uint64 pps = uint64(ratio);
             pendingCredit[circuit_key][uint8(i)] = pps;
             if (pps > 0) anyNonZeroAfterDiv = true;
         }
@@ -554,9 +610,16 @@ contract Vault is ReentrancyGuard, Ownable2Step, Pausable {
     /// @notice Credit a settled bet's payout back into the user's note.
     /// The Vault injects shares_held from betRecords to prevent the user
     /// from claiming a different share count than what was recorded at bet time.
+    ///
+    /// FC-9: the bet must be confirmed filled. Either it is already on-chain FILLED (set by a
+    /// prior partialFillCredit normalization), or the caller supplies a FILLED operator
+    /// attestation that flips the ACTIVE record's shares-held into play (a full fill confirms
+    /// all expected_shares were bought). `att`/`sig` are ignored when status is already FILLED.
     function creditSettlement(
         bytes calldata proof,
-        SettlementPublicInputs calldata inputs
+        SettlementPublicInputs calldata inputs,
+        OperatorAttestation calldata att,
+        bytes calldata sig
     ) external nonReentrant whenNotPaused {
         if (nullifiers.isSpent(inputs.nullifier)) revert NullifierSpent();
         if (!tree.isKnownRoot(inputs.merkle_root)) revert UnknownRoot();
@@ -564,7 +627,11 @@ contract Vault is ReentrancyGuard, Ownable2Step, Pausable {
         BetRecord storage rec = betRecords[inputs.nullifier_of_bet];
         if (rec.market_id == bytes32(0)) revert BetNotFound();
         if (rec.market_id != inputs.market_id) revert WrongMarket();
-        if (rec.status != BetStatus.FILLED) revert BetNotFilled();
+        // FILLED (post-partial) needs no attestation; an ACTIVE full-fill needs a FILLED att.
+        if (rec.status != BetStatus.FILLED) {
+            if (rec.status != BetStatus.ACTIVE) revert BetNotFilled();
+            _checkAttestation(att, sig, inputs.nullifier_of_bet, REPORT_FILLED, REPORT_FILLED);
+        }
 
         // Market must be resolved. Losing bets (payout_per_share == 0) proceed with total_credit = 0.
         // Use the same BN254-reduced key that resolveMarket wrote to storage.
@@ -629,16 +696,25 @@ contract Vault is ReentrancyGuard, Ownable2Step, Pausable {
     /// @notice Credit back the bet amount when a FOK order was not filled.
     /// The Vault injects bet_amount from betRecords to prevent the user
     /// from claiming a different amount than what was deducted.
+    ///
+    /// FC-9: the bet must be confirmed failed. Either it is already on-chain FAILED (set by
+    /// adminCancelBet), or the caller supplies a FAILED operator attestation that authorizes
+    /// the refund directly from an ACTIVE record. `att`/`sig` are ignored when already FAILED.
     function betCancellationCredit(
         bytes calldata proof,
-        BetCancelPublicInputs calldata inputs
+        BetCancelPublicInputs calldata inputs,
+        OperatorAttestation calldata att,
+        bytes calldata sig
     ) external nonReentrant whenNotPaused {
         if (nullifiers.isSpent(inputs.nullifier)) revert NullifierSpent();
         if (!tree.isKnownRoot(inputs.merkle_root)) revert UnknownRoot();
 
         BetRecord storage rec = betRecords[inputs.nullifier_of_bet];
         if (rec.market_id == bytes32(0)) revert BetNotFound();
-        if (rec.status != BetStatus.FAILED) revert BetNotFailed();
+        if (rec.status != BetStatus.FAILED) {
+            if (rec.status != BetStatus.ACTIVE) revert BetNotFailed();
+            _checkAttestation(att, sig, inputs.nullifier_of_bet, REPORT_FAILED, REPORT_FAILED);
+        }
 
         bytes32[] memory pubInputs = _betCancelPublicInputs(inputs, rec.bet_amount);
         if (!IVerifier(verifiers[BET_CANCEL]).verify(proof, pubInputs)) revert InvalidProof();
@@ -656,9 +732,16 @@ contract Vault is ReentrancyGuard, Ownable2Step, Pausable {
 
     /// @notice Credit back the bet amount when the market resolved N/A.
     /// Verifies on-chain that CTF payoutNumerators are all zero (N/A resolution).
+    ///
+    /// FC-9: a terminal fill state is still required so the pool is never refunded while a fill
+    /// is in flight. Either the record is already FILLED/FAILED, or the caller supplies a
+    /// FILLED or FAILED operator attestation for an ACTIVE record. The shared
+    /// CANCELLED_CREDITED terminal status prevents any cross-function double-credit.
     function naCancellationCredit(
         bytes calldata proof,
-        NACancelPublicInputs calldata inputs
+        NACancelPublicInputs calldata inputs,
+        OperatorAttestation calldata att,
+        bytes calldata sig
     ) external nonReentrant whenNotPaused {
         if (nullifiers.isSpent(inputs.nullifier)) revert NullifierSpent();
         if (!tree.isKnownRoot(inputs.merkle_root)) revert UnknownRoot();
@@ -666,8 +749,10 @@ contract Vault is ReentrancyGuard, Ownable2Step, Pausable {
         BetRecord storage rec = betRecords[inputs.nullifier_of_bet];
         if (rec.market_id == bytes32(0)) revert BetNotFound();
         if (rec.market_id != inputs.market_id) revert WrongMarket();
-        // C1: prevent double-credit — only ACTIVE and FILLED bets can be N/A-credited
-        if (rec.status != BetStatus.ACTIVE && rec.status != BetStatus.FILLED) revert BetNotCancellable();
+        if (rec.status != BetStatus.FILLED && rec.status != BetStatus.FAILED) {
+            if (rec.status != BetStatus.ACTIVE) revert BetNotCancellable();
+            _checkAttestation(att, sig, inputs.nullifier_of_bet, REPORT_FILLED, REPORT_FAILED);
+        }
         // C2: confirm the condition has actually resolved (denominator > 0) before checking N/A
         uint256 denominator = ctf.payoutDenominator(inputs.market_id);
         if (denominator == 0) revert ConditionNotResolved();
@@ -692,45 +777,48 @@ contract Vault is ReentrancyGuard, Ownable2Step, Pausable {
     // Position Close (FC-1: secondary sale before settlement)
     // -------------------------------------------------------------------------
 
-    /// @notice Credit operator-reported FOK SELL proceeds back into the user's note.
+    /// @notice Credit operator-attested FOK SELL proceeds back into the user's note.
     /// Mirrors creditSettlement: the user spends the post-bet note, proves membership,
-    /// and recommits balance + sell_proceeds. The Vault injects sell_proceeds from
-    /// betRecords (set by reportSold) so the user cannot inflate it in the proof.
+    /// and recommits balance + sell_proceeds. The proceeds come from a SOLD operator
+    /// attestation (amountA = sold_shares, amountB = proceeds), injected so the user
+    /// cannot inflate them in the proof.
     ///
-    /// Requires status == CLOSING (set by reportSold), which blocks both a settlement
-    /// race (creditSettlement requires FILLED) and a double-close (after crediting the
-    /// status becomes CLOSED_CREDITED for a full sell, or returns to FILLED with reduced
-    /// expected_shares for a partial sell — a further close needs a fresh reportSold).
+    /// FC-9: position close is all-or-nothing — the SOLD attestation must cover the whole
+    /// position (att.amountA == rec.expected_shares). Callable on a filled position: an ACTIVE
+    /// full-fill bet or a FILLED (post-partial) record. Resolved markets settle, not close.
+    /// The record becomes CLOSED_CREDITED (terminal); no path back to FILLED.
     function closePosition(
         bytes calldata proof,
-        ClosePublicInputs calldata inputs
+        ClosePublicInputs calldata inputs,
+        OperatorAttestation calldata att,
+        bytes calldata sig
     ) external nonReentrant whenNotPaused {
         if (nullifiers.isSpent(inputs.nullifier)) revert NullifierSpent();
         if (!tree.isKnownRoot(inputs.merkle_root)) revert UnknownRoot();
 
         BetRecord storage rec = betRecords[inputs.nullifier_of_bet];
         if (rec.market_id == bytes32(0)) revert BetNotFound();
-        if (rec.status != BetStatus.CLOSING) revert BetNotClosing();
+        // A position can be closed only while filled: ACTIVE (full fill) or FILLED (post-partial).
+        if (rec.status != BetStatus.ACTIVE && rec.status != BetStatus.FILLED) revert BetNotClosing();
+        _checkAttestation(att, sig, inputs.nullifier_of_bet, REPORT_SOLD, REPORT_SOLD);
+        // Full close only: the attested sold_shares must equal the whole held position.
+        if (att.amountA != rec.expected_shares) revert InvalidSoldShares();
+        // Resolved markets settle (creditSettlement); they do not close.
+        bytes32 circuit_key = bytes32(uint256(rec.market_id) % BN254_P);
+        if (marketResolvedAt[circuit_key] != 0) revert CannotCloseResolvedMarket();
 
-        bytes32[] memory pubInputs = _closePublicInputs(inputs, rec.sell_proceeds);
+        uint64 sell_proceeds = att.amountB;
+        bytes32[] memory pubInputs = _closePublicInputs(inputs, sell_proceeds);
         if (!IVerifier(verifiers[POSITION_CLOSE]).verify(proof, pubInputs)) revert InvalidProof();
 
         nullifiers.markSpent(inputs.nullifier);
         tree.insert(inputs.new_commitment);
+        rec.status = BetStatus.CLOSED_CREDITED;
 
-        bool fullClose = rec.sold_shares >= rec.expected_shares;
-        if (fullClose) {
-            rec.status = BetStatus.CLOSED_CREDITED;
-        } else {
-            // Partial sell: the remainder stays open against fewer shares and settles
-            // (or closes again) later. expected_shares is reduced by the sold portion.
-            rec.expected_shares -= rec.sold_shares;
-            rec.status = BetStatus.FILLED;
-        }
-        rec.sell_proceeds = 0;
-        rec.sold_shares = 0;
-
-        emit PositionClosed(inputs.nullifier, inputs.nullifier_of_bet, inputs.new_commitment, fullClose);
+        // Emit BetSold (proceeds) before PositionClosed so wallet recovery can reconstruct the
+        // credited balance from chain (it pairs the two by block/logIndex within this tx).
+        emit BetSold(inputs.nullifier_of_bet, att.amountA, sell_proceeds);
+        emit PositionClosed(inputs.nullifier, inputs.nullifier_of_bet, inputs.new_commitment, true);
     }
 
     // -------------------------------------------------------------------------
@@ -740,27 +828,39 @@ contract Vault is ReentrancyGuard, Ownable2Step, Pausable {
     /// @notice Refund the unfilled remainder of a partially-filled limit order and
     /// normalize the bet record to a clean FILLED state. Constraint-identical to
     /// betCancellationCredit: the user spends the post-bet note, proves membership,
-    /// and recommits balance + refund_amount. The Vault injects
-    /// refund_amount = bet_amount - spent_amount from betRecords (set by
-    /// reportPartialFill) so the user cannot inflate it in the proof.
+    /// and recommits balance + refund_amount.
     ///
-    /// Requires status == PARTIAL_FILLED. After crediting, the record is normalized
-    /// (expected_shares := filled_shares, bet_amount := spent_amount, status := FILLED)
-    /// so creditSettlement / naCancellationCredit / closePosition all operate on a
-    /// normal FILLED record afterward.
+    /// FC-9: the partial fill is attested off-chain by a PARTIAL operator attestation
+    /// (amountA = filled_shares, amountB = spent_amount). The Vault validates the strict-partial
+    /// bounds, injects refund_amount = bet_amount - spent_amount, and after crediting normalizes
+    /// the record (expected_shares := filled_shares, bet_amount := spent_amount, status := FILLED)
+    /// so creditSettlement / naCancellationCredit / closePosition all operate on a normal FILLED
+    /// record afterward. This (post-partial normalization) is the ONLY way a record reaches the
+    /// on-chain FILLED status, which is what makes the no-attestation FILLED branch of those
+    /// functions safe.
     function partialFillCredit(
         bytes calldata proof,
-        PartialFillPublicInputs calldata inputs
+        PartialFillPublicInputs calldata inputs,
+        OperatorAttestation calldata att,
+        bytes calldata sig
     ) external nonReentrant whenNotPaused {
         if (nullifiers.isSpent(inputs.nullifier)) revert NullifierSpent();
         if (!tree.isKnownRoot(inputs.merkle_root)) revert UnknownRoot();
 
         BetRecord storage rec = betRecords[inputs.nullifier_of_bet];
         if (rec.market_id == bytes32(0)) revert BetNotFound();
-        if (rec.status != BetStatus.PARTIAL_FILLED) revert BetNotPartialFilled();
+        // Only a not-yet-credited bet can be partial-credited. A FILLED/terminal record has
+        // already been normalized/credited and must not be re-entered.
+        if (rec.status != BetStatus.ACTIVE) revert BetNotPartialFilled();
+        _checkAttestation(att, sig, inputs.nullifier_of_bet, REPORT_PARTIAL, REPORT_PARTIAL);
 
-        // spent_amount <= bet_amount is enforced in reportPartialFill, so this cannot underflow.
-        uint64 refund_amount = rec.bet_amount - rec.spent_amount;
+        uint64 filled_shares = att.amountA;
+        uint64 spent_amount = att.amountB;
+        // Strict partial: a true partial fill leaves a positive unfilled remainder. A full fill
+        // must go through creditSettlement/closePosition instead (refund would be 0 here).
+        if (filled_shares == 0 || filled_shares >= rec.expected_shares) revert InvalidFilledShares();
+        if (spent_amount == 0 || spent_amount >= rec.bet_amount) revert InvalidSpentAmount();
+        uint64 refund_amount = rec.bet_amount - spent_amount;
 
         bytes32[] memory pubInputs = _partialCreditPublicInputs(inputs, refund_amount);
         if (!IVerifier(verifiers[PARTIAL_CREDIT]).verify(proof, pubInputs)) revert InvalidProof();
@@ -769,13 +869,57 @@ contract Vault is ReentrancyGuard, Ownable2Step, Pausable {
         tree.insert(inputs.new_commitment);
 
         // Normalize to a clean FILLED record reflecting only the shares actually bought.
-        rec.expected_shares = rec.filled_shares;
-        rec.bet_amount = rec.spent_amount;
+        rec.expected_shares = filled_shares;
+        rec.bet_amount = spent_amount;
         rec.status = BetStatus.FILLED;
         rec.filled_shares = 0;
         rec.spent_amount = 0;
 
         emit PartialFillCredited(inputs.nullifier, inputs.nullifier_of_bet, inputs.new_commitment);
+    }
+
+    // -------------------------------------------------------------------------
+    // Consolidate (FC-8: merge up to 4 notes into one)
+    // -------------------------------------------------------------------------
+
+    /// @notice Merge up to 4 same-owner notes into a single output note whose balance
+    /// is the sum of the inputs, continuing slot 0's lineage. Pure value-preserving
+    /// merge: no betRecords, no token movement. The frontend uses this to defragment
+    /// notes before a bet/withdrawal that exceeds any single note's balance.
+    ///
+    /// The circuit guarantees: slot 0 is active; every active slot's note is in the
+    /// tree at `merkle_root`; each active slot publishes its real nullifier while
+    /// inactive slots publish bytes32(0); the output commitment binds the summed
+    /// balance. The Vault marks EVERY non-zero published nullifier spent — it must NOT
+    /// de-duplicate, because the same note in two active slots yields two identical
+    /// nullifiers and the second markSpent reverting AlreadySpent is the only thing
+    /// preventing a double-count of that note's balance.
+    function consolidate(
+        bytes calldata proof,
+        ConsolidatePublicInputs calldata inputs
+    ) external nonReentrant whenNotPaused {
+        if (!tree.isKnownRoot(inputs.merkle_root)) revert UnknownRoot();
+        // Belt-and-suspenders: the circuit already forces slot 0 active, but guard here
+        // so a mis-wired verifier slot can never insert a leaf without spending a note.
+        if (inputs.nullifier[0] == bytes32(0)) revert EmptyConsolidation();
+
+        // CHECKS: every non-zero (active) nullifier must be unspent.
+        for (uint256 j = 0; j < 4; j++) {
+            if (inputs.nullifier[j] != bytes32(0) && nullifiers.isSpent(inputs.nullifier[j]))
+                revert NullifierSpent();
+        }
+        if (!IVerifier(verifiers[CONSOLIDATE]).verify(proof, _consolidatePublicInputs(inputs)))
+            revert InvalidProof();
+
+        // EFFECTS: spend every non-zero nullifier (no de-dup — see notice). A duplicate
+        // active note reverts AlreadySpent in NullifierRegistry.markSpent.
+        for (uint256 j = 0; j < 4; j++) {
+            if (inputs.nullifier[j] != bytes32(0)) nullifiers.markSpent(inputs.nullifier[j]);
+        }
+        tree.insert(inputs.new_commitment);
+
+        emit Consolidated(inputs.nullifier, inputs.new_commitment);
+        // INTERACTIONS: none — no token movement, no betRecords touched.
     }
 
     // -------------------------------------------------------------------------
@@ -891,6 +1035,22 @@ contract Vault is ReentrancyGuard, Ownable2Step, Pausable {
         p[2] = i.new_commitment;
         p[3] = i.nullifier_of_bet;
         p[4] = bytes32(uint256(refund_amount)); // Vault-injected; uint64 → uint256 → bytes32
+        return p;
+    }
+
+    /// @dev Consolidate public inputs (FC-8): [merkle_root, nullifier[0..3], new_commitment] = 6.
+    function _consolidatePublicInputs(ConsolidatePublicInputs calldata i)
+        internal
+        pure
+        returns (bytes32[] memory)
+    {
+        bytes32[] memory p = new bytes32[](6);
+        p[0] = i.merkle_root;
+        p[1] = i.nullifier[0];
+        p[2] = i.nullifier[1];
+        p[3] = i.nullifier[2];
+        p[4] = i.nullifier[3];
+        p[5] = i.new_commitment;
         return p;
     }
 }

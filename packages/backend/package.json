@@ -9,12 +9,14 @@
     "mock-clob-server",
     "mock-env"
   ],
-  "scripts": {
-    "test": "pnpm -r test",
-    "build": "pnpm -r build"
-  },
+  "_comment_scripts": "Source-less aggregator: intentionally NO build/test scripts. pnpm -r is workspace-global regardless of cwd, so `pnpm -r build` here re-scopes the whole workspace and double-builds every package — racing two concurrent `next build`s on the frontend's .next dir (ENOENT mkdir .next/export). The sub-packages are top-level workspace members already built/tested directly by the root `pnpm -r build` / `pnpm -r test`. To build only the backend from the repo root: pnpm --filter \"./packages/backend/*\" build",
+  "scripts": {},
   "dependencies": {
     "better-sqlite3": "^12.10.0",
+    "ts-node": "^10.9.2",
     "typescript": "^5.9.3"
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.0"
   }
 }

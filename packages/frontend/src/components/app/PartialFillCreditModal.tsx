@@ -17,13 +17,16 @@ import {
   type Note,
 } from '@/lib/notes'
 import {
-  BET_STATUS,
+  fetchAttestation,
+  fetchBetRecord,
   fetchMerklePath,
-  fetchPartialFill,
   relayPartialCredit,
   waitForTransactionConfirmation,
+  type SignedAttestation,
 } from '@/lib/api'
 import { generateProofInWorker } from '@/lib/prover'
+
+const REPORT_PARTIAL = 3
 
 type Phase = 'input' | 'proving' | 'done' | 'error'
 
@@ -47,10 +50,12 @@ export function PartialFillCreditModal({
   const { signMessageAsync } = useSignMessage()
   const [phase, setPhase] = useState<Phase>('input')
   const [error, setError] = useState<string | null>(null)
-  // On-chain partial-fill figures (1e6-scaled). refund = betAmount - spentAmount.
+  // FC-9: figures come from the operator's off-chain PARTIAL attestation (filled/spent) plus
+  // the on-chain bet_amount (set by authorizeBet). refund = betAmount - spentAmount.
   const [betAmount, setBetAmount] = useState<bigint>(0n)
   const [spentAmount, setSpentAmount] = useState<bigint>(0n)
   const [filledShares, setFilledShares] = useState<bigint>(0n)
+  const [attestation, setAttestation] = useState<SignedAttestation | null>(null)
   const [loading, setLoading] = useState(true)
 
   const refundAmount = betAmount > spentAmount ? betAmount - spentAmount : 0n
@@ -64,15 +69,17 @@ export function PartialFillCreditModal({
     void import('@/lib/prover').then(({ initProver }) => initProver())
     void (async () => {
       try {
-        const pf = await fetchPartialFill(vaultAddress, nullifierOfBet)
-        if (pf.status !== BET_STATUS.PARTIAL_FILLED) {
-          setError('This position is not awaiting a partial-fill refund (status is no longer PARTIAL_FILLED).')
+        const att = await fetchAttestation(nullifierOfBet)
+        if (!att || att.reportType !== REPORT_PARTIAL) {
+          setError('No partial-fill attestation is available for this position yet. The operator signs it once the limit order ends partially filled.')
           setPhase('error')
           return
         }
-        setBetAmount(pf.betAmount)
-        setSpentAmount(pf.spentAmount)
-        setFilledShares(pf.filledShares)
+        const rec = await fetchBetRecord(vaultAddress, nullifierOfBet)
+        setAttestation(att)
+        setBetAmount(rec.betAmount)
+        setSpentAmount(BigInt(att.amountB))
+        setFilledShares(BigInt(att.amountA))
       } catch (e) {
         setError(e instanceof Error ? e.message : String(e))
         setPhase('error')
@@ -138,7 +145,7 @@ export function PartialFillCreditModal({
         nullifier: outputNote.nullifier,
         new_commitment: newCommitment,
         nullifier_of_bet: nullifierOfBet,
-      })
+      }, attestation ?? undefined)
       await waitForTransactionConfirmation(txHash as `0x${string}`)
 
       markNoteSpent(outputNote.commitment)

@@ -510,3 +510,31 @@ For very small bets, a proof batching/recursion layer (Nova or ProtoGalaxy foldi
 | N/A Cancellation Credit | `cancel_credit.nr` | 6 | Specified | Restore note when market resolves N/A |
 
 All five proof types are now fully specified. No circuit design questions remain open. The next step is Claude Code implementation of all circuits in Noir.
+
+> **NOTE:** the live circuits are Circom/snarkjs Groth16 in `packages/circuits/groth16/` (the `.nr` files above are spec-only). The active set also includes deposit (FC-2), position_close (FC-1), partial_credit (FC-4), and consolidate (FC-8) — see `docs/future-changes.md`.
+
+---
+
+## §X — Consolidate (FC-8): multi-note merge
+
+`packages/circuits/groth16/consolidate.circom` (`Consolidate(K)`, K=4). Merges up to 4 **same-owner** notes into one, continuing slot 0's lineage. Pure value-preserving merge — no bet, no withdrawal, no token movement. Used by the frontend to defragment notes before a bet/withdrawal that exceeds any single note's balance.
+
+**Private inputs (per slot j=0..3):** `secret[j], balance[j], nonce[j], merkle_path[j][32], merkle_path_indices[j][32], is_active[j]`; plus a single shared `owner_address` (all of a wallet's notes carry the same owner_address).
+
+**Public inputs (6):** `merkle_root, nullifier[0..3], new_commitment`. Verifier slot `CONSOLIDATE = 8`.
+
+**Constraints (per slot j):**
+- `AssertBool(is_active[j])` — strict boolean.
+- `AssertBits(64)` on `balance[j]`, `nonce[j]`.
+- `cm[j] = Poseidon4(secret[j], balance[j], nonce[j], owner_address)`.
+- **Gated membership:** `root_j = PoseidonMerklePath(32)(cm[j], …)`; `is_active[j] * (root_j − merkle_root) === 0` (active ⇒ in tree; inactive ⇒ unconstrained).
+- **Gated nullifier:** `nullifier[j] === is_active[j] * Poseidon2(secret[j], nonce[j])` (active ⇒ real nullifier; inactive ⇒ 0, the Vault's skip sentinel).
+- **Gated value:** `eff[j] = is_active[j] * balance[j]`.
+
+**Aggregate:** `is_active[0] === 1`; `sum = Σ eff[j]` (range-checked u64); output `new_commitment === Poseidon4(secret[0], sum, nonce[0]+1, owner_address)`.
+
+**Padding soundness.** (a) inject-value: blocked — inactive `eff[j]=0` (boolean-gated). (b) membership-bypass: blocked — active slot forces `root_j == merkle_root`, and the Vault checks `isKnownRoot`. (c) double-count one note in two active slots: blocked **on-chain** — both slots publish the same nullifier and the second `markSpent` reverts `AlreadySpent`, so the Vault marks every non-zero nullifier without de-duplication. (d) all-inactive forge: blocked by `is_active[0] === 1`. ~34k constraints (well under the 2^17 ptau).
+
+## §Y — Operator fill attestations (FC-9)
+
+Operator fill reporting is now **off-chain and gasless** (no `report*` on-chain functions). The operator signs an EIP-712 `OperatorAttestation{nullifierOfBet, reportType(1=FILLED,2=FAILED,3=PARTIAL,4=SOLD), amountA, amountB}` and the user submits it with their credit proof; the Vault recovers the signer (`ECDSA.recover == signingLayerOperator`) and injects the attested values. The credit circuits are UNCHANGED — they still take the injected amount as a public input; only the SOURCE of that injected value moved from on-chain `betRecords`/`report*` to the operator's signed attestation. See `docs/future-changes.md` FC-9 and `docs/threat-model.md` T22/T23 (single-terminal-signing invariant).

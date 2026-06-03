@@ -21,10 +21,11 @@ import type {
   DepositInputs,
   PositionCloseInputs,
   PartialCreditInputs,
+  ConsolidateInputs,
   ProofResult,
 } from '../lib/prover'
 
-export type ProofType = 'bet_auth' | 'withdrawal' | 'settlement' | 'bet_cancel' | 'cancel_credit' | 'deposit' | 'position_close' | 'partial_credit'
+export type ProofType = 'bet_auth' | 'withdrawal' | 'settlement' | 'bet_cancel' | 'cancel_credit' | 'deposit' | 'position_close' | 'partial_credit' | 'consolidate'
 
 export type ProverWorkerMessage =
   | { type: 'bet_auth';     inputs: BetAuthInputs }
@@ -35,6 +36,7 @@ export type ProverWorkerMessage =
   | { type: 'deposit';      inputs: DepositInputs }
   | { type: 'position_close'; inputs: PositionCloseInputs }
   | { type: 'partial_credit'; inputs: PartialCreditInputs }
+  | { type: 'consolidate';  inputs: ConsolidateInputs }
 
 export type ProverWorkerResult =
   | { type: 'done';  result: ProofResult }
@@ -42,7 +44,7 @@ export type ProverWorkerResult =
 
 self.onmessage = async (event: MessageEvent<ProverWorkerMessage>) => {
   try {
-    const { generateBetAuthProof, generateWithdrawalProof, generateSettlementProof, generateBetCancelProof, generateCancelCreditProof, generateDepositProof, generatePositionCloseProof, generatePartialCreditProof } =
+    const { generateBetAuthProof, generateWithdrawalProof, generateSettlementProof, generateBetCancelProof, generateCancelCreditProof, generateDepositProof, generatePositionCloseProof, generatePartialCreditProof, generateConsolidateProof } =
       await import('../lib/prover')
 
     let result: ProofResult
@@ -71,6 +73,9 @@ self.onmessage = async (event: MessageEvent<ProverWorkerMessage>) => {
         break
       case 'partial_credit':
         result = await generatePartialCreditProof(event.data.inputs)
+        break
+      case 'consolidate':
+        result = await generateConsolidateProof(event.data.inputs)
         break
       default:
         throw new Error(`Unknown proof type: ${(event.data as { type: string }).type}`)
