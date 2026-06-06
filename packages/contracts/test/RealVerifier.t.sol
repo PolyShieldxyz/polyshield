@@ -80,7 +80,7 @@ contract RealVerifierTest is Test {
 
     function test_realBetAuthProof_verifies() public view {
         (bytes memory proof, bytes32[] memory signals) = _load("bet_auth_proof.json");
-        assertEq(signals.length, 9, "bet_auth must expose 9 public inputs");
+        assertEq(signals.length, 10, "bet_auth must expose 10 public inputs");
         assertTrue(betAuth.verify(proof, signals), "real bet_auth proof must verify");
     }
 

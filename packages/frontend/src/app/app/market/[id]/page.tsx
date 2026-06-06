@@ -7,6 +7,17 @@ import { Icon, ICONS } from '@/components/ui/Icon'
 import { BetModal } from '@/components/app/BetModal'
 import { MARKETS, type MarketEntry } from '@/lib/marketsData'
 
+// Order types are selected here on the market page (not in the bet-auth popup) so the
+// user picks how the order rests before generating a proof. FOK/FAK are market orders;
+// GTC/GTD are limit orders that rest at the user's limit price.
+type OrderType = 'FOK' | 'FAK' | 'GTC' | 'GTD'
+const ORDER_TYPE_LABEL: Record<OrderType, string> = {
+  FOK: 'Fill-or-kill',
+  FAK: 'Fill-and-kill',
+  GTC: 'Limit (GTC)',
+  GTD: 'Limit (GTD)',
+}
+
 type MarketPayload = {
   market: MarketEntry
   source: 'live' | 'fixture'
@@ -26,10 +37,23 @@ function FullChart({ trend }: { trend: number[] }) {
   const w = 680
   const h = 280
   const data = useMemo(() => {
+    // Deterministic seeded jitter (mulberry32). Math.random() here produced different values
+    // on the server vs the client, so the SSR-rendered SVG path attributes didn't match on
+    // hydration (React hydration error). A stable seed keeps the decorative chart identical on
+    // both renders. Seed off the trend so distinct markets still look distinct.
+    let seed = 0x9e3779b9
+    for (const v of trend) seed = (seed ^ Math.round((v ?? 0.5) * 1e6)) >>> 0
+    const rand = () => {
+      seed = (seed + 0x6d2b79f5) >>> 0
+      let t = seed
+      t = Math.imul(t ^ (t >>> 15), t | 1)
+      t ^= t + Math.imul(t ^ (t >>> 7), t | 61)
+      return ((t ^ (t >>> 14)) >>> 0) / 4294967296
+    }
     const pts: number[] = []
     let p = trend[0] ?? 0.5
     for (let i = 0; i < 120; i++) {
-      p += (Math.sin(i * 0.3) + (Math.random() - 0.5)) * 0.008
+      p += (Math.sin(i * 0.3) + (rand() - 0.5)) * 0.008
       p = Math.max(0.05, Math.min(0.98, p))
       pts.push(p)
     }
@@ -80,6 +104,10 @@ function MarketDetailContent() {
   const [side, setSide] = useState<'YES' | 'NO'>('YES')
   const [amount, setAmount] = useState(1000)
   const [modalOpen, setModalOpen] = useState(false)
+  // FC-4 advanced order types, selected on the market page and passed into the bet modal.
+  const [orderType, setOrderType] = useState<OrderType>('FOK')
+  const [limitCents, setLimitCents] = useState(50)
+  const [gtdMinutes, setGtdMinutes] = useState(60)
 
   useEffect(() => {
     if (searchParams.get('modal') === 'bet') {
@@ -103,7 +131,16 @@ function MarketDetailContent() {
   const market = payload?.market ?? MARKETS.find((entry) => entry.id === id) ?? MARKETS[0]
   const book = payload?.book
   const price = side === 'YES' ? market.yes : 1 - market.yes
-  const shares = Math.floor(amount / price)
+  // FOK/FAK fill at the live market price; GTC/GTD rest at the user's limit price.
+  const isLimit = orderType === 'GTC' || orderType === 'GTD'
+  const effectivePrice = isLimit ? limitCents / 100 : price
+  const shares = effectivePrice > 0 ? Math.floor(amount / effectivePrice) : 0
+
+  // Default the limit price to the current side's market price; resets when the side
+  // flips (price value changes). The user can override below.
+  useEffect(() => {
+    setLimitCents(Math.max(1, Math.min(99, Math.round(price * 100))))
+  }, [price])
 
   const closeModal = () => {
     setModalOpen(false)
@@ -322,9 +359,65 @@ function MarketDetailContent() {
               </div>
 
               <div className="hairline-t mt-4" style={{ paddingTop: 12 }}>
+                <div className="row gap-2" style={{ alignItems: 'center' }}>
+                  <div className="micro">ORDER TYPE</div>
+                  <span className="pill pill-soft" style={{ fontSize: 9 }}>ADVANCED</span>
+                </div>
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 6, marginTop: 8 }}>
+                  {(['FOK', 'FAK', 'GTC', 'GTD'] as OrderType[]).map((t) => (
+                    <button
+                      key={t}
+                      type="button"
+                      onClick={() => setOrderType(t)}
+                      className={`btn btn-sm ${orderType === t ? 'btn-cyan' : 'btn-ghost'}`}
+                      style={{ justifyContent: 'center', fontSize: 11 }}
+                    >
+                      {ORDER_TYPE_LABEL[t]}
+                    </button>
+                  ))}
+                </div>
+                {isLimit && (
+                  <div className="mt-3">
+                    <div className="micro">LIMIT PRICE (¢ / share, 1–99)</div>
+                    <input
+                      type="number" min={1} max={99} value={limitCents}
+                      onChange={(e) => setLimitCents(Math.max(1, Math.min(99, Number(e.target.value) || 1)))}
+                      aria-label="Limit price in cents per share"
+                      style={{ width: '100%', background: 'var(--bg-1)', border: '1px solid var(--line-strong)', borderRadius: 6, padding: '8px 12px', marginTop: 6, color: 'var(--text)', fontFamily: 'var(--mono)', fontSize: 14 }}
+                    />
+                    {orderType === 'GTD' && (
+                      <>
+                        <div className="micro" style={{ marginTop: 10 }}>EXPIRES IN (MINUTES)</div>
+                        <input
+                          type="number" min={1} value={gtdMinutes}
+                          onChange={(e) => setGtdMinutes(Math.max(1, Number(e.target.value) || 1))}
+                          aria-label="Order expiry in minutes"
+                          style={{ width: '100%', background: 'var(--bg-1)', border: '1px solid var(--line-strong)', borderRadius: 6, padding: '8px 12px', marginTop: 6, color: 'var(--text)', fontFamily: 'var(--mono)', fontSize: 14 }}
+                        />
+                      </>
+                    )}
+                    <div className="small mt-2" style={{ fontSize: 11, color: 'var(--text-3)' }}>
+                      Rests on the book; the full stake is held until it fills, expires, or partially fills (then reclaim the remainder).
+                    </div>
+                  </div>
+                )}
+                {orderType === 'FAK' && (
+                  <div className="small mt-2" style={{ fontSize: 11, color: 'var(--text-3)' }}>
+                    Fills immediately at the market price for whatever size is available and kills the rest; reclaim any unfilled remainder afterward.
+                  </div>
+                )}
+              </div>
+
+              <div className="hairline-t mt-4" style={{ paddingTop: 12 }}>
                 {/* FINDING: FUNC-001 — honest proof time (Groth16 in-browser proving is 30s–2min, not ~2s). */}
-                {[['Limit price', price.toFixed(3)], ['Expected shares', shares.toLocaleString()], ['Time in force', 'FOK'], ['Proof time', '30s–2min']].map(([label, value]) => (
-                  <div key={label as string} className="row" style={{ justifyContent: 'space-between', padding: '6px 0', borderBottom: '1px solid var(--line)' }}>
+                {([
+                  ['Price', effectivePrice.toFixed(3)],
+                  ['Expected shares', shares.toLocaleString()],
+                  ['Time in force', orderType],
+                  ...(orderType === 'GTD' ? [['Expires in', `${gtdMinutes} min`] as [string, string]] : []),
+                  ['Proof time', '30s–2min'],
+                ] as [string, string][]).map(([label, value]) => (
+                  <div key={label} className="row" style={{ justifyContent: 'space-between', padding: '6px 0', borderBottom: '1px solid var(--line)' }}>
                     <span className="small" style={{ fontSize: 12 }}>{label}</span>
                     <span className="mono" style={{ fontSize: 12 }}>{value}</span>
                   </div>
@@ -363,6 +456,9 @@ function MarketDetailContent() {
           side={side}
           initialAmount={amount}
           price={price}
+          orderType={orderType}
+          limitCents={limitCents}
+          gtdMinutes={gtdMinutes}
           onClose={closeModal}
           onSuccess={async () => {
             // no-op for now; modal drives portfolio refresh by local storage state

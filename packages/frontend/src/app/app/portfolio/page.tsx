@@ -7,12 +7,15 @@ import { useRouter, useSearchParams } from 'next/navigation'
 import { SettlementModal } from '@/components/app/SettlementModal'
 import { ClosePositionModal } from '@/components/app/ClosePositionModal'
 import { PartialFillCreditModal } from '@/components/app/PartialFillCreditModal'
+import { BetCancelRefundModal } from '@/components/app/BetCancelRefundModal'
 import { Icon, ICONS } from '@/components/ui/Icon'
 import { log } from '@/lib/logger'
 import { formatUsdc, type Note } from '@/lib/notes'
 import { BET_STATUS, fetchAttestation, fetchBetStatus } from '@/lib/api'
 
-// FC-9 attestation reportType (off-chain operator fill report).
+// FC-9 attestation reportType (off-chain operator fill report): 1=FILLED, 2=FAILED, 3=PARTIAL.
+const REPORT_FILLED = 1
+const REPORT_FAILED = 2
 const REPORT_PARTIAL = 3
 import { portfolioSummaryRows, usePortfolioState } from '@/lib/accountState'
 
@@ -41,11 +44,14 @@ function PortfolioContent() {
   const [closeLostOpen, setCloseLostOpen] = useState(false)
   const [closeReceipt, setCloseReceipt] = useState<Note | null>(null)
   const [partialReceipt, setPartialReceipt] = useState<Note | null>(null)
+  const [refundReceipt, setRefundReceipt] = useState<Note | null>(null)
   // receipt.id → on-chain BetStatus.
   const [betStatuses, setBetStatuses] = useState<Record<string, number>>({})
-  // FC-9: receipt.id → whether the operator has signed a PARTIAL fill attestation off-chain
-  // (the partial-fill refund is now driven by the attestation, not an on-chain status).
-  const [partialFlags, setPartialFlags] = useState<Record<string, boolean>>({})
+  // FC-9: receipt.id → the operator's off-chain bet-OUTCOME attestation reportType
+  // (1=FILLED, 2=FAILED, 3=PARTIAL, or 0=none yet). A resting GTC/GTD bet is ACTIVE on-chain
+  // either way, so this off-chain outcome — not the on-chain status — tells filled vs
+  // resting vs expired apart, and drives the per-row label and action.
+  const [betOutcomes, setBetOutcomes] = useState<Record<string, number>>({})
   const { state, loading, refresh } = usePortfolioState(address)
 
   useEffect(() => {
@@ -66,29 +72,29 @@ function PortfolioContent() {
   )
   useEffect(() => {
     const receipts = state?.openReceipts ?? []
-    if (receipts.length === 0) { setBetStatuses({}); setPartialFlags({}); return }
+    if (receipts.length === 0) { setBetStatuses({}); setBetOutcomes({}); return }
     let cancelled = false
     void (async () => {
       const entries = await Promise.all(
         receipts.map(async (r) => {
           const n = (r.nullifier_of_bet ?? r.nullifier) as `0x${string}`
           let status = -1
-          let partial = false
+          let outcome = 0
           try { status = await fetchBetStatus(VAULT_ADDRESS, n) } catch { /* leave -1 */ }
-          // FC-9: a partial-fill refund is available when the operator has signed a PARTIAL
-          // attestation AND the bet has not yet been credited (still ACTIVE on-chain).
-          if (status === BET_STATUS.ACTIVE) {
-            try {
-              const att = await fetchAttestation(n)
-              partial = !!att && att.reportType === REPORT_PARTIAL
-            } catch { /* no attestation yet */ }
+          // FC-9: read the operator's bet-OUTCOME attestation. While the bet is still
+          // open on-chain (ACTIVE/RESTING — not yet credited), this distinguishes a filled
+          // position (FILLED → closeable) from an expired/missed order (FAILED → reclaim)
+          // from a partial fill (PARTIAL → claim) from a still-resting order (none → pending).
+          if (status === BET_STATUS.ACTIVE || status === BET_STATUS.RESTING) {
+            const att = await fetchAttestation(n)
+            outcome = att ? att.reportType : 0
           }
-          return [r.id, status, partial] as const
+          return [r.id, status, outcome] as const
         }),
       )
       if (!cancelled) {
         setBetStatuses(Object.fromEntries(entries.map((e) => [e[0], e[1]])))
-        setPartialFlags(Object.fromEntries(entries.map((e) => [e[0], e[2]])))
+        setBetOutcomes(Object.fromEntries(entries.map((e) => [e[0], e[2]])))
       }
     })()
     return () => { cancelled = true }
@@ -111,6 +117,59 @@ function PortfolioContent() {
     () => (state?.lostBets ?? []).map((r) => ({ receipt: r, payoutPerShare: 0n, claimAmount: 0n })),
     [state],
   )
+
+  // Classify each open bet from the operator's outcome attestation. A FILLED/PARTIAL bet (or
+  // one ready to settle) actually HOLDS SHARES → it's a POSITION. A still-pending or
+  // expired/unfilled order holds no shares → it's an ORDER. The two are shown separately so a
+  // resting limit order is never mistaken for (or acted on like) a filled position.
+  const classify = (receipt: Note) => {
+    const ready = readyByReceiptId.has(receipt.id)
+    const outcome = betOutcomes[receipt.id] ?? 0
+    const isPartial = outcome === REPORT_PARTIAL
+    const isFailed = outcome === REPORT_FAILED
+    const isFilled = outcome === REPORT_FILLED
+    return { ready, isPartial, isFailed, isFilled, isPosition: ready || isFilled || isPartial }
+  }
+  const visibleReceipts = (state?.openReceipts ?? []).filter((r) => !lostBetIds.has(r.id))
+  const openPositions = visibleReceipts.filter((r) => classify(r).isPosition)
+  const openOrders = visibleReceipts.filter((r) => !classify(r).isPosition)
+
+  const renderReceiptRow = (receipt: Note) => {
+    const { ready, isPartial, isFailed, isFilled } = classify(receipt)
+    const label = ready ? 'READY TO SETTLE'
+      : isPartial ? 'PARTIAL FILL'
+      : isFailed ? 'EXPIRED / NOT FILLED'
+      : isFilled ? 'FILLED'
+      : 'PENDING'
+    const pillClass = ready ? 'pill-green' : isPartial ? 'pill-amber' : isFailed ? 'pill-red' : 'pill-soft'
+    return (
+      <tr key={receipt.id}>
+        <td>{receipt.marketId ?? receipt.id}</td>
+        <td>{receipt.side ?? '—'}</td>
+        <td className="num" style={{ textAlign: 'right' }}>${formatUsdc(receipt.bet_amount ?? receipt.balance)}</td>
+        <td className="num" style={{ textAlign: 'right' }}>{receipt.expectedShares?.toString() ?? '—'}</td>
+        <td>
+          <span className={`pill ${pillClass}`} style={{ fontSize: 10 }}>{label}</span>
+        </td>
+        <td style={{ textAlign: 'right' }}>
+          {ready ? (
+            <button className="btn btn-sm btn-primary" onClick={() => setModalOpen(true)}>Settle</button>
+          ) : isPartial ? (
+            <button className="btn btn-sm btn-primary" onClick={() => setPartialReceipt(receipt)}>Claim refund</button>
+          ) : isFailed ? (
+            <button className="btn btn-sm btn-primary" onClick={() => setRefundReceipt(receipt)}>Reclaim stake</button>
+          ) : isFilled && receipt.position_id ? (
+            // Close is only meaningful once the bet actually filled (there are shares to sell).
+            <button className="btn btn-sm" onClick={() => setCloseReceipt(receipt)}>Close</button>
+          ) : (
+            <span className="small" style={{ fontSize: 10, color: 'var(--text-3)' }}>
+              {isFilled ? '—' : 'Waiting for fill…'}
+            </span>
+          )}
+        </td>
+      </tr>
+    )
+  }
 
   const closeModal = () => {
     setModalOpen(false)
@@ -160,10 +219,11 @@ function PortfolioContent() {
               ))}
             </div>
 
+            {/* Positions = bets that actually filled (you hold shares): settle / close / claim. */}
             <div className="panel mt-4" style={{ padding: 0, overflow: 'hidden' }}>
               <div className="row hairline-b" style={{ padding: '12px 16px', justifyContent: 'space-between' }}>
-                <div className="micro">OPEN BETS</div>
-                <Link href="/app/markets" className="btn btn-sm btn-ghost" style={{ textDecoration: 'none' }}>Markets</Link>
+                <div className="micro">OPEN POSITIONS</div>
+                <span className="small" style={{ fontSize: 11, color: 'var(--text-3)' }}>Filled — you hold shares</span>
               </div>
               <table className="tbl">
                 <thead>
@@ -171,56 +231,50 @@ function PortfolioContent() {
                     <th>Market</th>
                     <th>Side</th>
                     <th style={{ textAlign: 'right' }}>Amount</th>
-                    <th style={{ textAlign: 'right' }}>Expected shares</th>
+                    <th style={{ textAlign: 'right' }}>Shares</th>
                     <th>Status</th>
                     <th></th>
                   </tr>
                 </thead>
                 <tbody>
-                  {state.openReceipts.filter((r) => !lostBetIds.has(r.id)).length === 0 && (
+                  {openPositions.length === 0 && (
                     <tr>
                       <td colSpan={6} style={{ textAlign: 'center', color: 'var(--text-3)', padding: 24, fontSize: 12 }}>
-                        No open bets yet.
+                        No open positions yet.
                       </td>
                     </tr>
                   )}
-                  {state.openReceipts.filter((r) => !lostBetIds.has(r.id)).map((receipt) => {
-                    const ready = readyByReceiptId.has(receipt.id)
-                    // FC-9: partial-fill refund is signalled by an off-chain PARTIAL attestation,
-                    // not an on-chain status (operator reporting is now gasless).
-                    const isPartial = partialFlags[receipt.id] === true
-                    const label = ready ? 'READY TO SETTLE'
-                      : isPartial ? 'PARTIAL FILL'
-                      : 'OPEN'
-                    const pillClass = ready ? 'pill-green' : isPartial ? 'pill-amber' : 'pill-soft'
-                    return (
-                    <tr key={receipt.id}>
-                      <td>{receipt.marketId ?? receipt.id}</td>
-                      <td>{receipt.side ?? '—'}</td>
-                      <td className="num" style={{ textAlign: 'right' }}>${formatUsdc(receipt.bet_amount ?? receipt.balance)}</td>
-                      <td className="num" style={{ textAlign: 'right' }}>{receipt.expectedShares?.toString() ?? '—'}</td>
-                      <td>
-                        <span className={`pill ${pillClass}`} style={{ fontSize: 10 }}>
-                          {label}
-                        </span>
-                      </td>
-                      <td style={{ textAlign: 'right' }}>
-                        {ready ? (
-                          <button className="btn btn-sm btn-primary" onClick={() => setModalOpen(true)}>
-                            Settle
-                          </button>
-                        ) : isPartial ? (
-                          <button className="btn btn-sm btn-primary" onClick={() => setPartialReceipt(receipt)}>
-                            Claim refund
-                          </button>
-                        ) : receipt.position_id ? (
-                          <button className="btn btn-sm" onClick={() => setCloseReceipt(receipt)}>
-                            Close
-                          </button>
-                        ) : null}
+                  {openPositions.map(renderReceiptRow)}
+                </tbody>
+              </table>
+            </div>
+
+            {/* Orders = bets not (yet) filled — resting limit orders and expired/unfilled orders. */}
+            <div className="panel mt-4" style={{ padding: 0, overflow: 'hidden' }}>
+              <div className="row hairline-b" style={{ padding: '12px 16px', justifyContent: 'space-between' }}>
+                <div className="micro">OPEN ORDERS</div>
+                <span className="small" style={{ fontSize: 11, color: 'var(--text-3)' }}>Not filled — no shares held yet</span>
+              </div>
+              <table className="tbl">
+                <thead>
+                  <tr>
+                    <th>Market</th>
+                    <th>Side</th>
+                    <th style={{ textAlign: 'right' }}>Amount</th>
+                    <th style={{ textAlign: 'right' }}>Order shares</th>
+                    <th>Status</th>
+                    <th></th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {openOrders.length === 0 && (
+                    <tr>
+                      <td colSpan={6} style={{ textAlign: 'center', color: 'var(--text-3)', padding: 24, fontSize: 12 }}>
+                        No open orders.
                       </td>
                     </tr>
-                  )})}
+                  )}
+                  {openOrders.map(renderReceiptRow)}
                 </tbody>
               </table>
             </div>
@@ -427,6 +481,16 @@ function PortfolioContent() {
           vaultAddress={VAULT_ADDRESS}
           onClose={() => setPartialReceipt(null)}
           onComplete={async () => { setPartialReceipt(null); await refresh() }}
+        />
+      )}
+      {address && refundReceipt && (
+        <BetCancelRefundModal
+          open={!!refundReceipt}
+          address={address}
+          receipt={refundReceipt}
+          vaultAddress={VAULT_ADDRESS}
+          onClose={() => setRefundReceipt(null)}
+          onComplete={async () => { setRefundReceipt(null); await refresh() }}
         />
       )}
     </div>

@@ -1,3 +1,5 @@
+import fs from "fs";
+import path from "path";
 import { ethers } from "ethers";
 import pino from "pino";
 import { config } from "./config";
@@ -18,6 +20,33 @@ const provider = new ethers.JsonRpcProvider(config.polygonRpcUrl);
 const wallet = new ethers.Wallet(config.vaultEoaPrivateKey, provider);
 
 logger.info({ address: wallet.address }, "Signing layer started");
+
+/**
+ * DEV: clear per-chain-instance state on startup when running against the mock CLOB.
+ * `pnpm dev:mock` resets Anvil to a fresh chain every restart, but settlement.db
+ * (attestations, tracked_orders, close/claim requests, limit-order intents) and the
+ * event-listener cursor persist on disk — stale rows then reference dead nullifiers and
+ * pollute the new chain. Wiping here mirrors the frontend's chain-reset wipe. It also
+ * lets schema changes (e.g. the composite attestations PK) take effect without a manual
+ * migration. Gated to mock mode so a production restart never drops live attestations.
+ */
+function wipeDevStateIfMock(): void {
+  const clobHost = process.env.POLY_API_URL ?? "https://clob.polymarket.com";
+  const isMock = clobHost.includes("localhost") || clobHost.includes("127.0.0.1");
+  if (!isMock) return;
+  const dbPath = process.env.SETTLEMENT_DB_PATH ?? path.join(process.cwd(), "settlement.db");
+  const stateFile = path.join(process.cwd(), "data", "event-listener-state.json");
+  for (const f of [dbPath, `${dbPath}-wal`, `${dbPath}-shm`, stateFile]) {
+    try {
+      fs.rmSync(f, { force: true });
+    } catch (err) {
+      logger.warn({ err, f }, "failed to wipe dev state file (non-fatal)");
+    }
+  }
+  logger.info({ dbPath }, "DEV (mock CLOB): wiped per-chain signing-layer state on startup");
+}
+
+wipeDevStateIfMock();
 signingLayerNonceManager.reset();
 void signingLayerNonceManager.checkForChainReset(provider);
 

@@ -36,6 +36,10 @@ export interface BetAuthInputs {
   market_id: string
   outcome_side: number
   position_id: string
+  // FEE: Vault-injected fee (= bet_amount*betFeeBps/10000 + relayGasFeeUSDC). The circuit
+  // enforces new_balance = current_balance - bet_amount - fee. Must equal the value the Vault
+  // computes from its governance storage, or the proof's new_commitment will not match.
+  fee: bigint
 }
 
 export interface WithdrawalInputs {
@@ -180,7 +184,15 @@ async function fetchAsset(url: string): Promise<Uint8Array> {
   const controller = new AbortController()
   const timer = setTimeout(() => controller.abort(), 30_000)
   try {
-    const r = await fetch(url, { signal: controller.signal })
+    // DEV: `pnpm setup:circuits` overwrites e.g. bet_auth.wasm in place, but the browser may
+    // already hold the old file cached as `immutable` (PERF-001 header) and will NOT revalidate
+    // it — serving a STALE circuit whose witness/VK no longer match the on-chain verifier
+    // (symptom: assertion line numbers off vs source, or proofs failing). `no-store` forces a
+    // fresh network fetch, bypassing any existing cache entry. Production keeps the immutable
+    // cache (artifacts are fixed per release) for instant repeat loads.
+    const cache: RequestCache =
+      process.env.NODE_ENV !== 'production' ? 'no-store' : 'default'
+    const r = await fetch(url, { signal: controller.signal, cache })
     if (!r.ok) throw new Error(`[prover] Failed to fetch ${url}: HTTP ${r.status}`)
     return new Uint8Array(await r.arrayBuffer())
   } finally {
@@ -299,6 +311,7 @@ export async function generateBetAuthProof(inputs: BetAuthInputs): Promise<Proof
     market_id:            inputs.market_id,
     outcome_side:         inputs.outcome_side.toString(),
     position_id:          inputs.position_id,
+    fee:                  inputs.fee.toString(),
   })
 }
 

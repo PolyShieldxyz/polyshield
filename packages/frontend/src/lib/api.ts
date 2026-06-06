@@ -30,7 +30,7 @@ export interface RelayBetInputs {
   price: string           // uint64 as decimal string
   expected_shares: string // uint64 as decimal string
   market_id: string
-  outcome_side: number
+  outcome_side: string    // 0 = YES, 1 = NO — decimal string (proof-relay NUM schema)
   position_id: string
 }
 
@@ -217,10 +217,26 @@ function attBody(att?: SignedAttestation): { attestation?: OperatorAttestation; 
 }
 
 // FC-9: fetch the operator's off-chain fill attestation for a bet (public; the nullifier is
-// already on-chain). Returns null if the operator has not signed one yet (404).
-export async function fetchAttestation(nullifierOfBet: `0x${string}`): Promise<SignedAttestation | null> {
+// already on-chain). Returns null if the operator has not signed one yet.
+//
+// `reportType` selects a specific slot: pass 4 (SOLD) for a position close so it gets the
+// close attestation even when a FILLED bet-outcome attestation also exists. Without it, the
+// bet-OUTCOME attestation (FILLED/FAILED/PARTIAL) is returned.
+//
+// A 404 ("no attestation yet") is an EXPECTED state while polling a resting/in-flight order,
+// so this resolves to null quietly instead of logging it as an error (which previously spammed
+// the console with "GET …/attestation/… failed 404").
+export async function fetchAttestation(
+  nullifierOfBet: `0x${string}`,
+  reportType?: number,
+): Promise<SignedAttestation | null> {
+  const qs = reportType !== undefined ? `?reportType=${reportType}` : ''
   try {
-    return await get(`/api/signing/attestation/${nullifierOfBet}`) as SignedAttestation
+    const res = await fetch(`/api/signing/attestation/${nullifierOfBet}${qs}`)
+    if (res.status === 404) return null
+    const data = await res.json()
+    if (!res.ok) return null
+    return data as SignedAttestation
   } catch {
     return null
   }

@@ -1,7 +1,8 @@
 'use client'
 
 import { useEffect, useMemo, useState } from 'react'
-import { useAccount, useSignMessage } from 'wagmi'
+import { useAccount, useSignMessage, useReadContract } from 'wagmi'
+import { VAULT_ABI } from '@/lib/vaultAbi'
 import { Modal } from '@/components/app/Modal'
 import { Icon, ICONS } from '@/components/ui/Icon'
 import { KV } from '@/components/app/KV'
@@ -12,7 +13,9 @@ import {
   deriveSecret,
   formatUsdc,
   getCurrentCashNote,
+  getFreeNotes,
   markNoteSpent,
+  MAX_CONSOLIDATE_INPUTS,
   positionToField,
   recordWalletActivity,
   selectNotesForAmount,
@@ -37,8 +40,19 @@ interface BetModalProps {
   side: 'YES' | 'NO'
   initialAmount: number
   price: number
+  // FC-4: order type is chosen on the market page and passed in (read-only here).
+  orderType: OrderType
+  limitCents: number
+  gtdMinutes: number
   onClose: () => void
   onSuccess?: () => void | Promise<void>
+}
+
+const ORDER_TYPE_LABEL: Record<OrderType, string> = {
+  FOK: 'Fill-or-kill',
+  FAK: 'Fill-and-kill',
+  GTC: 'Limit (GTC)',
+  GTD: 'Limit (GTD)',
 }
 
 function parseUsdcToMicro(value: string): bigint | null {
@@ -66,6 +80,9 @@ export function BetModal({
   side,
   initialAmount,
   price,
+  orderType,
+  limitCents,
+  gtdMinutes,
   onClose,
   onSuccess,
 }: BetModalProps) {
@@ -82,11 +99,8 @@ export function BetModal({
   // FINDING: FUNC-001 — set when the worker fails and the prover falls back to the
   // main thread (polyshield:prover-fallback event), so we can tell the user.
   const [fallbackNote, setFallbackNote] = useState<string | null>(null)
-  // FC-4: advanced order types. FOK (default) = today's behavior; GTC/GTD rest on
-  // the book at the user's limit price (gated advanced mode pending live-API testing).
-  const [orderType, setOrderType] = useState<OrderType>('FOK')
-  const [limitCents, setLimitCents] = useState(Math.max(1, Math.min(99, Math.round(price * 100))))
-  const [gtdMinutes, setGtdMinutes] = useState(60)
+  // FC-4: advanced order types (orderType / limitCents / gtdMinutes) are now selected on
+  // the market page and arrive as props; this modal only displays and submits them.
 
   useEffect(() => {
     if (!open) return
@@ -97,9 +111,6 @@ export function BetModal({
     setAutoSettle(true)
     setProgress(5)
     setFallbackNote(null)
-    setOrderType('FOK')
-    setLimitCents(Math.max(1, Math.min(99, Math.round(price * 100))))
-    setGtdMinutes(60)
   }, [open, initialAmount, marketId, price])
 
   // FINDING: FUNC-001 — advance the progress bar from ~5% toward ~90% over ~120s
@@ -150,8 +161,58 @@ export function BetModal({
     return (amountMicro * 100_000_000n) / BigInt(Math.round(effectivePrice * 100_000_000))
   }, [amountMicro, effectivePrice])
 
+  // FEE: read the governance fee config so the client computes the SAME Vault-injected fee it
+  // must commit to in the bet_auth proof (fee = bet_amount*betFeeBps/10000 + relayGasFeeUSDC).
+  // betFeeBps (uint16) comes back as a number; the uint64 fields as bigint — coerce defensively.
+  const { data: feeConfigData } = useReadContract({
+    address: VAULT_ADDRESS,
+    abi: VAULT_ABI,
+    functionName: 'feeConfig',
+    query: { enabled: VAULT_ADDRESS !== '0x0000000000000000000000000000000000000000' },
+  })
+  const betFeeBps = feeConfigData ? BigInt(feeConfigData[0]) : 0n
+  const relayGasFeeUSDC = feeConfigData ? BigInt(feeConfigData[1]) : 0n
+  const minBet = feeConfigData ? BigInt(feeConfigData[2]) : 1_000_000n // default $1 until loaded
+  const fee = useMemo(() => {
+    if (!amountMicro || amountMicro <= 0n) return 0n
+    return (amountMicro * betFeeBps) / 10_000n + relayGasFeeUSDC
+  }, [amountMicro, betFeeBps, relayGasFeeUSDC])
+  const belowMinBet = amountMicro !== null && amountMicro > 0n && amountMicro < minBet
+
+  // FEE: the spent note must cover bet_amount + fee — the bet_auth circuit computes
+  // new_balance = current_balance - bet_amount - fee and range-checks it to 64 bits, so a bet
+  // that would leave a negative remainder fails proof generation with an opaque underflow
+  // ("Assert Failed … BetAuth line 98/100"). Guard here against the COMBINABLE balance (up to
+  // MAX_CONSOLIDATE_INPUTS notes can be merged first) and surface the real max bettable amount.
+  const combinableBalance = useMemo(() => {
+    if (!address || !open) return 0n
+    return getFreeNotes(address)
+      .sort((a, b) => (a.balance > b.balance ? -1 : 1))
+      .slice(0, MAX_CONSOLIDATE_INPUTS)
+      .reduce((sum, n) => sum + n.balance, 0n)
+  }, [address, open])
+  // Largest bet whose amount + fee fits the balance: amount*(1 + betFeeBps/10000) + relayGas <= bal.
+  const maxBettable = useMemo(() => {
+    if (combinableBalance <= relayGasFeeUSDC) return 0n
+    return ((combinableBalance - relayGasFeeUSDC) * 10_000n) / (10_000n + betFeeBps)
+  }, [combinableBalance, relayGasFeeUSDC, betFeeBps])
+  const exceedsBalance = amountMicro !== null && amountMicro > 0n && amountMicro > maxBettable
+
   const submit = async () => {
     if (!address || !amountMicro || amountMicro <= 0n) return
+    // FEE: the bet fee is governance-set and Vault-injected; the client must commit to the exact
+    // same value, so block until the fee config has loaded (otherwise fee would default to 0 and
+    // the Vault would reject the proof) and enforce the on-chain minimum bet before proving.
+    if (!feeConfigData) {
+      setPhase('error')
+      setError('Loading fee schedule — please try again in a moment.')
+      return
+    }
+    if (amountMicro < minBet) {
+      setPhase('error')
+      setError(`Minimum bet is $${formatUsdc(minBet)} (Polymarket rejects smaller orders).`)
+      return
+    }
     let cashNote = getCurrentCashNote(address)
     if (!cashNote) {
       const msg = 'No available cash balance to place this bet. Deposit USDC first.'
@@ -160,12 +221,23 @@ export function BetModal({
       setError(msg)
       return
     }
-    // FC-8: a single note need not cover the stake — up to 4 notes can be merged first.
+    // FEE: the note must cover bet_amount + fee (the circuit deducts both). Select/merge against
+    // the full cost, not just the stake, so the merged note never underflows in the proof.
+    const cost = amountMicro + fee
+    if (amountMicro > maxBettable) {
+      setPhase('error')
+      setError(
+        `This bet plus the $${formatUsdc(fee)} fee exceeds your balance. ` +
+        `The most you can bet right now is $${formatUsdc(maxBettable)}.`,
+      )
+      return
+    }
+    // FC-8: a single note need not cover the cost — up to 4 notes can be merged first.
     // Reject only when even the largest 4 notes can't cover it.
-    if (amountMicro > cashNote.balance) {
-      const sel = selectNotesForAmount(address, amountMicro)
+    if (cost > cashNote.balance) {
+      const sel = selectNotesForAmount(address, cost)
       if (!sel.ok) {
-        console.error('[BetModal] submit: amount exceeds combinable balance', { amount: amountMicro })
+        console.error('[BetModal] submit: cost exceeds combinable balance', { cost })
         setPhase('error')
         setError(sel.error)
         return
@@ -178,10 +250,10 @@ export function BetModal({
 
     try {
       const stake = amountMicro
-      // FC-8: if no single note covers the stake, consolidate up to 4 notes into one
+      // FC-8: if no single note covers the bet + fee, consolidate up to 4 notes into one
       // (a merge proof + tx via the relay), then bet from the merged note.
-      if (stake > cashNote.balance) {
-        const sel = selectNotesForAmount(address, stake)
+      if (cost > cashNote.balance) {
+        const sel = selectNotesForAmount(address, cost)
         if (!sel.ok) throw new Error(sel.error)
         cashNote = await consolidateNotes({
           wallet: address,
@@ -189,6 +261,12 @@ export function BetModal({
           notes: sel.selection.notes,
           onProgress: (m) => log('bet_modal_consolidate', { step: m }),
         })
+      }
+      // FEE: final guard — the spent note must cover bet_amount + fee or the circuit underflows.
+      if (cashNote.balance < stake + fee) {
+        throw new Error(
+          `This bet plus the $${formatUsdc(fee)} fee exceeds your balance. Reduce the amount.`,
+        )
       }
       const secret = await deriveSecret(signMessageAsync, address, cashNote.depositIndex)
       let merkleProof
@@ -202,7 +280,9 @@ export function BetModal({
         throw e
       }
       const merkleRoot = merkleProof.root
-      const newBalance = cashNote.balance - stake
+      // FEE: deduct the bet amount AND the Vault-injected fee from the note balance — this must
+      // match the circuit's new_balance = current_balance - bet_amount - fee.
+      const newBalance = cashNote.balance - stake - fee
       const newNonce = cashNote.nonce + 1n
       const newCommitment = computeCommitment(secret, newBalance, newNonce, address)
       const newNullifier = computeNullifier(secret, newNonce)
@@ -231,6 +311,7 @@ export function BetModal({
           market_id: safeConditionId,
           outcome_side: side === 'YES' ? 0 : 1,
           position_id: positionId,
+          fee, // FEE: Vault-injected; circuit binds new_balance = current_balance - bet_amount - fee
         },
       })
 
@@ -242,7 +323,9 @@ export function BetModal({
         price: priceScaled.toString(),
         expected_shares: shares.toString(),
         market_id: safeConditionId,
-        outcome_side: side === 'YES' ? 0 : 1,
+        // proof-relay validates this with NUM (z.string() decimal); send the digit as a
+        // string, not a raw number, or the relay rejects the bet with "invalid inputs".
+        outcome_side: side === 'YES' ? '0' : '1',
         position_id: positionId,
       }
 
@@ -324,7 +407,7 @@ export function BetModal({
 
       window.setTimeout(() => {
         onClose()
-      }, 10_000)
+      }, 3_000)
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err)
       console.error('[BetModal] submit failed:', err)
@@ -356,8 +439,11 @@ export function BetModal({
             <KV l="Side" v={side} />
             <KV l="Amount" v={`$${formatUsdc(amountMicro ?? 0n)} USDC`} />
             <KV l="Estimated shares" v={shares.toString()} />
-            <KV l="Estimated cost" v={`$${formatUsdc(amountMicro ?? 0n)} USDC`} />
-            <KV l="Protocol fee" v="~$0.00" />
+            <KV
+              l={`Protocol fee${betFeeBps > 0n ? ` (${(Number(betFeeBps) / 100).toFixed(2)}%)` : ''}`}
+              v={`$${formatUsdc(fee)} USDC`}
+            />
+            <KV l="Total deducted" v={`$${formatUsdc((amountMicro ?? 0n) + fee)} USDC`} />
           </div>
           <div>
             <div className="micro">AMOUNT (USDC)</div>
@@ -382,53 +468,33 @@ export function BetModal({
                 Reset
               </button>
             </div>
+            {belowMinBet && (
+              <div className="small mt-1" style={{ color: 'var(--red)', fontSize: 11 }}>
+                Minimum bet is ${formatUsdc(minBet)} (Polymarket rejects smaller orders).
+              </div>
+            )}
+            {!belowMinBet && exceedsBalance && (
+              <div className="small mt-1" style={{ color: 'var(--red)', fontSize: 11 }}>
+                Amount + ${formatUsdc(fee)} fee exceeds your balance. Max bettable is ${formatUsdc(maxBettable)}.
+              </div>
+            )}
           </div>
+          {/* Order type is chosen on the market page; shown here read-only for confirmation. */}
           <div className="col gap-2">
             <div className="row gap-2" style={{ alignItems: 'center' }}>
               <div className="micro">ORDER TYPE</div>
               <span className="pill pill-soft" style={{ fontSize: 9 }}>ADVANCED</span>
             </div>
-            <div className="row" style={{ gap: 8 }}>
-              {(['FOK', 'FAK', 'GTC', 'GTD'] as OrderType[]).map((t) => (
-                <button
-                  key={t}
-                  className={`btn btn-sm ${orderType === t ? 'btn-primary' : ''}`}
-                  onClick={() => setOrderType(t)}
-                  type="button"
-                >
-                  {t === 'FOK'
-                    ? 'Fill-or-kill'
-                    : t === 'FAK'
-                      ? 'Fill-and-kill'
-                      : t === 'GTC'
-                        ? 'Limit (GTC)'
-                        : 'Limit (GTD)'}
-                </button>
-              ))}
+            <div className="panel" style={{ padding: 12 }}>
+              <KV l="Type" v={ORDER_TYPE_LABEL[orderType]} />
+              {(orderType === 'GTC' || orderType === 'GTD') && (
+                <KV l="Limit price" v={`${limitCents}¢ ($${(limitCents / 100).toFixed(2)}/share)`} />
+              )}
+              {orderType === 'GTD' && <KV l="Expires in" v={`${gtdMinutes} min`} />}
             </div>
             {(orderType === 'GTC' || orderType === 'GTD') && (
-              <div className="row" style={{ gap: 12, flexWrap: 'wrap' }}>
-                <label className="col gap-1">
-                  <span className="micro">LIMIT PRICE (¢ per share, 1–99)</span>
-                  <input
-                    type="number" min={1} max={99} value={limitCents}
-                    onChange={(e) => setLimitCents(Math.max(1, Math.min(99, Number(e.target.value) || 1)))}
-                    className="input" style={{ width: 140 }}
-                  />
-                </label>
-                {orderType === 'GTD' && (
-                  <label className="col gap-1">
-                    <span className="micro">EXPIRES IN (MINUTES)</span>
-                    <input
-                      type="number" min={1} value={gtdMinutes}
-                      onChange={(e) => setGtdMinutes(Math.max(1, Number(e.target.value) || 1))}
-                      className="input" style={{ width: 140 }}
-                    />
-                  </label>
-                )}
-                <div className="small" style={{ fontSize: 11, color: 'var(--text-3)', alignSelf: 'flex-end' }}>
-                  Rests on the book; the full stake is held until it fills, expires, or partially fills (then reclaim the remainder).
-                </div>
+              <div className="small" style={{ fontSize: 11, color: 'var(--text-3)' }}>
+                Rests on the book; the full stake is held until it fills, expires, or partially fills (then reclaim the remainder).
               </div>
             )}
             {orderType === 'FAK' && (
@@ -437,6 +503,9 @@ export function BetModal({
                 partially, reclaim the unfilled remainder of your stake afterward.
               </div>
             )}
+            <div className="small" style={{ fontSize: 11, color: 'var(--text-3)' }}>
+              Change the order type on the market page before generating the proof.
+            </div>
           </div>
           <label className="row gap-3" style={{ alignItems: 'flex-start', cursor: 'not-allowed', opacity: 0.5 }}>
             <input
@@ -454,7 +523,7 @@ export function BetModal({
           </label>
           <div className="row" style={{ justifyContent: 'space-between', gap: 12 }}>
             <button className="btn" onClick={closeSafely}>Cancel</button>
-            <button className="btn btn-primary" onClick={() => void submit()} disabled={!amountMicro || amountMicro <= 0n}>
+            <button className="btn btn-primary" onClick={() => void submit()} disabled={!amountMicro || amountMicro <= 0n || belowMinBet || exceedsBalance}>
               Confirm Bet
             </button>
           </div>
@@ -498,7 +567,7 @@ export function BetModal({
             <KV l="Tx" v={txHash ? `${txHash.slice(0, 10)}…${txHash.slice(-8)}` : '—'} />
           </div>
           <div className="small" style={{ fontSize: 11, color: 'var(--text-2)' }}>
-            This modal will close automatically after 10 seconds.
+            This modal will close automatically after 3 seconds.
           </div>
         </div>
       )}

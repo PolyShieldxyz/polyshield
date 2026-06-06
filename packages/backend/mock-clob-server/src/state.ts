@@ -44,12 +44,17 @@ export interface RestingOrder {
   price: string;         // decimal probability (e.g. "0.65")
   size: string;          // maker amount, decimal USDC
   createdAt: string;
-  /** live = on book, matched = fully filled, partial = partially filled then terminated, cancelled = zero-fill terminated */
-  status: "live" | "matched" | "partial" | "cancelled";
+  /** live = on book, matched = fully filled, partial = partially filled then terminated,
+   *  cancelled = zero-fill terminated, expired = GTD lifetime elapsed unfilled */
+  status: "live" | "matched" | "partial" | "cancelled" | "expired";
   /** shares actually filled, 1e6-scaled (0 until a fill is reported) */
   filledShares: number;
   /** bet_amount portion consumed, 1e6-scaled */
   spentAmount: number;
+  /** GTD expiry as a unix-seconds timestamp (0 = no expiry, i.e. GTC). When > 0 and the
+   *  current time passes it while still "live", the order auto-expires (zero-fill → the
+   *  signing layer attests FAILED so the depositor can reclaim the full stake). */
+  expiration: number;
 }
 
 export interface ServerState {

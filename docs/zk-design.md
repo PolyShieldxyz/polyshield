@@ -81,6 +81,8 @@ position_id: Field,          // ERC-1155 positionId for the outcome token
 
 **Note on `price` and `expected_shares`:** Added as part of the Q4 resolution. `price` is a fixed-point number at 1e8 precision (e.g. a price of 0.65 is represented as 65_000_000). `expected_shares` is constrained in the circuit to equal `floor(bet_amount * 1e8 / price)`. The Vault records `(nullifier_hash, market_id, position_id, expected_shares)` on-chain at `authorizeBet` time. The Settlement Credit circuit reads `expected_shares` from Vault storage rather than accepting a self-reported value.
 
+**Note on `fee` (FC-10 — IMPLEMENTED, live circuit only).** The live Circom `groth16/bet_auth.circom` adds a **10th public input `fee`**, Vault-injected from `feeConfig`: `fee = bet_amount * betFeeBps / 10000 + relayGasFeeUSDC`. The balance constraint becomes `new_balance = current_balance - bet_amount - fee`. Because the Vault — not the user — supplies `fee` as a public input (like the injected `bet_amount` for cancellations), a proof built with any other fee fails verification. The full public-signal order is `[merkle_root, nullifier, new_commitment, bet_amount, price, expected_shares, market_id, outcome_side, position_id, fee]`. (This `.nr` file is a spec reference and still shows the pre-fee 9-input, 3-field-note form; the authoritative source is `packages/circuits/groth16/bet_auth.circom`.)
+
 ### Constraints (Pseudocode)
 
 ```noir

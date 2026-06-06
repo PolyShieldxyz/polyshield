@@ -28,6 +28,15 @@ const CLOB_PORT       = 3001;
 const RELAY_PORT      = 3002;
 const INDEXER_PORT    = 3003;
 
+// Dev-only operator bearer token. The signing-layer's operatorAuth middleware
+// (API-001) gates its mutating routes (/limit-order, /close-request, /claim-permission)
+// on OPERATOR_API_TOKEN and fails closed when it is unset. The same value is given to
+// the signing layer (sharedEnv) and to the frontend's Next.js server-side proxy
+// (writeFrontendEnv, NOT a NEXT_PUBLIC_ var), which injects it as a Bearer header so
+// browser-initiated requests reach the operator without ever exposing the token to the
+// browser. Insecure placeholder — production sets a real secret in both processes.
+const OPERATOR_API_TOKEN = "dev-operator-token-local-insecure";
+
 const BACKEND_DIR       = path.resolve(__dirname, "../..");
 const MOCK_CLOB_ENTRY   = path.resolve(__dirname, "../../mock-clob-server/src/index.ts");
 const PROOF_RELAY_ENTRY = path.resolve(__dirname, "../../proof-relay/src/index.ts");
@@ -233,6 +242,12 @@ function writeFrontendEnv(addrs: DeployedAddresses): void {
     `INDEXER_URL=http://127.0.0.1:${INDEXER_PORT}`,
     `MOCK_CLOB_URL=http://127.0.0.1:${CLOB_PORT}`,
     "",
+    "# ── Operator token for the signing-layer proxy (server-side only — NOT NEXT_PUBLIC) ─",
+    "# Injected as 'Authorization: Bearer' by /api/signing/[...slug] so user-initiated",
+    "# limit-order / close-request / claim-permission calls pass operatorAuth. Never",
+    "# exposed to the browser. Must match the signing layer's OPERATOR_API_TOKEN.",
+    `OPERATOR_API_TOKEN=${OPERATOR_API_TOKEN}`,
+    "",
   ];
 
   fs.writeFileSync(FRONTEND_ENV_OUT, lines.join("\n"));
@@ -264,6 +279,8 @@ function buildSharedEnv(addrs: DeployedAddresses): Record<string, string> {
     VAULT_EOA_PRIVATE_KEY:             ACCOUNTS.OPERATOR_PRIVATE_KEY,
     RELAYER_PRIVATE_KEY:               ACCOUNTS.RELAYER_PRIVATE_KEY,
     SIGNING_LAYER_OPERATOR_ADDRESS:    ACCOUNTS.OPERATOR_ADDRESS,
+    // Operator bearer token consumed by the signing-layer operatorAuth middleware.
+    OPERATOR_API_TOKEN:                OPERATOR_API_TOKEN,
     POLY_API_KEY:                      "mock-api-key-0000",
     POLY_SECRET:                       "mock-secret-0000",
     POLY_PASSPHRASE:                   "mock-passphrase-0000",

@@ -2,6 +2,7 @@ import { ethers } from "ethers";
 import pino from "pino";
 import { config } from "./config";
 import { runRedemptionPipeline } from "./redemptionPipeline";
+import { cancelOrdersForMarket } from "./wsFillTracker";
 
 const logger = pino({ name: "settlement-resolver" });
 
@@ -34,6 +35,11 @@ export function startSettlementResolver(
     ) => {
       try {
         await provider.waitForTransaction(event.log.transactionHash, 1);
+
+        // A resolved market can no longer fill resting orders, so cancel any still on the
+        // book (→ FAILED attestation) so depositors can reclaim. Runs for every resolution,
+        // including N/A. Handles GTC (never expires) and a GTD still resting at resolution.
+        cancelOrdersForMarket(conditionId);
 
         const allZero = payoutNumerators.every((n) => n === 0n);
         if (allZero) {

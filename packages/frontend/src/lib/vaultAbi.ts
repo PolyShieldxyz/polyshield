@@ -26,6 +26,27 @@ export const VAULT_ABI = [
     inputs: [], outputs: [{ name: '', type: 'address' }],
     stateMutability: 'view',
   },
+  // FEE: governance-mutable fee parameters. The client reads betFeeBps + relayGasFeeUSDC
+  // to compute the same Vault-injected bet fee (fee = bet_amount*betFeeBps/10000 + relayGasFeeUSDC)
+  // it must commit to in the bet_auth proof, plus withdrawalFeeUSDC/minBet/minWithdrawal for the UI.
+  {
+    type: 'function', name: 'feeConfig',
+    inputs: [],
+    outputs: [
+      { name: 'betFeeBps', type: 'uint16' },
+      { name: 'relayGasFeeUSDC', type: 'uint64' },
+      { name: 'minBet', type: 'uint64' },
+      { name: 'withdrawalFeeUSDC', type: 'uint64' },
+      { name: 'minWithdrawal', type: 'uint64' },
+      { name: 'feeRecipient', type: 'address' },
+    ],
+    stateMutability: 'view',
+  },
+  {
+    type: 'function', name: 'feeAccumulator',
+    inputs: [], outputs: [{ name: '', type: 'uint256' }],
+    stateMutability: 'view',
+  },
 
   // ── Write ───────────────────────────────────────────────────────────────────
   {

@@ -3,6 +3,18 @@ pragma solidity ^0.8.24;
 
 import {Test} from "forge-std/Test.sol";
 import {Vault} from "../src/Vault.sol";
+// FEE/EIP-170: public-input structs are now file-level in VaultInputs.sol (no longer
+// nested under Vault). Import the ones these tests construct.
+import {
+    BetAuthPublicInputs,
+    SettlementPublicInputs,
+    WithdrawalPublicInputs,
+    BetCancelPublicInputs,
+    NACancelPublicInputs,
+    ClosePublicInputs,
+    PartialFillPublicInputs,
+    ConsolidatePublicInputs
+} from "../src/VaultInputs.sol";
 import {CommitmentMerkleTree} from "../src/CommitmentMerkleTree.sol";
 import {NullifierRegistry} from "../src/NullifierRegistry.sol";
 import {MockVerifier} from "../src/mocks/MockVerifier.sol";
@@ -263,8 +275,8 @@ contract VaultTest is Test {
         root = _currentRoot();
     }
 
-    function _betAuthInputs(bytes32 root) internal pure returns (Vault.BetAuthPublicInputs memory) {
-        return Vault.BetAuthPublicInputs({
+    function _betAuthInputs(bytes32 root) internal pure returns (BetAuthPublicInputs memory) {
+        return BetAuthPublicInputs({
             merkle_root: root,
             nullifier: NULLIFIER_1,
             new_commitment: COMMITMENT_2,
@@ -285,7 +297,7 @@ contract VaultTest is Test {
 
     function test_authorizeBet_emitsBetAuthorized() public {
         bytes32 root = _depositAndGetRoot();
-        Vault.BetAuthPublicInputs memory inputs = _betAuthInputs(root);
+        BetAuthPublicInputs memory inputs = _betAuthInputs(root);
         vm.expectEmit(true, false, false, true);
         emit Vault.BetAuthorized(
             NULLIFIER_1,
@@ -319,13 +331,13 @@ contract VaultTest is Test {
         vault.authorizeBet(DUMMY_PROOF, _betAuthInputs(root));
         // Second call should fail: nullifier already spent
         bytes32 root2 = _currentRoot();
-        Vault.BetAuthPublicInputs memory inputs2 = _betAuthInputs(root2);
+        BetAuthPublicInputs memory inputs2 = _betAuthInputs(root2);
         vm.expectRevert(Vault.NullifierSpent.selector);
         vault.authorizeBet(DUMMY_PROOF, inputs2);
     }
 
     function test_authorizeBet_revert_unknownRoot() public {
-        Vault.BetAuthPublicInputs memory inputs = _betAuthInputs(keccak256("stale_root"));
+        BetAuthPublicInputs memory inputs = _betAuthInputs(keccak256("stale_root"));
         vm.expectRevert(Vault.UnknownRoot.selector);
         vault.authorizeBet(DUMMY_PROOF, inputs);
     }
@@ -351,8 +363,8 @@ contract VaultTest is Test {
     // creditSettlement
     // =========================================================================
 
-    function _settlementInputs(bytes32 root) internal pure returns (Vault.SettlementPublicInputs memory) {
-        return Vault.SettlementPublicInputs({
+    function _settlementInputs(bytes32 root) internal pure returns (SettlementPublicInputs memory) {
+        return SettlementPublicInputs({
             merkle_root: root,
             nullifier: NULLIFIER_2,
             new_commitment: COMMITMENT_3,
@@ -416,7 +428,7 @@ contract VaultTest is Test {
         vm.prank(alice);
         vault.deposit(DUMMY_PROOF, COMMITMENT_1, DEPOSIT_AMOUNT);
         bytes32 root = _currentRoot();
-        Vault.SettlementPublicInputs memory inputs = _settlementInputs(root);
+        SettlementPublicInputs memory inputs = _settlementInputs(root);
         inputs.nullifier_of_bet = keccak256("nonexistent");
         (Vault.OperatorAttestation memory att, bytes memory sig) = _attest(inputs.nullifier_of_bet, vault.REPORT_FILLED(), 0, 0);
         vm.expectRevert(Vault.BetNotFound.selector);
@@ -426,7 +438,7 @@ contract VaultTest is Test {
     function test_creditSettlement_revert_wrongMarket() public {
         _setupFilledAndResolvedBet();
         bytes32 root = _currentRoot();
-        Vault.SettlementPublicInputs memory inputs = _settlementInputs(root);
+        SettlementPublicInputs memory inputs = _settlementInputs(root);
         inputs.market_id = keccak256("wrong_market");
         (Vault.OperatorAttestation memory att, bytes memory sig) = _filledAtt();
         vm.expectRevert(Vault.WrongMarket.selector);
@@ -458,7 +470,7 @@ contract VaultTest is Test {
         vault.creditSettlement(DUMMY_PROOF, _settlementInputs(root), att, sig);
         // Try to credit again with a new nullifier -- bet status is CREDITED, not ACTIVE/FILLED
         bytes32 root2 = _currentRoot();
-        Vault.SettlementPublicInputs memory inputs2 = _settlementInputs(root2);
+        SettlementPublicInputs memory inputs2 = _settlementInputs(root2);
         inputs2.nullifier = keccak256("nullifier_3");
         vm.expectRevert(Vault.BetNotFilled.selector);
         vault.creditSettlement(DUMMY_PROOF, inputs2, att, sig);
@@ -475,7 +487,7 @@ contract VaultTest is Test {
         vault.deposit(DUMMY_PROOF, COMMITMENT_1, DEPOSIT_AMOUNT);
         bytes32 root = _currentRoot();
 
-        vault.authorizeBet(DUMMY_PROOF, Vault.BetAuthPublicInputs({
+        vault.authorizeBet(DUMMY_PROOF, BetAuthPublicInputs({
             merkle_root: root,
             nullifier: NULLIFIER_1,
             new_commitment: COMMITMENT_2,
@@ -497,7 +509,7 @@ contract VaultTest is Test {
 
         bytes32 root2 = _currentRoot();
         (Vault.OperatorAttestation memory att, bytes memory sig) = _filledAtt();
-        vault.creditSettlement(DUMMY_PROOF, Vault.SettlementPublicInputs({
+        vault.creditSettlement(DUMMY_PROOF, SettlementPublicInputs({
             merkle_root: root2,
             nullifier: NULLIFIER_2,
             new_commitment: COMMITMENT_3,
@@ -567,9 +579,9 @@ contract VaultTest is Test {
     function _withdrawInputs(bytes32 root, bytes32 recipientHash, bytes32 newCommitment)
         internal
         pure
-        returns (Vault.WithdrawalPublicInputs memory)
+        returns (WithdrawalPublicInputs memory)
     {
-        return Vault.WithdrawalPublicInputs({
+        return WithdrawalPublicInputs({
             merkle_root: root,
             nullifier: NULLIFIER_2,
             withdrawal_amount: 500 * 1e6,
@@ -590,7 +602,10 @@ contract VaultTest is Test {
         bytes32 nextCommitment = COMMITMENT_2;
         uint256 balBefore = usdc.balanceOf(recipient);
         vault.withdraw(DUMMY_PROOF, _withdrawInputs(root, rHash, nextCommitment), recipient);
-        assertEq(usdc.balanceOf(recipient) - balBefore, 500 * 1e6);
+        // FEE: recipient receives withdrawal_amount - withdrawalFeeUSDC ($0.10 default);
+        // the fee stays in the pool and is tracked in feeAccumulator.
+        assertEq(usdc.balanceOf(recipient) - balBefore, 500 * 1e6 - 100_000);
+        assertEq(vault.feeAccumulator(), 100_000);
         assertTrue(registry.isSpent(NULLIFIER_2));
         assertTrue(tree.isKnownRoot(_currentRoot()));
     }
@@ -626,7 +641,7 @@ contract VaultTest is Test {
         vault.deposit(DUMMY_PROOF, COMMITMENT_1, DEPOSIT_AMOUNT);
         bytes32 root = _currentRoot();
         bytes32 rHash = _recipientHash(recipient);
-        Vault.WithdrawalPublicInputs memory inputs = Vault.WithdrawalPublicInputs({
+        WithdrawalPublicInputs memory inputs = WithdrawalPublicInputs({
             merkle_root: root,
             nullifier: NULLIFIER_2,
             withdrawal_amount: uint64(DEPOSIT_AMOUNT),
@@ -638,7 +653,8 @@ contract VaultTest is Test {
 
         vault.withdraw(DUMMY_PROOF, inputs, recipient);
 
-        assertEq(usdc.balanceOf(recipient) - balBefore, DEPOSIT_AMOUNT);
+        // FEE: net of the $0.10 withdrawal fee.
+        assertEq(usdc.balanceOf(recipient) - balBefore, DEPOSIT_AMOUNT - 100_000);
         // Full withdrawal (new_commitment == 0) inserts no leaf → no new root.
         assertEq(tree.rootCount(), rootCountBefore);
     }
@@ -684,8 +700,8 @@ contract VaultTest is Test {
     // betCancellationCredit
     // =========================================================================
 
-    function _betCancelInputs(bytes32 root) internal pure returns (Vault.BetCancelPublicInputs memory) {
-        return Vault.BetCancelPublicInputs({
+    function _betCancelInputs(bytes32 root) internal pure returns (BetCancelPublicInputs memory) {
+        return BetCancelPublicInputs({
             merkle_root: root,
             nullifier: NULLIFIER_2,
             new_commitment: COMMITMENT_3,
@@ -721,7 +737,7 @@ contract VaultTest is Test {
         vault.betCancellationCredit(DUMMY_PROOF, _betCancelInputs(root), att, sig);
         // Status is now CANCELLED_CREDITED, not ACTIVE/FAILED
         bytes32 root2 = _currentRoot();
-        Vault.BetCancelPublicInputs memory inputs2 = _betCancelInputs(root2);
+        BetCancelPublicInputs memory inputs2 = _betCancelInputs(root2);
         inputs2.nullifier = keccak256("null_3");
         vm.expectRevert(Vault.BetNotFailed.selector);
         vault.betCancellationCredit(DUMMY_PROOF, inputs2, att, sig);
@@ -749,8 +765,8 @@ contract VaultTest is Test {
     // naCancellationCredit
     // =========================================================================
 
-    function _naCancelInputs(bytes32 root) internal pure returns (Vault.NACancelPublicInputs memory) {
-        return Vault.NACancelPublicInputs({
+    function _naCancelInputs(bytes32 root) internal pure returns (NACancelPublicInputs memory) {
+        return NACancelPublicInputs({
             merkle_root: root,
             nullifier: NULLIFIER_2,
             new_commitment: COMMITMENT_3,
@@ -809,7 +825,7 @@ contract VaultTest is Test {
     function test_naCancellationCredit_revert_wrongMarket() public {
         _setupNAMarket();
         bytes32 root = _currentRoot();
-        Vault.NACancelPublicInputs memory inputs = _naCancelInputs(root);
+        NACancelPublicInputs memory inputs = _naCancelInputs(root);
         inputs.market_id = keccak256("wrong");
         (Vault.OperatorAttestation memory att, bytes memory sig) = _filledAtt();
         vm.expectRevert(Vault.WrongMarket.selector);
@@ -892,7 +908,7 @@ contract VaultTest is Test {
         assertTrue(tree.isKnownRoot(oldRoot), "root 50 inserts deep still in the 1024 window");
 
         // A fabricated, never-inserted root is rejected.
-        Vault.BetAuthPublicInputs memory inputs = _betAuthInputs(keccak256("never_seen"));
+        BetAuthPublicInputs memory inputs = _betAuthInputs(keccak256("never_seen"));
         inputs.nullifier = keccak256("fresh_nullifier");
         vm.expectRevert(Vault.UnknownRoot.selector);
         vault.authorizeBet(DUMMY_PROOF, inputs);
@@ -919,7 +935,7 @@ contract VaultTest is Test {
         vault.betCancellationCredit(DUMMY_PROOF, _betCancelInputs(root), att, sig);
 
         bytes32 root2 = _currentRoot();
-        Vault.BetCancelPublicInputs memory inputs2 = _betCancelInputs(root2);
+        BetCancelPublicInputs memory inputs2 = _betCancelInputs(root2);
         inputs2.nullifier = keccak256("null_3");
         // status is now CANCELLED_CREDITED, not ACTIVE/FAILED -> revert BetNotFailed
         vm.expectRevert(Vault.BetNotFailed.selector);
@@ -1064,8 +1080,8 @@ contract VaultTest is Test {
     uint64 constant EXPECTED_SHARES = 200_000_000; // matches _betAuthInputs
     uint64 constant CLOSE_PROCEEDS  = 80 * 1e6;
 
-    function _closeInputs(bytes32 root) internal pure returns (Vault.ClosePublicInputs memory) {
-        return Vault.ClosePublicInputs({
+    function _closeInputs(bytes32 root) internal pure returns (ClosePublicInputs memory) {
+        return ClosePublicInputs({
             merkle_root: root,
             nullifier: NULLIFIER_2,
             new_commitment: COMMITMENT_3,
@@ -1155,7 +1171,7 @@ contract VaultTest is Test {
         vault.closePosition(DUMMY_PROOF, _closeInputs(_currentRoot()), sold, soldSig);
 
         bytes32 root = _currentRoot();
-        Vault.BetCancelPublicInputs memory inputs = _betCancelInputs(root);
+        BetCancelPublicInputs memory inputs = _betCancelInputs(root);
         inputs.nullifier = keccak256("cancel_after_close");
         (Vault.OperatorAttestation memory att, bytes memory sig) = _failedAtt();
         vm.expectRevert(Vault.BetNotFailed.selector);
@@ -1179,7 +1195,7 @@ contract VaultTest is Test {
         bytes32 root = _currentRoot();
         vault.closePosition(DUMMY_PROOF, _closeInputs(root), sold, soldSig);
 
-        Vault.ClosePublicInputs memory again = Vault.ClosePublicInputs({
+        ClosePublicInputs memory again = ClosePublicInputs({
             merkle_root: _currentRoot(),
             nullifier: keccak256("nullifier_fresh"),
             new_commitment: keccak256("commitment_fresh"),
@@ -1195,7 +1211,7 @@ contract VaultTest is Test {
         bytes32 root = _currentRoot();
         vault.closePosition(DUMMY_PROOF, _closeInputs(root), sold, soldSig);
         // Re-using the same note nullifier must revert (it is already spent).
-        Vault.ClosePublicInputs memory replay = _closeInputs(_currentRoot());
+        ClosePublicInputs memory replay = _closeInputs(_currentRoot());
         vm.expectRevert(Vault.NullifierSpent.selector);
         vault.closePosition(DUMMY_PROOF, replay, sold, soldSig);
     }
@@ -1205,8 +1221,8 @@ contract VaultTest is Test {
     uint64 constant PF_FILLED_SHARES = 120_000_000; // < EXPECTED_SHARES (200_000_000)
     uint64 constant PF_SPENT_AMOUNT  = 60 * 1e6;    // < bet_amount (100 * 1e6); refund = 40 * 1e6
 
-    function _partialInputs(bytes32 root) internal pure returns (Vault.PartialFillPublicInputs memory) {
-        return Vault.PartialFillPublicInputs({
+    function _partialInputs(bytes32 root) internal pure returns (PartialFillPublicInputs memory) {
+        return PartialFillPublicInputs({
             merkle_root: root,
             nullifier: NULLIFIER_2,
             new_commitment: COMMITMENT_3,
@@ -1282,7 +1298,7 @@ contract VaultTest is Test {
         (Vault.OperatorAttestation memory att, bytes memory sig) = _partialAtt(PF_FILLED_SHARES, PF_SPENT_AMOUNT);
         vault.partialFillCredit(DUMMY_PROOF, _partialInputs(_currentRoot()), att, sig);
 
-        Vault.PartialFillPublicInputs memory inputs = _partialInputs(_currentRoot());
+        PartialFillPublicInputs memory inputs = _partialInputs(_currentRoot());
         inputs.nullifier = keccak256("partial_again");
         vm.expectRevert(Vault.BetNotPartialFilled.selector);
         vault.partialFillCredit(DUMMY_PROOF, inputs, att, sig);
@@ -1302,7 +1318,7 @@ contract VaultTest is Test {
         (Vault.OperatorAttestation memory att, bytes memory sig) = _partialAtt(PF_FILLED_SHARES, PF_SPENT_AMOUNT);
         vault.partialFillCredit(DUMMY_PROOF, _partialInputs(_currentRoot()), att, sig);
         // Replaying the same note nullifier must revert (already spent).
-        Vault.PartialFillPublicInputs memory replay = _partialInputs(_currentRoot());
+        PartialFillPublicInputs memory replay = _partialInputs(_currentRoot());
         vm.expectRevert(Vault.NullifierSpent.selector);
         vault.partialFillCredit(DUMMY_PROOF, replay, att, sig);
     }
@@ -1318,7 +1334,7 @@ contract VaultTest is Test {
         vm.prank(operator);
         vault.resolveMarket(MARKET_ID);
 
-        Vault.SettlementPublicInputs memory s = Vault.SettlementPublicInputs({
+        SettlementPublicInputs memory s = SettlementPublicInputs({
             merkle_root: _currentRoot(),
             nullifier: keccak256("nullifier_settle_pf"),
             new_commitment: keccak256("commitment_settle_pf"),
@@ -1339,9 +1355,9 @@ contract VaultTest is Test {
     function _consolidateInputs(bytes32[4] memory nulls, bytes32 newCommitment)
         internal
         view
-        returns (Vault.ConsolidatePublicInputs memory)
+        returns (ConsolidatePublicInputs memory)
     {
-        return Vault.ConsolidatePublicInputs({
+        return ConsolidatePublicInputs({
             merkle_root: _currentRoot(),
             nullifier: nulls,
             new_commitment: newCommitment
@@ -1394,7 +1410,7 @@ contract VaultTest is Test {
         nulls[0] = NULLIFIER_1;
         nulls[1] = NULLIFIER_1;
         // Build inputs first (reads the tree) so expectRevert targets only consolidate().
-        Vault.ConsolidatePublicInputs memory inputs = _consolidateInputs(nulls, COMMITMENT_3);
+        ConsolidatePublicInputs memory inputs = _consolidateInputs(nulls, COMMITMENT_3);
         vm.expectRevert(NullifierRegistry.AlreadySpent.selector);
         vault.consolidate(DUMMY_PROOF, inputs);
     }
@@ -1408,7 +1424,7 @@ contract VaultTest is Test {
         bytes32[4] memory second;
         second[0] = NULLIFIER_1;
         second[1] = keccak256("fresh_nullifier");
-        Vault.ConsolidatePublicInputs memory inputs = _consolidateInputs(second, COMMITMENT_3);
+        ConsolidatePublicInputs memory inputs = _consolidateInputs(second, COMMITMENT_3);
         vm.expectRevert(Vault.NullifierSpent.selector);
         vault.consolidate(DUMMY_PROOF, inputs);
     }
@@ -1416,7 +1432,7 @@ contract VaultTest is Test {
     function test_consolidate_unknownRootReverts() public {
         bytes32[4] memory nulls;
         nulls[0] = NULLIFIER_1;
-        Vault.ConsolidatePublicInputs memory inputs = Vault.ConsolidatePublicInputs({
+        ConsolidatePublicInputs memory inputs = ConsolidatePublicInputs({
             merkle_root: keccak256("bogus_root"),
             nullifier: nulls,
             new_commitment: COMMITMENT_3
@@ -1429,7 +1445,7 @@ contract VaultTest is Test {
         // slot 0 inactive -> EmptyConsolidation (belt-and-suspenders; circuit also forbids it).
         bytes32[4] memory nulls;
         nulls[1] = NULLIFIER_1;
-        Vault.ConsolidatePublicInputs memory inputs = _consolidateInputs(nulls, COMMITMENT_3);
+        ConsolidatePublicInputs memory inputs = _consolidateInputs(nulls, COMMITMENT_3);
         vm.expectRevert(Vault.EmptyConsolidation.selector);
         vault.consolidate(DUMMY_PROOF, inputs);
     }
@@ -1438,7 +1454,7 @@ contract VaultTest is Test {
         consolidateVerifier.setShouldPass(false);
         bytes32[4] memory nulls;
         nulls[0] = NULLIFIER_1;
-        Vault.ConsolidatePublicInputs memory inputs = _consolidateInputs(nulls, COMMITMENT_3);
+        ConsolidatePublicInputs memory inputs = _consolidateInputs(nulls, COMMITMENT_3);
         vm.expectRevert(Vault.InvalidProof.selector);
         vault.consolidate(DUMMY_PROOF, inputs);
     }
@@ -1448,7 +1464,7 @@ contract VaultTest is Test {
         vault.pause();
         bytes32[4] memory nulls;
         nulls[0] = NULLIFIER_1;
-        Vault.ConsolidatePublicInputs memory inputs = _consolidateInputs(nulls, COMMITMENT_3);
+        ConsolidatePublicInputs memory inputs = _consolidateInputs(nulls, COMMITMENT_3);
         vm.expectRevert(abi.encodeWithSignature("EnforcedPause()"));
         vault.consolidate(DUMMY_PROOF, inputs);
     }
@@ -1504,7 +1520,7 @@ contract VaultTest is Test {
         vm.prank(operator);
         vault.resolveMarket(MARKET_ID);
 
-        Vault.SettlementPublicInputs memory s = Vault.SettlementPublicInputs({
+        SettlementPublicInputs memory s = SettlementPublicInputs({
             merkle_root: _currentRoot(),
             nullifier: keccak256("two_stage_settle"),
             new_commitment: keccak256("two_stage_commit"),
@@ -1527,7 +1543,7 @@ contract VaultTest is Test {
         vault.creditSettlement(DUMMY_PROOF, _settlementInputs(root), att, sig); // -> CREDITED
 
         // Try to drain again via naCancellationCredit with a fresh note nullifier.
-        Vault.NACancelPublicInputs memory na = _naCancelInputs(_currentRoot());
+        NACancelPublicInputs memory na = _naCancelInputs(_currentRoot());
         na.nullifier = keccak256("double_credit_na");
         (Vault.OperatorAttestation memory att2, bytes memory sig2) = _filledAtt();
         vm.expectRevert(Vault.BetNotCancellable.selector);
@@ -1538,5 +1554,124 @@ contract VaultTest is Test {
     function test_initializeV2_onlyOnce() public {
         vm.expectRevert();
         vault.initializeV2();
+    }
+
+    // =========================================================================
+    // FEE (P2/P4): bet fee, withdrawal fee, minimums, setFeeParams, withdrawFees
+    // =========================================================================
+
+    // Default config from initialize(): betFeeBps=5 (0.05%), withdrawalFeeUSDC=$0.10,
+    // minBet=$1, minWithdrawal=$1, relayGasFeeUSDC=0, feeRecipient=owner.
+
+    function test_authorizeBet_accruesBetFee() public {
+        bytes32 root = _depositAndGetRoot();
+        // bet_amount = $100 → fee = 100e6 * 5 / 10000 = 50_000 ($0.05)
+        vault.authorizeBet(DUMMY_PROOF, _betAuthInputs(root));
+        assertEq(vault.feeAccumulator(), 50_000);
+    }
+
+    function test_authorizeBet_relayGasFeeBundledIntoFee() public {
+        // Set a flat relay-gas reimbursement and confirm it adds on top of the bps fee.
+        vm.prank(owner);
+        vault.setFeeParams(Vault.FeeConfig(5, 20_000, 1_000_000, 100_000, 1_000_000, owner));
+        bytes32 root = _depositAndGetRoot();
+        // fee = 100e6 * 5 / 10000 + 20_000 = 50_000 + 20_000 = 70_000
+        vault.authorizeBet(DUMMY_PROOF, _betAuthInputs(root));
+        assertEq(vault.feeAccumulator(), 70_000);
+    }
+
+    function test_authorizeBet_revertBelowMinBet() public {
+        bytes32 root = _depositAndGetRoot();
+        BetAuthPublicInputs memory inputs = _betAuthInputs(root);
+        inputs.bet_amount = 999_999; // < $1
+        vm.expectRevert(Vault.BelowMinimum.selector);
+        vault.authorizeBet(DUMMY_PROOF, inputs);
+    }
+
+    function test_authorizeBet_minBetExactlyOneDollarOk() public {
+        bytes32 root = _depositAndGetRoot();
+        BetAuthPublicInputs memory inputs = _betAuthInputs(root);
+        inputs.bet_amount = 1_000_000; // exactly $1
+        vault.authorizeBet(DUMMY_PROOF, inputs);
+        assertTrue(registry.isSpent(NULLIFIER_1));
+    }
+
+    function test_withdraw_revertBelowMinWithdrawal() public {
+        vm.prank(alice);
+        vault.deposit(DUMMY_PROOF, COMMITMENT_1, DEPOSIT_AMOUNT);
+        bytes32 root = _currentRoot();
+        bytes32 rHash = _recipientHash(recipient);
+        WithdrawalPublicInputs memory inputs = _withdrawInputs(root, rHash, COMMITMENT_2);
+        inputs.withdrawal_amount = 999_999; // < $1
+        vm.expectRevert(Vault.BelowMinimum.selector);
+        vault.withdraw(DUMMY_PROOF, inputs, recipient);
+    }
+
+    function test_withdrawFees_byFeeRecipient() public {
+        // Accrue the $0.10 withdrawal fee, then the feeRecipient (owner) claims it.
+        vm.prank(alice);
+        vault.deposit(DUMMY_PROOF, COMMITMENT_1, DEPOSIT_AMOUNT);
+        bytes32 root = _currentRoot();
+        bytes32 rHash = _recipientHash(recipient);
+        vault.withdraw(DUMMY_PROOF, _withdrawInputs(root, rHash, COMMITMENT_2), recipient);
+        assertEq(vault.feeAccumulator(), 100_000);
+
+        uint256 ownerBefore = usdc.balanceOf(owner);
+        vm.prank(owner);
+        vault.withdrawFees(100_000);
+        assertEq(usdc.balanceOf(owner) - ownerBefore, 100_000);
+        assertEq(vault.feeAccumulator(), 0);
+    }
+
+    function test_withdrawFees_revertNotRecipient() public {
+        vm.prank(attacker);
+        vm.expectRevert(Vault.NotFeeRecipient.selector);
+        vault.withdrawFees(1);
+    }
+
+    function test_withdrawFees_revertOverAccrued() public {
+        vm.prank(owner);
+        vm.expectRevert(Vault.InvalidAmount.selector);
+        vault.withdrawFees(1); // feeAccumulator == 0
+    }
+
+    function test_setFeeParams_updatesConfig() public {
+        vm.prank(owner);
+        vault.setFeeParams(Vault.FeeConfig(100, 0, 5_000_000, 250_000, 10_000_000, bob));
+        (uint16 bps, uint64 gas, uint64 minBet, uint64 wFee, uint64 minW, address recip) = vault.feeConfig();
+        assertEq(bps, 100);
+        assertEq(gas, 0);
+        assertEq(minBet, 5_000_000);
+        assertEq(wFee, 250_000);
+        assertEq(minW, 10_000_000);
+        assertEq(recip, bob);
+    }
+
+    function test_setFeeParams_newBetFeeApplies() public {
+        vm.prank(owner);
+        vault.setFeeParams(Vault.FeeConfig(100, 0, 1_000_000, 100_000, 1_000_000, owner)); // 1%
+        bytes32 root = _depositAndGetRoot();
+        // fee = 100e6 * 100 / 10000 = 1_000_000 ($1)
+        vault.authorizeBet(DUMMY_PROOF, _betAuthInputs(root));
+        assertEq(vault.feeAccumulator(), 1_000_000);
+    }
+
+    function test_setFeeParams_revertNotOwner() public {
+        vm.prank(attacker);
+        vm.expectRevert(abi.encodeWithSignature("OwnableUnauthorizedAccount(address)", attacker));
+        vault.setFeeParams(Vault.FeeConfig(5, 0, 1_000_000, 100_000, 1_000_000, owner));
+    }
+
+    function test_setFeeParams_revertZeroRecipient() public {
+        vm.prank(owner);
+        vm.expectRevert(Vault.ZeroAddress.selector);
+        vault.setFeeParams(Vault.FeeConfig(5, 0, 1_000_000, 100_000, 1_000_000, address(0)));
+    }
+
+    function test_setFeeParams_revertMinWithdrawalBelowFee() public {
+        vm.prank(owner);
+        // minWithdrawal (50_000) < withdrawalFeeUSDC (100_000) would underflow the payout.
+        vm.expectRevert(Vault.InvalidAmount.selector);
+        vault.setFeeParams(Vault.FeeConfig(5, 0, 1_000_000, 100_000, 50_000, owner));
     }
 }

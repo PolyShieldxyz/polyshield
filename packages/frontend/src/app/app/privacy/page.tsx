@@ -1,6 +1,17 @@
 'use client'
 import { KV } from '@/components/app/KV'
 
+// Deterministic pseudo-random in [0,1) from an integer key. Replaces Math.random() in the
+// decorative SVGs below: Math.random() yields different values on the server vs the client,
+// so the SSR-rendered attributes mismatched on hydration (React hydration error). A pure
+// function of the index renders identically on both passes.
+function seededRand(key: number): number {
+  let t = (key + 0x6d2b79f5) >>> 0
+  t = Math.imul(t ^ (t >>> 15), t | 1)
+  t ^= t + Math.imul(t ^ (t >>> 7), t | 61)
+  return ((t ^ (t >>> 14)) >>> 0) / 4294967296
+}
+
 function AnonSetGraph() {
   const bars = [42, 61, 78, 95, 120, 148, 180, 210, 240, 260, 280, 295, 310, 318, 325, 330, 335, 338, 340, 342]
   const max = Math.max(...bars)
@@ -27,7 +38,7 @@ function AnonSetGraph() {
 function ActivityHeatmap() {
   const hours = Array.from({ length: 24 }, (_, h) => h)
   const days = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun']
-  const data = days.map(() => hours.map(() => Math.random()))
+  const data = days.map((_, di) => hours.map((_h, hi) => seededRand(di * 24 + hi)))
   return (
     <svg viewBox="0 0 340 80" width="100%">
       {days.map((day, di) =>
@@ -53,9 +64,9 @@ function ActivityHeatmap() {
 
 function ClusteringGraph() {
   const nodes = Array.from({ length: 28 }, (_, i) => ({
-    x: 30 + Math.random() * 220,
-    y: 20 + Math.random() * 100,
-    r: 3 + Math.random() * 5,
+    x: 30 + seededRand(i * 3) * 220,
+    y: 20 + seededRand(i * 3 + 1) * 100,
+    r: 3 + seededRand(i * 3 + 2) * 5,
     you: i === 14,
   }))
   return (

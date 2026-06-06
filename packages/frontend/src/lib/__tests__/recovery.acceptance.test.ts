@@ -49,11 +49,22 @@ const b32 = (n: bigint) => (`0x${n.toString(16).padStart(64, '0')}`) as `0x${str
 
 interface Log { blockNumber: bigint; transactionHash: string; args: Record<string, unknown> }
 
-function makeClient(logsByEvent: Record<string, Log[]>, blockTs: Record<string, number>, pendingCredit = 0n) {
+// FEE: feeConfig tuple = [betFeeBps, relayGasFeeUSDC, minBet, withdrawalFeeUSDC, minWithdrawal, feeRecipient].
+// Default is all-zero (no fee) so pre-fee fixtures recover unchanged.
+type FeeConfig = readonly [number, bigint, bigint, bigint, bigint, `0x${string}`]
+const NO_FEE: FeeConfig = [0, 0n, 0n, 0n, 0n, '0x0000000000000000000000000000000000000000']
+
+function makeClient(
+  logsByEvent: Record<string, Log[]>,
+  blockTs: Record<string, number>,
+  pendingCredit = 0n,
+  feeConfig: FeeConfig = NO_FEE,
+) {
   return {
     getLogs: async ({ event }: { event: { name: string } }) => logsByEvent[event.name] ?? [],
     getBlock: async ({ blockNumber }: { blockNumber: bigint }) => ({ timestamp: BigInt(blockTs[String(blockNumber)] ?? 0) }),
-    readContract: async () => pendingCredit,
+    readContract: async ({ functionName }: { functionName: string }) =>
+      functionName === 'feeConfig' ? feeConfig : pendingCredit,
   } as unknown as Parameters<typeof recoverNotesWithClient>[2]
 }
 
@@ -110,6 +121,34 @@ describe('FC-5 recovery', () => {
     const settle = activity.find((a) => a.kind === 'settlement')
     expect(settle?.amount).toBe(proceeds)
     expect(settle?.receiptId).toBe(receipt.id)
+  })
+
+  it('FEE: reconstructs the post-bet balance net of the Vault-injected bet fee', async () => {
+    const secret0 = await deriveSecret(sign, WALLET, 0)
+    const depositAmt = 1_000_000_000n // $1000
+    const betAmt = 100_000_000n       // $100
+    const betFeeBps = 5n              // 0.05%
+    const fee = (betAmt * betFeeBps) / 10_000n // = 50_000 ($0.05)
+    const shares = 200_000_000n
+
+    const depositC = computeCommitment(secret0, depositAmt, 0n, WALLET)
+    const betNull = computeNullifier(secret0, 0n)
+    // The on-chain post-bet commitment binds balance - bet_amount - fee.
+    const betOutC = computeCommitment(secret0, depositAmt - betAmt - fee, 1n, WALLET)
+
+    const logs: Record<string, Log[]> = {
+      Deposited: [{ blockNumber: 10n, transactionHash: '0xdep', args: { depositor: WALLET, commitment: depositC, amount: depositAmt } }],
+      BetAuthorized: [{ blockNumber: 11n, transactionHash: '0xbet', args: { nullifier: betNull, market_id: b32(7n), position_id: b32(0x1234n), expected_shares: shares, bet_amount: betAmt, price: 50_000_000n, outcome_side: 0, new_commitment: betOutC } }],
+      BetSold: [], PositionClosed: [], SettlementCredited: [], BetCancellationCredited: [], NACancellationCredited: [], Withdrawn: [],
+    }
+    const feeConfig: FeeConfig = [5, 0n, 1_000_000n, 100_000n, 1_000_000n, '0x0000000000000000000000000000000000000000']
+    await recoverNotesWithClient(WALLET, sign, makeClient(logs, { '10': 1, '11': 2 }, 0n, feeConfig), VAULT)
+
+    // Recovered cash note = 1000 - 100 - 0.05 = 899.95 (in micro-USDC).
+    const spendable = getSpendableNotes(WALLET).filter((n) => !n.spent)
+    const cash = spendable.reduce((m, n) => (n.balance > m.balance ? n : m), spendable[0])
+    expect(cash.balance).toBe(depositAmt - betAmt - fee)
+    expect(cash.commitment.toLowerCase()).toBe(betOutC.toLowerCase())
   })
 
   it('gap-scan finds deposits past an empty index', async () => {

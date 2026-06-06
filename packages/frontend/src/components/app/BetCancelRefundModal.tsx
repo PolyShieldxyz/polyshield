@@ -1,0 +1,239 @@
+'use client'
+
+import { useEffect, useState } from 'react'
+import { useSignMessage } from 'wagmi'
+import { Modal } from '@/components/app/Modal'
+import { KV } from '@/components/app/KV'
+import {
+  addNote,
+  computeCommitment,
+  computeNullifier,
+  deriveSecret,
+  formatUsdc,
+  getSpendableNotes,
+  markBetReceiptSpent,
+  markNoteSpent,
+  recordWalletActivity,
+  type Note,
+} from '@/lib/notes'
+import {
+  fetchAttestation,
+  fetchBetRecord,
+  fetchMerklePath,
+  relayBetCancel,
+  waitForTransactionConfirmation,
+  type SignedAttestation,
+} from '@/lib/api'
+import { generateProofInWorker } from '@/lib/prover'
+
+// FC-9 operator report types. A FOK-failed / GTD-expired order is attested FAILED;
+// the depositor reclaims their FULL stake via betCancellationCredit.
+const REPORT_FAILED = 2
+
+type Phase = 'input' | 'proving' | 'done' | 'error'
+
+interface BetCancelRefundModalProps {
+  open: boolean
+  address: `0x${string}`
+  receipt: Note // a BET_RECEIPT note the operator reported FAILED (FOK no-fill or GTD expiry)
+  vaultAddress: string
+  onClose: () => void
+  onComplete: () => Promise<void> | void
+}
+
+/**
+ * Reclaim the full stake of a bet whose order never filled — a FOK that missed, or a
+ * GTD limit order that expired on the book. The operator signs a FAILED attestation; the
+ * Vault's betCancellationCredit injects the original bet_amount and credits it back to a
+ * fresh note. Mirrors PartialFillCreditModal but refunds the WHOLE stake and retires the
+ * receipt (there is no remaining position).
+ */
+export function BetCancelRefundModal({
+  open,
+  address,
+  receipt,
+  vaultAddress,
+  onClose,
+  onComplete,
+}: BetCancelRefundModalProps) {
+  const { signMessageAsync } = useSignMessage()
+  const [phase, setPhase] = useState<Phase>('input')
+  const [error, setError] = useState<string | null>(null)
+  const [betAmount, setBetAmount] = useState<bigint>(0n)
+  const [attestation, setAttestation] = useState<SignedAttestation | null>(null)
+  const [loading, setLoading] = useState(true)
+
+  const nullifierOfBet = (receipt.nullifier_of_bet ?? receipt.nullifier) as `0x${string}`
+
+  useEffect(() => {
+    if (!open) return
+    setPhase('input')
+    setError(null)
+    setLoading(true)
+    void import('@/lib/prover').then(({ initProver }) => initProver())
+    void (async () => {
+      try {
+        const att = await fetchAttestation(nullifierOfBet, REPORT_FAILED)
+        if (!att || att.reportType !== REPORT_FAILED) {
+          setError('No failure attestation is available for this bet yet. The operator signs it once the order misses (FOK) or the limit order expires (GTD).')
+          setPhase('error')
+          return
+        }
+        const rec = await fetchBetRecord(vaultAddress, nullifierOfBet)
+        setAttestation(att)
+        // Vault injects rec.bet_amount as the refund; show that authoritative figure.
+        setBetAmount(rec.betAmount)
+      } catch (e) {
+        setError(e instanceof Error ? e.message : String(e))
+        setPhase('error')
+      } finally {
+        setLoading(false)
+      }
+    })()
+  }, [open, receipt, vaultAddress, nullifierOfBet])
+
+  useEffect(() => {
+    if (phase !== 'done') return
+    const id = window.setTimeout(() => { void onComplete(); onClose() }, 5_000)
+    return () => window.clearTimeout(id)
+  }, [phase, onClose, onComplete])
+
+  const run = async () => {
+    setError(null)
+    try {
+      // bet_cancel spends the immediate post-bet note (nonce = receipt.nonce + 1): the
+      // circuit derives nullifier_of_bet = Poseidon2(secret, nonce - 1). Not an arbitrary note.
+      const outputNote = getSpendableNotes(address).find(
+        (n) => n.depositIndex === receipt.depositIndex && n.nonce === receipt.nonce + 1n,
+      )
+      if (!outputNote) {
+        throw new Error(
+          'The post-bet note for this bet is unavailable (already spent on a later action). ' +
+          'Reclaim requires the original post-bet note.',
+        )
+      }
+      if (betAmount <= 0n) {
+        throw new Error('Nothing to reclaim for this bet.')
+      }
+
+      setPhase('proving')
+      const secret = await deriveSecret(signMessageAsync, address, outputNote.depositIndex)
+      const merkle = await fetchMerklePath(outputNote.commitment)
+      const newNonce = outputNote.nonce + 1n
+      const newBalance = outputNote.balance + betAmount
+      const newCommitment = computeCommitment(secret, newBalance, newNonce, address)
+      const newNullifier = computeNullifier(secret, newNonce)
+
+      const { proof } = await generateProofInWorker({
+        type: 'bet_cancel',
+        inputs: {
+          secret,
+          current_balance: outputNote.balance,
+          nonce: outputNote.nonce,
+          merkle_path: merkle.path,
+          merkle_path_indices: merkle.pathIndices,
+          owner_address: address,
+          merkle_root: merkle.root,
+          nullifier: outputNote.nullifier,
+          new_commitment: newCommitment,
+          nullifier_of_bet: nullifierOfBet,
+          bet_amount: betAmount, // Vault-injected; must match rec.bet_amount
+        },
+      })
+
+      const { txHash } = await relayBetCancel(proof, {
+        merkle_root: merkle.root,
+        nullifier: outputNote.nullifier,
+        new_commitment: newCommitment,
+        nullifier_of_bet: nullifierOfBet,
+      }, attestation ?? undefined)
+      await waitForTransactionConfirmation(txHash as `0x${string}`)
+
+      markNoteSpent(outputNote.commitment)
+      markBetReceiptSpent(nullifierOfBet)
+      addNote({
+        id: newCommitment,
+        kind: 'CANCEL_CREDIT',
+        owner_address: address,
+        depositIndex: outputNote.depositIndex,
+        balance: newBalance,
+        nonce: newNonce,
+        commitment: newCommitment,
+        nullifier: newNullifier,
+        spent: false,
+        createdAt: Date.now(),
+        txHash,
+        marketId: receipt.marketId,
+        condition_id: receipt.condition_id,
+      })
+      recordWalletActivity({
+        id: `betcancel-${txHash}-${receipt.id}`,
+        wallet: address,
+        kind: 'refund',
+        amount: betAmount,
+        createdAt: Date.now(),
+        txHash,
+        marketId: receipt.marketId as `0x${string}` | undefined,
+        receiptId: receipt.id,
+        receiptNullifier: nullifierOfBet,
+        payout: betAmount,
+      })
+
+      setPhase('done')
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err))
+      setPhase('error')
+    }
+  }
+
+  return (
+    <Modal open={open} title="Reclaim stake (order did not fill)" onClose={() => { if (phase !== 'proving') onClose() }}>
+      {phase === 'input' && (
+        <div className="col gap-4">
+          <p className="body" style={{ margin: 0 }}>
+            This order never filled — a fill-or-kill that missed, or a limit order that expired
+            on the book. Reclaim your full stake back to your private balance.
+          </p>
+          <div className="panel" style={{ padding: 16 }}>
+            <KV l="Market" v={receipt.marketId ?? receipt.id} />
+            <KV l="Side" v={receipt.side ?? '—'} />
+            <KV l="Stake to reclaim" v={loading ? '…' : `$${formatUsdc(betAmount)} USDC`} />
+          </div>
+          <div className="row" style={{ justifyContent: 'space-between', gap: 12 }}>
+            <button className="btn" onClick={onClose}>Cancel</button>
+            <button className="btn btn-primary" disabled={loading || betAmount <= 0n} onClick={() => void run()}>
+              Reclaim ${formatUsdc(betAmount)}
+            </button>
+          </div>
+        </div>
+      )}
+
+      {phase === 'proving' && (
+        <div className="col gap-4">
+          <div className="micro">GENERATING REFUND PROOF</div>
+          <h3 className="h4" style={{ margin: 0 }}>Crediting your stake back to your note…</h3>
+          <p className="small" style={{ margin: 0 }}>Do not close this window.</p>
+        </div>
+      )}
+
+      {phase === 'done' && (
+        <div className="col gap-4">
+          <div className="micro" style={{ color: 'var(--green)' }}>STAKE RECLAIMED</div>
+          <h3 className="h4" style={{ margin: 0 }}>+${formatUsdc(betAmount)} returned to your balance.</h3>
+          <p className="small" style={{ margin: 0 }}>Auto close in 5 seconds.</p>
+        </div>
+      )}
+
+      {phase === 'error' && (
+        <div className="col gap-4">
+          <div className="micro" style={{ color: 'var(--red)' }}>RECLAIM FAILED</div>
+          {error && <p className="body" style={{ margin: 0 }}>{error}</p>}
+          <div className="row" style={{ justifyContent: 'space-between', gap: 12 }}>
+            <button className="btn" onClick={onClose}>Close</button>
+            <button className="btn btn-primary" onClick={() => void run()}>Retry</button>
+          </div>
+        </div>
+      )}
+    </Modal>
+  )
+}

@@ -8,6 +8,41 @@ const logger = pino({ name: "redemption-pipeline" });
 
 const ZERO_BYTES32 = "0x" + "00".repeat(32);
 
+// BN254 scalar field modulus. The Vault stores BetAuthorized.market_id as the conditionId
+// reduced mod this (circuit_key), so an event's market_id must be compared against the
+// reduced conditionId — not the raw CTF conditionId.
+const BN254_P = 0x30644e72e131a029b85045b68181585d2833e84879b9709143e1f593f0000001n;
+
+/** True when a BetAuthorized event's (reduced) market_id matches this conditionId. */
+function sameMarket(eventMarketId: string, conditionId: string): boolean {
+  try {
+    return BigInt(eventMarketId) % BN254_P === BigInt(conditionId) % BN254_P;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Fetch all BetAuthorized events for a resolved market.
+ *
+ * IMPORTANT: `market_id` is the SECOND (non-indexed) event parameter, so it CANNOT be
+ * used as a topic filter — `vault.filters.BetAuthorized(null, conditionId)` throws
+ * `TypeError: cannot filter non-indexed parameters` in ethers v6 (this previously errored
+ * out of every market resolution). Query all BetAuthorized logs and match market_id in JS.
+ */
+async function betsForMarket(
+  vault: ethers.Contract,
+  conditionId: string,
+): Promise<ethers.LogDescription[]> {
+  const logs = await vault.queryFilter(vault.filters.BetAuthorized(), 0, "latest");
+  const out: ethers.LogDescription[] = [];
+  for (const log of logs) {
+    const parsed = vault.interface.parseLog({ topics: log.topics as string[], data: log.data });
+    if (parsed && sameMarket(parsed.args.market_id as string, conditionId)) out.push(parsed);
+  }
+  return out;
+}
+
 const CTF_ABI = [
   "event ConditionResolution(bytes32 indexed conditionId, address indexed oracle, bytes32 indexed questionId, uint256 outcomeSlotCount, uint256[] payoutNumerators)",
   "function payoutNumerators(bytes32 conditionId) view returns (uint256[])",
@@ -54,39 +89,11 @@ async function collectPositionIds(
   conditionId: string
 ): Promise<string[]> {
   const vault = new ethers.Contract(vaultAddress, VAULT_ABI, provider);
-  const filter = vault.filters.BetAuthorized(null, conditionId);
-  const logs = await vault.queryFilter(filter, 0, "latest");
   const ids = new Set<string>();
-  for (const log of logs) {
-    const parsed = vault.interface.parseLog({ topics: log.topics as string[], data: log.data });
-    if (parsed) ids.add(parsed.args.position_id as string);
+  for (const parsed of await betsForMarket(vault, conditionId)) {
+    ids.add(parsed.args.position_id as string);
   }
   return [...ids];
-}
-
-/**
- * C3 fix: sum expected_shares for winning-side FILLED bets only.
- * This is the pUSD the deposit wallet will receive from redeemPositions.
- * Uses outcome_side from the BetAuthorized event (M2 fix) to avoid per-bet RPC calls.
- */
-async function computeRedemptionAmount(
-  provider: ethers.JsonRpcProvider,
-  vaultAddress: string,
-  conditionId: string,
-  winningSide: number
-): Promise<bigint> {
-  const vault = new ethers.Contract(vaultAddress, VAULT_ABI, provider);
-  const filter = vault.filters.BetAuthorized(null, conditionId);
-  const logs = await vault.queryFilter(filter, 0, "latest");
-  let total = 0n;
-  for (const log of logs) {
-    const parsed = vault.interface.parseLog({ topics: log.topics as string[], data: log.data });
-    if (!parsed) continue;
-    // Only count bets on the winning side.
-    if (Number(parsed.args.outcome_side) !== winningSide) continue;
-    total += parsed.args.expected_shares as bigint;
-  }
-  return total;
 }
 
 /**
@@ -185,26 +192,36 @@ export async function runRedemptionPipeline(
     return;
   }
 
-  // Determine winning outcome side: YES=0 if numerators[0]>0, else NO=1.
-  const winningSide = numerators[0] > 0n ? 0 : 1;
-
   const executor = getDepositWalletExecutor(provider);
   const usdcBefore: bigint = await usdcRo.balanceOf(config.vaultContractAddress);
   const positionIds = await collectPositionIds(provider, config.vaultContractAddress, conditionId);
   const hasShares = await hasVaultShares(ctf, conditionId, positionIds);
 
+  // pUSD actually redeemed (winning shares held × payout); stays 0 if only losing shares are held.
+  let redeemedPusd = 0n;
+
   try {
     if (hasShares) {
+      // Offramp EXACTLY the pUSD redeemPositions mints — measured as the deposit wallet's pUSD
+      // balance delta across the redeem. Deriving the amount from BetAuthorized expected_shares
+      // over-counts: it includes UNFILLED / partially-filled winning orders that never bought
+      // CTF shares, so the offramp withdraw would try to pull more pUSD than the wallet holds
+      // and revert (MockDepositWallet CallFailed(1) on the pUSD transferFrom). The measured
+      // delta is exact and leaves the JIT residual buffer untouched.
+      const pusdRo = new ethers.Contract(config.pusdAddress, ERC20_ABI, provider);
+      const pusdBefore: bigint = await pusdRo.balanceOf(config.depositWalletAddress);
       await redeemViaExecutor(executor, conditionId, numerators);
-
-      // C3 fix: use expected_shares of winning-side bets, not bet_amount of all bets.
-      const redemptionAmount = await computeRedemptionAmount(
-        provider,
-        config.vaultContractAddress,
-        conditionId,
-        winningSide
+      const pusdAfter: bigint = await pusdRo.balanceOf(config.depositWalletAddress);
+      redeemedPusd = pusdAfter > pusdBefore ? pusdAfter - pusdBefore : 0n;
+      logger.info(
+        { conditionId, redeemedPusd: redeemedPusd.toString() },
+        "redeem: pUSD minted (deposit-wallet balance delta) → offramp",
       );
-      await offrampPusdToVault(executor, redemptionAmount);
+      if (redeemedPusd > 0n) {
+        await offrampPusdToVault(executor, redeemedPusd);
+      } else {
+        logger.warn({ conditionId }, "redeemPositions minted no pUSD (no winning shares held) — nothing to offramp");
+      }
     } else {
       logger.warn(
         { conditionId },
@@ -215,7 +232,9 @@ export async function runRedemptionPipeline(
     }
 
     const usdcAfter: bigint = await usdcRo.balanceOf(config.vaultContractAddress);
-    if (usdcAfter <= usdcBefore && hasShares) {
+    // Only an error if we actually redeemed pUSD (winning shares) but the vault didn't receive
+    // the USDC. Holding only losing shares legitimately returns nothing, so don't false-alarm.
+    if (redeemedPusd > 0n && usdcAfter <= usdcBefore) {
       throw new Error(
         `Vault USDC did not increase after redemption (before=${usdcBefore} after=${usdcAfter})`
       );

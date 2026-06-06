@@ -23,6 +23,13 @@ template BetAuth() {
     signal input market_id;
     signal input outcome_side;
     signal input position_id;
+    // FEE (P2): Vault-injected protocol fee + relay-gas reimbursement, in USDC (6dp).
+    // The Vault computes fee = bet_amount * betFeeBps / 10000 + relayGasFeeUSDC from its
+    // own governance storage and passes it here as a public input, so a user cannot forge
+    // a proof with a different fee: their new_commitment would not match the Vault-injected
+    // fee and verification fails. This is identical to the way bet_amount is injected for
+    // cancellations. See docs/zk-design.md and CLAUDE.md (Fee model).
+    signal input fee;
 
     component currentBalanceBits = AssertBits(64);
     currentBalanceBits.in <== current_balance;
@@ -30,6 +37,8 @@ template BetAuth() {
     nonceBits.in <== nonce;
     component betAmountBits = AssertBits(64);
     betAmountBits.in <== bet_amount;
+    component feeBits = AssertBits(64);
+    feeBits.in <== fee;
     component priceBits = AssertBits(64);
     priceBits.in <== price;
     component expectedSharesBits = AssertBits(64);
@@ -82,8 +91,11 @@ template BetAuth() {
     lhs <== computed_shares + share_remainder;
     lhs === scaled_amount;
 
+    // FEE: deduct the Vault-injected fee in addition to the bet amount. The AssertBits(64)
+    // below also enforces current_balance >= bet_amount + fee (an underflow would wrap to a
+    // value outside the 64-bit range and fail the range check).
     signal new_balance;
-    new_balance <== current_balance - bet_amount;
+    new_balance <== current_balance - bet_amount - fee;
     component newBalanceBits = AssertBits(64);
     newBalanceBits.in <== new_balance;
 
@@ -101,4 +113,4 @@ template BetAuth() {
     // intentionally unconstrained in-circuit (the Vault binds them on-chain). No tautology.
 }
 
-component main {public [merkle_root, nullifier, new_commitment, bet_amount, price, expected_shares, market_id, outcome_side, position_id]} = BetAuth();
+component main {public [merkle_root, nullifier, new_commitment, bet_amount, price, expected_shares, market_id, outcome_side, position_id, fee]} = BetAuth();

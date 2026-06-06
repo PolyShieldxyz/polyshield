@@ -13,10 +13,24 @@ import {ECDSA} from "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
 
 import {CommitmentMerkleTree} from "./CommitmentMerkleTree.sol";
 import {NullifierRegistry} from "./NullifierRegistry.sol";
-import {IVerifier} from "./interfaces/IVerifier.sol";
+// IVerifier dispatch now lives inside VaultInputs (verify-wrappers) to keep the Vault
+// under the EIP-170 limit; the Vault no longer references IVerifier directly.
 import {ICollateralOnramp} from "./interfaces/ICollateralOnramp.sol";
 import {ICollateralOfframp} from "./interfaces/ICollateralOfframp.sol";
 import {ICTF} from "./interfaces/ICTF.sol";
+// FEE/EIP-170: the public-input structs and their pure assembly helpers live in an external
+// library (DELEGATECALL-linked) to keep this contract under the 24576-byte runtime limit.
+import {
+    VaultInputs,
+    BetAuthPublicInputs,
+    SettlementPublicInputs,
+    WithdrawalPublicInputs,
+    BetCancelPublicInputs,
+    NACancelPublicInputs,
+    ClosePublicInputs,
+    PartialFillPublicInputs,
+    ConsolidatePublicInputs
+} from "./VaultInputs.sol";
 
 /// @notice Privacy-preserving vault for Polymarket positions.
 /// Users deposit USDC, then authorize bets, credit settlements, and withdraw
@@ -73,76 +87,8 @@ contract Vault is
         uint64 spent_amount;  // FC-4: bet_amount portion consumed by the partial fill (Vault-injected)
     }
 
-    // Public input structs — mirror the Noir circuit's `pub` parameters in order.
-    struct BetAuthPublicInputs {
-        bytes32 merkle_root;
-        bytes32 nullifier;
-        bytes32 new_commitment;
-        uint64 bet_amount;
-        uint64 price;
-        uint64 expected_shares;
-        bytes32 market_id;
-        uint8 outcome_side;
-        bytes32 position_id;
-    }
-
-    struct SettlementPublicInputs {
-        bytes32 merkle_root;
-        bytes32 nullifier;
-        bytes32 new_commitment;
-        bytes32 nullifier_of_bet;
-        bytes32 market_id;
-        // payout_per_share REMOVED — read from pendingCredit[market_id]
-        // shares_held is NOT here — injected from betRecords[nullifier_of_bet]
-        uint64 total_credit;
-    }
-
-    struct WithdrawalPublicInputs {
-        bytes32 merkle_root;
-        bytes32 nullifier;
-        uint64 withdrawal_amount;
-        bytes32 recipient_hash;
-        bytes32 new_commitment;
-    }
-
-    struct BetCancelPublicInputs {
-        bytes32 merkle_root;
-        bytes32 nullifier;
-        bytes32 new_commitment;
-        bytes32 nullifier_of_bet;
-        // bet_amount is NOT here — it is injected from betRecords[nullifier_of_bet]
-    }
-
-    struct NACancelPublicInputs {
-        bytes32 merkle_root;
-        bytes32 nullifier;
-        bytes32 new_commitment;
-        bytes32 nullifier_of_bet;
-        bytes32 market_id;
-        // bet_amount is NOT here — it is injected from betRecords[nullifier_of_bet]
-    }
-
-    struct ClosePublicInputs {
-        bytes32 merkle_root;
-        bytes32 nullifier;
-        bytes32 new_commitment;
-        bytes32 nullifier_of_bet;
-        // sell_proceeds is NOT here — injected from betRecords[nullifier_of_bet].sell_proceeds (FC-1)
-    }
-
-    struct PartialFillPublicInputs {
-        bytes32 merkle_root;
-        bytes32 nullifier;
-        bytes32 new_commitment;
-        bytes32 nullifier_of_bet;
-        // refund_amount is NOT here — injected as (bet_amount - spent_amount) from betRecords (FC-4)
-    }
-
-    struct ConsolidatePublicInputs {
-        bytes32 merkle_root;
-        bytes32[4] nullifier;   // FC-8: one per input slot; inactive slots are bytes32(0)
-        bytes32 new_commitment; // merged note continuing slot 0's lineage
-    }
+    // Public-input structs (BetAuthPublicInputs, SettlementPublicInputs, …) moved to
+    // VaultInputs.sol (file scope) — imported above. Their ABI is unchanged.
 
     // FC-9: gasless operator reporting. Instead of paying gas to push fill status on-chain,
     // the operator signs this struct OFF-CHAIN (EIP-712) and the user submits the signature
@@ -163,6 +109,22 @@ contract Vault is
     uint8 public constant REPORT_FAILED = 2;
     uint8 public constant REPORT_PARTIAL = 3;
     uint8 public constant REPORT_SOLD = 4;
+
+    // FEE (P2/P4): all governance-mutable fee parameters in one packed struct (2 slots).
+    // betFeeBps         — protocol bet fee in basis points (5 = 0.05%); deducted in-circuit.
+    // relayGasFeeUSDC   — flat USDC (6dp) relay-gas reimbursement, bundled into the bet fee.
+    // minBet            — minimum bet_amount (Polymarket order floor); $1 = 1e6.
+    // withdrawalFeeUSDC — flat USDC (6dp) fee skimmed from each withdrawal payout.
+    // minWithdrawal     — minimum withdrawal_amount; must be >= withdrawalFeeUSDC.
+    // feeRecipient      — address that may claim accumulated fees via withdrawFees().
+    struct FeeConfig {
+        uint16 betFeeBps;
+        uint64 relayGasFeeUSDC;
+        uint64 minBet;
+        uint64 withdrawalFeeUSDC;
+        uint64 minWithdrawal;
+        address feeRecipient;
+    }
 
     // -------------------------------------------------------------------------
     // Constants
@@ -206,9 +168,15 @@ contract Vault is
     // concrete limit post-deploy via setDeploymentCap to bound a compromised operator.
     uint256 public deploymentCap; // set to type(uint256).max in initialize()
 
+    // FEE (P2/P4): governance-mutable fee parameters + accrued-fee balance. feeAccumulator is
+    // USDC sitting in the pool that is owed to feeConfig.feeRecipient (claimable via withdrawFees).
+    FeeConfig public feeConfig;
+    uint256 public feeAccumulator;
+
     /// @dev Reserved storage slots for future UUPS upgrades. Append new state by
     /// shrinking this gap; never reorder or remove the state variables declared above.
-    uint256[50] private __gap;
+    /// FEE added FeeConfig (2 slots) + feeAccumulator (1 slot): __gap 50 -> 47.
+    uint256[47] private __gap;
 
     // -------------------------------------------------------------------------
     // Errors
@@ -249,6 +217,8 @@ contract Vault is
     error InvalidAttestation();     // FC-9: operator signature did not recover to signingLayerOperator
     error AttestationMismatch();    // FC-9: attestation nullifier/type does not match the call
     error AttestationRequired();    // FC-9: an ACTIVE bet needs an operator attestation to credit
+    error BelowMinimum();           // FEE: bet_amount < minBet or withdrawal_amount < minWithdrawal
+    error NotFeeRecipient();        // FEE: withdrawFees caller is not feeConfig.feeRecipient
 
     // -------------------------------------------------------------------------
     // Events
@@ -284,6 +254,9 @@ contract Vault is
     // FC-8: carries all 4 input nullifiers (zeros for inactive slots) + the merged output
     // commitment. Recovery matches a wallet's lineage by membership in `nullifiers`.
     event Consolidated(bytes32[4] nullifiers, bytes32 new_commitment);
+    // FEE: governance updated the fee parameters / a recipient claimed accrued fees.
+    event FeeParamsUpdated(FeeConfig config);
+    event FeesWithdrawn(address indexed to, uint256 amount);
 
     // -------------------------------------------------------------------------
     // Initializer (UUPS)
@@ -328,6 +301,20 @@ contract Vault is
         // Defaults formerly set via inline initializers (which do not run in a proxy).
         adminCancelTimelock = 86_400;          // 24 hours
         deploymentCap = type(uint256).max;     // unlimited until governance sets a cap (SEC-007)
+
+        // FEE defaults (governance-mutable via setFeeParams). betFeeBps = 5 (0.05%);
+        // relay gas reimbursement starts at 0 (governance sets the live USDC rate);
+        // $1 min bet (Polymarket floor); $0.10 withdrawal fee; $1 min withdrawal (testing).
+        // NOTE: proxies upgraded (not freshly initialized) into this version must call
+        // setFeeParams once — initialize does not re-run on an existing proxy.
+        feeConfig = FeeConfig({
+            betFeeBps: 5,
+            relayGasFeeUSDC: 0,
+            minBet: 1_000_000,
+            withdrawalFeeUSDC: 100_000,
+            minWithdrawal: 1_000_000,
+            feeRecipient: _owner
+        });
     }
 
     /// @notice FC-9 upgrade initializer. Sets up the EIP-712 domain used to verify operator
@@ -369,6 +356,30 @@ contract Vault is
     function _authorizeUpgrade(address newImplementation) internal override onlyOwner {}
 
     // -------------------------------------------------------------------------
+    // Shared spend-path helpers
+    // -------------------------------------------------------------------------
+    // Every note-spending entry point runs the same prologue (nullifier unspent +
+    // root known) and the same effects (mark spent + append the change leaf). These
+    // are factored out so the (external-call-bearing) logic is emitted once rather
+    // than inlined into each of the ~7 callers, keeping the Vault under the 24576-byte
+    // EIP-170 limit. Behaviour is identical to the prior inline code — do not reorder.
+
+    /// @dev Entry checks shared by every spend path: the input note's nullifier must be
+    /// unspent and `root` must be a known historical Merkle root.
+    function _requireUnspentKnownRoot(bytes32 nullifier, bytes32 root) internal view {
+        if (nullifiers.isSpent(nullifier)) revert NullifierSpent();
+        if (!tree.isKnownRoot(root)) revert UnknownRoot();
+    }
+
+    /// @dev Effects shared by every spend path (checks-effects-interactions): mark the
+    /// input nullifier spent, then append the new commitment leaf if one was supplied.
+    /// `commitment == 0` (no change note, e.g. a full withdrawal) skips the insert.
+    function _spendAndInsert(bytes32 nullifier, bytes32 commitment) internal {
+        nullifiers.markSpent(nullifier);
+        if (commitment != bytes32(0)) tree.insert(commitment);
+    }
+
+    // -------------------------------------------------------------------------
     // Admin
     // -------------------------------------------------------------------------
     /// @notice Propose a new verifier. Takes effect after VERIFIER_TIMELOCK (48 h).
@@ -397,6 +408,27 @@ contract Vault is
     /// @notice Update the aggregate cap on USDC deployed to Polymarket. Owner-controlled (SEC-007).
     function setDeploymentCap(uint256 _cap) external onlyOwner {
         deploymentCap = _cap;
+    }
+
+    /// @notice Update all fee parameters at once (governance). One combined setter keeps the
+    /// Vault under the EIP-170 limit vs. one setter per field.
+    function setFeeParams(FeeConfig calldata c) external onlyOwner {
+        if (c.feeRecipient == address(0)) revert ZeroAddress();
+        // Prevent an underflow footgun in withdraw(): a withdrawal at the minimum must still
+        // cover the fee (payout = withdrawal_amount - withdrawalFeeUSDC >= 0).
+        if (c.minWithdrawal < c.withdrawalFeeUSDC) revert InvalidAmount();
+        feeConfig = c;
+        emit FeeParamsUpdated(c);
+    }
+
+    /// @notice Claim accrued protocol/withdrawal fees (USDC) to the feeRecipient. The fees
+    /// already sit in the vault pool; this pays them out and decrements the accumulator.
+    function withdrawFees(uint256 amount) external nonReentrant {
+        if (msg.sender != feeConfig.feeRecipient) revert NotFeeRecipient();
+        if (amount > feeAccumulator) revert InvalidAmount();
+        feeAccumulator -= amount;
+        usdc.safeTransfer(msg.sender, amount);
+        emit FeesWithdrawn(msg.sender, amount);
     }
 
     /// @notice Update the timelock duration for adminCancelBet. Owner-controlled.
@@ -461,7 +493,7 @@ contract Vault is
         whenNotPaused
     {
         if (cumulativeDeposits[msg.sender] + amount > DEPOSIT_CAP) revert DepositCapExceeded();
-        if (!IVerifier(verifiers[DEPOSIT]).verify(proof, _depositPublicInputs(commitment, amount, msg.sender)))
+        if (!VaultInputs.verifyDeposit(verifiers[DEPOSIT], proof, commitment, amount, msg.sender))
             revert InvalidProof();
 
         cumulativeDeposits[msg.sender] += amount;
@@ -482,12 +514,22 @@ contract Vault is
         BetAuthPublicInputs calldata inputs
     ) external nonReentrant whenNotPaused {
         // Nullifier check FIRST (checks-effects-interactions)
-        if (nullifiers.isSpent(inputs.nullifier)) revert NullifierSpent();
-        if (!tree.isKnownRoot(inputs.merkle_root)) revert UnknownRoot();
-        if (!IVerifier(verifiers[BET_AUTH]).verify(proof, _betAuthPublicInputs(inputs))) revert InvalidProof();
+        _requireUnspentKnownRoot(inputs.nullifier, inputs.merkle_root);
 
-        nullifiers.markSpent(inputs.nullifier);
-        tree.insert(inputs.new_commitment);
+        // FEE: enforce the Polymarket minimum order size, then compute the Vault-authoritative
+        // fee = bet_amount * betFeeBps / 10000 + relayGasFeeUSDC from governance storage. Injecting
+        // it as a public input forces the proof's post-bet balance to be
+        // current_balance - bet_amount - fee; a user cannot substitute a smaller fee (their
+        // new_commitment would not match the injected value and verification fails). Applies
+        // uniformly to every order type (FOK/FAK/GTC/GTD) — order type is an off-chain concern.
+        FeeConfig memory fc = feeConfig;
+        if (inputs.bet_amount < fc.minBet) revert BelowMinimum();
+        uint64 fee = uint64(uint256(inputs.bet_amount) * fc.betFeeBps / 10_000) + fc.relayGasFeeUSDC;
+
+        if (!VaultInputs.verifyBetAuth(verifiers[BET_AUTH], proof, inputs, fee)) revert InvalidProof();
+
+        _spendAndInsert(inputs.nullifier, inputs.new_commitment);
+        feeAccumulator += fee;
 
         betRecords[inputs.nullifier] = BetRecord({
             market_id: inputs.market_id,
@@ -621,8 +663,7 @@ contract Vault is
         OperatorAttestation calldata att,
         bytes calldata sig
     ) external nonReentrant whenNotPaused {
-        if (nullifiers.isSpent(inputs.nullifier)) revert NullifierSpent();
-        if (!tree.isKnownRoot(inputs.merkle_root)) revert UnknownRoot();
+        _requireUnspentKnownRoot(inputs.nullifier, inputs.merkle_root);
 
         BetRecord storage rec = betRecords[inputs.nullifier_of_bet];
         if (rec.market_id == bytes32(0)) revert BetNotFound();
@@ -644,11 +685,9 @@ contract Vault is
         uint64 shares_held = rec.expected_shares;
         require(uint256(shares_held) * uint256(payout_per_share) == uint256(inputs.total_credit), "Invalid total_credit");
 
-        bytes32[] memory pubInputs = _settlementPublicInputs(inputs);
-        if (!IVerifier(verifiers[SETTLEMENT_CREDIT]).verify(proof, pubInputs)) revert InvalidProof();
+        if (!VaultInputs.verifySettlement(verifiers[SETTLEMENT_CREDIT], proof, inputs)) revert InvalidProof();
 
-        nullifiers.markSpent(inputs.nullifier);
-        tree.insert(inputs.new_commitment);
+        _spendAndInsert(inputs.nullifier, inputs.new_commitment);
         rec.status = BetStatus.CREDITED;
 
         emit SettlementCredited(inputs.nullifier, inputs.nullifier_of_bet, inputs.new_commitment);
@@ -667,24 +706,30 @@ contract Vault is
         WithdrawalPublicInputs calldata inputs,
         address recipientAddress
     ) external nonReentrant whenNotPaused {
-        if (nullifiers.isSpent(inputs.nullifier)) revert NullifierSpent();
-        if (!tree.isKnownRoot(inputs.merkle_root)) revert UnknownRoot();
-        if (!IVerifier(verifiers[WITHDRAWAL]).verify(proof, _withdrawalPublicInputs(inputs))) revert InvalidProof();
+        _requireUnspentKnownRoot(inputs.nullifier, inputs.merkle_root);
+
+        // FEE (P4): enforce the minimum withdrawal and skim a flat USDC fee from the payout.
+        // The note still burns the full withdrawal_amount; the recipient receives
+        // withdrawal_amount - withdrawalFeeUSDC and the fee stays in the pool for feeRecipient.
+        // No circuit change needed — the Vault controls the USDC leaving the pool directly.
+        FeeConfig memory fc = feeConfig;
+        if (inputs.withdrawal_amount < fc.minWithdrawal) revert BelowMinimum();
+
+        if (!VaultInputs.verifyWithdrawal(verifiers[WITHDRAWAL], proof, inputs)) revert InvalidProof();
 
         // Verify recipientAddress matches the commitment in the proof
         bytes32 computedHash = tree.hashTwo(bytes32(uint256(uint160(recipientAddress))), bytes32(0));
         if (computedHash != inputs.recipient_hash) revert BadRecipient();
 
         // H1: explicit solvency guard — gives a meaningful error when funds are deployed.
+        // Guards the full amount: the vault must hold the payout (amount - fee) AND retain the fee.
         uint256 available = usdc.balanceOf(address(this));
         if (available < uint256(inputs.withdrawal_amount))
             revert InsufficientLiquidity(available, uint256(inputs.withdrawal_amount));
 
-        nullifiers.markSpent(inputs.nullifier);
-        if (inputs.new_commitment != bytes32(0)) {
-            tree.insert(inputs.new_commitment);
-        }
-        usdc.safeTransfer(recipientAddress, uint256(inputs.withdrawal_amount));
+        _spendAndInsert(inputs.nullifier, inputs.new_commitment);
+        feeAccumulator += fc.withdrawalFeeUSDC;
+        usdc.safeTransfer(recipientAddress, uint256(inputs.withdrawal_amount) - fc.withdrawalFeeUSDC);
 
         emit Withdrawn(inputs.nullifier, recipientAddress, uint256(inputs.withdrawal_amount), inputs.new_commitment);
     }
@@ -706,8 +751,7 @@ contract Vault is
         OperatorAttestation calldata att,
         bytes calldata sig
     ) external nonReentrant whenNotPaused {
-        if (nullifiers.isSpent(inputs.nullifier)) revert NullifierSpent();
-        if (!tree.isKnownRoot(inputs.merkle_root)) revert UnknownRoot();
+        _requireUnspentKnownRoot(inputs.nullifier, inputs.merkle_root);
 
         BetRecord storage rec = betRecords[inputs.nullifier_of_bet];
         if (rec.market_id == bytes32(0)) revert BetNotFound();
@@ -716,11 +760,9 @@ contract Vault is
             _checkAttestation(att, sig, inputs.nullifier_of_bet, REPORT_FAILED, REPORT_FAILED);
         }
 
-        bytes32[] memory pubInputs = _betCancelPublicInputs(inputs, rec.bet_amount);
-        if (!IVerifier(verifiers[BET_CANCEL]).verify(proof, pubInputs)) revert InvalidProof();
+        if (!VaultInputs.verifyBetCancel(verifiers[BET_CANCEL], proof, inputs, rec.bet_amount)) revert InvalidProof();
 
-        nullifiers.markSpent(inputs.nullifier);
-        tree.insert(inputs.new_commitment);
+        _spendAndInsert(inputs.nullifier, inputs.new_commitment);
         rec.status = BetStatus.CANCELLED_CREDITED;
 
         emit BetCancellationCredited(inputs.nullifier, inputs.nullifier_of_bet, inputs.new_commitment);
@@ -743,8 +785,7 @@ contract Vault is
         OperatorAttestation calldata att,
         bytes calldata sig
     ) external nonReentrant whenNotPaused {
-        if (nullifiers.isSpent(inputs.nullifier)) revert NullifierSpent();
-        if (!tree.isKnownRoot(inputs.merkle_root)) revert UnknownRoot();
+        _requireUnspentKnownRoot(inputs.nullifier, inputs.merkle_root);
 
         BetRecord storage rec = betRecords[inputs.nullifier_of_bet];
         if (rec.market_id == bytes32(0)) revert BetNotFound();
@@ -763,11 +804,9 @@ contract Vault is
             if (numerators[i] != 0) revert NotNA();
         }
 
-        bytes32[] memory pubInputs = _naCancelPublicInputs(inputs, rec.bet_amount);
-        if (!IVerifier(verifiers[CANCEL_CREDIT]).verify(proof, pubInputs)) revert InvalidProof();
+        if (!VaultInputs.verifyNACancel(verifiers[CANCEL_CREDIT], proof, inputs, rec.bet_amount)) revert InvalidProof();
 
-        nullifiers.markSpent(inputs.nullifier);
-        tree.insert(inputs.new_commitment);
+        _spendAndInsert(inputs.nullifier, inputs.new_commitment);
         rec.status = BetStatus.CANCELLED_CREDITED;
 
         emit NACancellationCredited(inputs.nullifier, inputs.nullifier_of_bet, inputs.new_commitment);
@@ -793,8 +832,7 @@ contract Vault is
         OperatorAttestation calldata att,
         bytes calldata sig
     ) external nonReentrant whenNotPaused {
-        if (nullifiers.isSpent(inputs.nullifier)) revert NullifierSpent();
-        if (!tree.isKnownRoot(inputs.merkle_root)) revert UnknownRoot();
+        _requireUnspentKnownRoot(inputs.nullifier, inputs.merkle_root);
 
         BetRecord storage rec = betRecords[inputs.nullifier_of_bet];
         if (rec.market_id == bytes32(0)) revert BetNotFound();
@@ -808,11 +846,9 @@ contract Vault is
         if (marketResolvedAt[circuit_key] != 0) revert CannotCloseResolvedMarket();
 
         uint64 sell_proceeds = att.amountB;
-        bytes32[] memory pubInputs = _closePublicInputs(inputs, sell_proceeds);
-        if (!IVerifier(verifiers[POSITION_CLOSE]).verify(proof, pubInputs)) revert InvalidProof();
+        if (!VaultInputs.verifyClose(verifiers[POSITION_CLOSE], proof, inputs, sell_proceeds)) revert InvalidProof();
 
-        nullifiers.markSpent(inputs.nullifier);
-        tree.insert(inputs.new_commitment);
+        _spendAndInsert(inputs.nullifier, inputs.new_commitment);
         rec.status = BetStatus.CLOSED_CREDITED;
 
         // Emit BetSold (proceeds) before PositionClosed so wallet recovery can reconstruct the
@@ -844,8 +880,7 @@ contract Vault is
         OperatorAttestation calldata att,
         bytes calldata sig
     ) external nonReentrant whenNotPaused {
-        if (nullifiers.isSpent(inputs.nullifier)) revert NullifierSpent();
-        if (!tree.isKnownRoot(inputs.merkle_root)) revert UnknownRoot();
+        _requireUnspentKnownRoot(inputs.nullifier, inputs.merkle_root);
 
         BetRecord storage rec = betRecords[inputs.nullifier_of_bet];
         if (rec.market_id == bytes32(0)) revert BetNotFound();
@@ -862,11 +897,9 @@ contract Vault is
         if (spent_amount == 0 || spent_amount >= rec.bet_amount) revert InvalidSpentAmount();
         uint64 refund_amount = rec.bet_amount - spent_amount;
 
-        bytes32[] memory pubInputs = _partialCreditPublicInputs(inputs, refund_amount);
-        if (!IVerifier(verifiers[PARTIAL_CREDIT]).verify(proof, pubInputs)) revert InvalidProof();
+        if (!VaultInputs.verifyPartialCredit(verifiers[PARTIAL_CREDIT], proof, inputs, refund_amount)) revert InvalidProof();
 
-        nullifiers.markSpent(inputs.nullifier);
-        tree.insert(inputs.new_commitment);
+        _spendAndInsert(inputs.nullifier, inputs.new_commitment);
 
         // Normalize to a clean FILLED record reflecting only the shares actually bought.
         rec.expected_shares = filled_shares;
@@ -908,7 +941,7 @@ contract Vault is
             if (inputs.nullifier[j] != bytes32(0) && nullifiers.isSpent(inputs.nullifier[j]))
                 revert NullifierSpent();
         }
-        if (!IVerifier(verifiers[CONSOLIDATE]).verify(proof, _consolidatePublicInputs(inputs)))
+        if (!VaultInputs.verifyConsolidate(verifiers[CONSOLIDATE], proof, inputs))
             revert InvalidProof();
 
         // EFFECTS: spend every non-zero nullifier (no de-dup — see notice). A duplicate
@@ -922,135 +955,4 @@ contract Vault is
         // INTERACTIONS: none — no token movement, no betRecords touched.
     }
 
-    // -------------------------------------------------------------------------
-    // Public input assembly helpers
-    // Each function packs the circuit's `pub` parameters in declaration order.
-    // -------------------------------------------------------------------------
-
-    /// @dev Deposit binding proof public inputs (FC-2): [commitment, amount, owner_address].
-    /// owner_address is msg.sender cast to a BN254 field element, matching the note's
-    /// owner_address = uint256(uint160(address)).
-    function _depositPublicInputs(bytes32 commitment, uint256 amount, address owner)
-        internal
-        pure
-        returns (bytes32[] memory)
-    {
-        bytes32[] memory p = new bytes32[](3);
-        p[0] = commitment;
-        p[1] = bytes32(amount);
-        p[2] = bytes32(uint256(uint160(owner)));
-        return p;
-    }
-
-    function _betAuthPublicInputs(BetAuthPublicInputs calldata i) internal pure returns (bytes32[] memory) {
-        bytes32[] memory p = new bytes32[](9);
-        p[0] = i.merkle_root;
-        p[1] = i.nullifier;
-        p[2] = i.new_commitment;
-        p[3] = bytes32(uint256(i.bet_amount));
-        p[4] = bytes32(uint256(i.price));
-        p[5] = bytes32(uint256(i.expected_shares));
-        p[6] = i.market_id;
-        p[7] = bytes32(uint256(i.outcome_side));
-        p[8] = i.position_id;
-        return p;
-    }
-
-    function _settlementPublicInputs(SettlementPublicInputs calldata i)
-        internal
-        pure
-        returns (bytes32[] memory)
-    {
-        bytes32[] memory p = new bytes32[](6);
-        p[0] = i.merkle_root;
-        p[1] = i.nullifier;
-        p[2] = i.new_commitment;
-        p[3] = i.nullifier_of_bet;
-        p[4] = i.market_id;
-        p[5] = bytes32(uint256(i.total_credit));
-        return p;
-    }
-
-    function _withdrawalPublicInputs(WithdrawalPublicInputs calldata i) internal pure returns (bytes32[] memory) {
-        bytes32[] memory p = new bytes32[](5);
-        p[0] = i.merkle_root;
-        p[1] = i.nullifier;
-        p[2] = bytes32(uint256(i.withdrawal_amount));
-        p[3] = i.recipient_hash;
-        p[4] = i.new_commitment;
-        return p;
-    }
-
-    function _betCancelPublicInputs(BetCancelPublicInputs calldata i, uint64 bet_amount)
-        internal
-        pure
-        returns (bytes32[] memory)
-    {
-        bytes32[] memory p = new bytes32[](5);
-        p[0] = i.merkle_root;
-        p[1] = i.nullifier;
-        p[2] = i.new_commitment;
-        p[3] = i.nullifier_of_bet;
-        p[4] = bytes32(uint256(bet_amount)); // Vault-injected; uint64 → uint256 → bytes32
-        return p;
-    }
-
-    function _naCancelPublicInputs(NACancelPublicInputs calldata i, uint64 bet_amount)
-        internal
-        pure
-        returns (bytes32[] memory)
-    {
-        bytes32[] memory p = new bytes32[](6);
-        p[0] = i.merkle_root;
-        p[1] = i.nullifier;
-        p[2] = i.new_commitment;
-        p[3] = i.nullifier_of_bet;
-        p[4] = i.market_id;
-        p[5] = bytes32(uint256(bet_amount)); // Vault-injected; uint64 → uint256 → bytes32
-        return p;
-    }
-
-    function _closePublicInputs(ClosePublicInputs calldata i, uint64 sell_proceeds)
-        internal
-        pure
-        returns (bytes32[] memory)
-    {
-        bytes32[] memory p = new bytes32[](5);
-        p[0] = i.merkle_root;
-        p[1] = i.nullifier;
-        p[2] = i.new_commitment;
-        p[3] = i.nullifier_of_bet;
-        p[4] = bytes32(uint256(sell_proceeds)); // Vault-injected; uint64 → uint256 → bytes32
-        return p;
-    }
-
-    function _partialCreditPublicInputs(PartialFillPublicInputs calldata i, uint64 refund_amount)
-        internal
-        pure
-        returns (bytes32[] memory)
-    {
-        bytes32[] memory p = new bytes32[](5);
-        p[0] = i.merkle_root;
-        p[1] = i.nullifier;
-        p[2] = i.new_commitment;
-        p[3] = i.nullifier_of_bet;
-        p[4] = bytes32(uint256(refund_amount)); // Vault-injected; uint64 → uint256 → bytes32
-        return p;
-    }
-
-    /// @dev Consolidate public inputs (FC-8): [merkle_root, nullifier[0..3], new_commitment] = 6.
-    function _consolidatePublicInputs(ConsolidatePublicInputs calldata i)
-        internal
-        pure
-        returns (bytes32[] memory)
-    {
-        bytes32[] memory p = new bytes32[](6);
-        p[0] = i.merkle_root;
-        p[1] = i.nullifier[0];
-        p[2] = i.nullifier[1];
-        p[3] = i.nullifier[2];
-        p[4] = i.nullifier[3];
-        p[5] = i.new_commitment;
-        return p;
-    }
 }

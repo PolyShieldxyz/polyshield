@@ -25,7 +25,7 @@ import {
   waitForTransactionConfirmation,
   type RelayWithdrawalInputs,
 } from '@/lib/api'
-import { USDC_ABI } from '@/lib/vaultAbi'
+import { USDC_ABI, VAULT_ABI } from '@/lib/vaultAbi'
 
 const VAULT_ADDRESS = (process.env.NEXT_PUBLIC_VAULT_ADDRESS ?? '0x0000000000000000000000000000000000000000') as `0x${string}`
 const USDC_ADDRESS  = (process.env.NEXT_PUBLIC_USDC_ADDRESS  ?? '0x0000000000000000000000000000000000000000') as `0x${string}`
@@ -81,10 +81,30 @@ export default function WithdrawPage() {
     requestedAmount > 0n &&
     vaultUsdcBalance < requestedAmount
 
+  // FEE (P4): a flat USDC fee is skimmed from the payout and a minimum withdrawal is enforced
+  // on-chain. Read both from the Vault so the UI matches the contract (the note still burns the
+  // full requested amount; the recipient receives requested - withdrawalFeeUSDC).
+  const { data: feeConfigData } = useReadContract({
+    address: VAULT_ADDRESS,
+    abi: VAULT_ABI,
+    functionName: 'feeConfig',
+    query: { enabled: VAULT_ADDRESS !== '0x0000000000000000000000000000000000000000' },
+  })
+  const withdrawalFeeUSDC = feeConfigData ? BigInt(feeConfigData[3]) : 0n
+  const minWithdrawal = feeConfigData ? BigInt(feeConfigData[4]) : 0n
+  const netReceive =
+    requestedAmount !== null && requestedAmount > withdrawalFeeUSDC
+      ? requestedAmount - withdrawalFeeUSDC
+      : 0n
+
+  const belowMin =
+    requestedAmount !== null && requestedAmount > 0n && requestedAmount < minWithdrawal
+
   const invalidAmount =
     requestedAmount === null ||
     requestedAmount <= 0n ||
-    requestedAmount > cashBalance
+    requestedAmount > cashBalance ||
+    belowMin
 
   useEffect(() => {
     log('page_view', { route: '/app/withdraw' })
@@ -283,7 +303,9 @@ export default function WithdrawPage() {
             </div>
             {amountInput.length > 0 && invalidAmount && (
               <div className="small mt-1" style={{ color: 'var(--red)', fontSize: 11 }}>
-                Enter an amount greater than 0 and less than or equal to your cash balance.
+                {belowMin
+                  ? `Minimum withdrawal is $${formatUsdc(minWithdrawal)}.`
+                  : 'Enter an amount greater than 0 and less than or equal to your cash balance.'}
               </div>
             )}
             {!invalidAmount && fundsDeployed && (
@@ -297,6 +319,15 @@ export default function WithdrawPage() {
             <div className="row" style={{ justifyContent: 'space-between' }}>
               <span className="small">Destination</span>
               <span className="mono" style={{ fontSize: 12 }}>{address ? `${address.slice(0, 8)}...${address.slice(-6)}` : '—'}</span>
+            </div>
+            {/* FEE: the flat withdrawal fee is skimmed from the payout; the recipient nets the rest. */}
+            <div className="row mt-2" style={{ justifyContent: 'space-between' }}>
+              <span className="small">Withdrawal fee</span>
+              <span className="mono" style={{ fontSize: 12 }}>${formatUsdc(withdrawalFeeUSDC)}</span>
+            </div>
+            <div className="row mt-2" style={{ justifyContent: 'space-between' }}>
+              <span className="small">You receive</span>
+              <span className="mono" style={{ fontSize: 12, color: 'var(--green)' }}>${formatUsdc(netReceive)}</span>
             </div>
           </div>
 

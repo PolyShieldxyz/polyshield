@@ -238,12 +238,38 @@ export function startAutoSettlementServer(
       res.status(400).json({ error: "invalid nullifier" });
       return;
     }
-    const attestation = getAttestation(nullifier);
+    // Optional ?reportType=N selects a specific attestation slot. The position-close
+    // flow passes reportType=4 (SOLD) so it gets the close attestation even when a
+    // FILLED bet-outcome attestation also exists for the same bet. Without it, the
+    // bet-outcome attestation (FILLED/FAILED/PARTIAL) is returned (settlement / partial
+    // / portfolio-status callers).
+    const rtRaw = req.query.reportType;
+    let reportType: number | undefined;
+    if (typeof rtRaw === "string" && rtRaw !== "") {
+      const n = Number(rtRaw);
+      if (!Number.isInteger(n) || n < 1 || n > 4) {
+        res.status(400).json({ error: "reportType must be an integer 1..4" });
+        return;
+      }
+      reportType = n;
+    }
+    const attestation = getAttestation(nullifier, reportType);
     if (!attestation) {
       res.status(404).json({ error: "no attestation yet" });
       return;
     }
     res.json(attestation);
+  });
+
+  // Health/root route. Without this, anything that opens http://<host>:<port>/ (a probe,
+  // a curl, or the editor's automatic port-forward "open in browser") gets Express's bare
+  // "Cannot GET /" 404, which looks like an error. Return a small JSON descriptor instead.
+  app.get("/", (_req, res) => {
+    res.json({
+      service: "polyshield-signing-layer",
+      ok: true,
+      routes: ["GET /operator-pubkey", "GET /attestation/:nullifier", "POST /claim-permission", "POST /close-request", "POST /limit-order"],
+    });
   });
 
   // API-001/API-005: bind to loopback by default; override only via BIND_HOST.

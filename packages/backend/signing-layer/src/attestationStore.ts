@@ -9,10 +9,16 @@
  * credit proof; the Vault recovers the signer on-chain and requires it to equal
  * `signingLayerOperator`.
  *
- * HARD INVARIANT — exactly one terminal attestation per bet. Once a row exists for
- * a `nullifierOfBet` we never re-sign and never overwrite it: the chain cannot
- * adjudicate two contradictory operator signatures, so the store is single-write
- * (INSERT ... ON CONFLICT DO NOTHING + read-back).
+ * INVARIANT — exactly one BET-OUTCOME attestation per bet. The bet outcome
+ * (FILLED / FAILED / PARTIAL) is mutually exclusive: the chain cannot adjudicate two
+ * contradictory operator signatures, so once any of those exists for a `nullifierOfBet`
+ * we never re-sign or overwrite it (single-write within the outcome group).
+ *
+ * SOLD (position close) is NOT a bet outcome — it is a SEPARATE, later lifecycle event
+ * that legitimately follows a FILLED bet (you sold the position you held). It therefore
+ * gets its OWN slot, keyed by (nullifierOfBet, reportType), and coexists with the bet
+ * outcome. (Before this, the single-write-by-nullifier store silently dropped the SOLD
+ * attestation when a FILLED one already existed, so position close could never complete.)
  *
  * Stored in the same SQLite DB as auto-settlement / limit orders
  * (process.cwd()/settlement.db by default), mirroring limitOrderStore.ts.
@@ -71,17 +77,27 @@ let _db: Database.Database | null = null;
 function db(): Database.Database {
   if (_db) return _db;
   _db = new Database(DB_PATH);
+  // Composite PK (nullifier_of_bet, report_type): the bet-outcome group {FILLED,FAILED,
+  // PARTIAL} is kept mutually exclusive in application code (see signAndStoreAttestation),
+  // while SOLD gets its own row so a position close can be attested after a FILLED bet.
   _db.exec(`
     CREATE TABLE IF NOT EXISTS attestations (
-      nullifier_of_bet TEXT PRIMARY KEY,
+      nullifier_of_bet TEXT NOT NULL,
       report_type INTEGER NOT NULL,
       amount_a TEXT NOT NULL,
       amount_b TEXT NOT NULL,
       signature TEXT NOT NULL,
-      created_at INTEGER NOT NULL
+      created_at INTEGER NOT NULL,
+      PRIMARY KEY (nullifier_of_bet, report_type)
     )
   `);
   return _db;
+}
+
+/** The mutually-exclusive bet-OUTCOME report types (a bet ends as exactly one of these). */
+const BET_OUTCOME_TYPES = [ReportType.FILLED, ReportType.FAILED, ReportType.PARTIAL];
+function isBetOutcome(reportType: number): boolean {
+  return BET_OUTCOME_TYPES.includes(reportType as ReportType);
 }
 
 interface AttestationRow {
@@ -102,13 +118,27 @@ function rowToAttestation(row: AttestationRow): Attestation {
   };
 }
 
-function readRow(nullifierOfBet: string): AttestationRow | undefined {
+/** Read the bet-OUTCOME row (FILLED/FAILED/PARTIAL) for a bet, if any. */
+function readOutcomeRow(nullifierOfBet: string): AttestationRow | undefined {
   return db()
     .prepare(
       `SELECT nullifier_of_bet, report_type, amount_a, amount_b, signature
-         FROM attestations WHERE nullifier_of_bet = ?`,
+         FROM attestations
+        WHERE nullifier_of_bet = ? AND report_type IN (?, ?, ?)`,
     )
-    .get(nullifierOfBet) as AttestationRow | undefined;
+    .get(nullifierOfBet, ReportType.FILLED, ReportType.FAILED, ReportType.PARTIAL) as
+    | AttestationRow
+    | undefined;
+}
+
+/** Read the row for a specific (nullifier, reportType) slot, if any. */
+function readTypedRow(nullifierOfBet: string, reportType: number): AttestationRow | undefined {
+  return db()
+    .prepare(
+      `SELECT nullifier_of_bet, report_type, amount_a, amount_b, signature
+         FROM attestations WHERE nullifier_of_bet = ? AND report_type = ?`,
+    )
+    .get(nullifierOfBet, reportType) as AttestationRow | undefined;
 }
 
 /**
@@ -123,8 +153,13 @@ export async function signAndStoreAttestation(
   domainParams: AttestationDomainParams,
   input: AttestationInput,
 ): Promise<Attestation> {
-  // Fast path: already attested → return the existing row, never re-sign.
-  const existing = readRow(input.nullifierOfBet);
+  // Single-write within the relevant slot:
+  //  - a bet OUTCOME (FILLED/FAILED/PARTIAL) is blocked if ANY outcome already exists
+  //    (they are mutually exclusive — the first terminal bet result wins);
+  //  - SOLD has its own slot and is blocked only by a prior SOLD.
+  const existing = isBetOutcome(input.reportType)
+    ? readOutcomeRow(input.nullifierOfBet)
+    : readTypedRow(input.nullifierOfBet, input.reportType);
   if (existing) return rowToAttestation(existing);
 
   const domain = {
@@ -145,13 +180,13 @@ export async function signAndStoreAttestation(
 
   // Single-write: ON CONFLICT DO NOTHING guards against a concurrent signer that
   // raced us between the read above and this insert. We then read back the
-  // authoritative row (which may be the other writer's, not ours).
+  // authoritative row for this exact (nullifier, reportType) slot.
   db()
     .prepare(
       `INSERT INTO attestations
          (nullifier_of_bet, report_type, amount_a, amount_b, signature, created_at)
        VALUES (?, ?, ?, ?, ?, ?)
-       ON CONFLICT(nullifier_of_bet) DO NOTHING`,
+       ON CONFLICT(nullifier_of_bet, report_type) DO NOTHING`,
     )
     .run(
       input.nullifierOfBet,
@@ -162,7 +197,7 @@ export async function signAndStoreAttestation(
       Math.floor(Date.now() / 1000),
     );
 
-  const stored = readRow(input.nullifierOfBet);
+  const stored = readTypedRow(input.nullifierOfBet, input.reportType);
   // stored is always defined here (we either inserted our row or the racing one won).
   return stored ? rowToAttestation(stored) : {
     nullifierOfBet: input.nullifierOfBet,
@@ -173,8 +208,18 @@ export async function signAndStoreAttestation(
   };
 }
 
-export function getAttestation(nullifierOfBet: string): Attestation | null {
-  const row = readRow(nullifierOfBet);
+/**
+ * Fetch an attestation for a bet.
+ *  - With `reportType` → that exact slot (e.g. SOLD=4 for a position close).
+ *  - Without → the bet-OUTCOME attestation (FILLED/FAILED/PARTIAL). This is what the
+ *    signing-layer dedupe and the default frontend fetch want ("has this bet's order
+ *    reached a terminal result yet?"), and it never returns a SOLD row by accident.
+ */
+export function getAttestation(nullifierOfBet: string, reportType?: number): Attestation | null {
+  const row =
+    reportType !== undefined
+      ? readTypedRow(nullifierOfBet, reportType)
+      : readOutcomeRow(nullifierOfBet);
   return row ? rowToAttestation(row) : null;
 }
 

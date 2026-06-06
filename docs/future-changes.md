@@ -417,3 +417,30 @@ Under gasless reporting an unclaimed-but-filled bet stays `ACTIVE` on-chain, so 
 ### Tests
 
 `Vault.t.sol` attestation suite: forged-sig revert, wrong-type revert, cross-bet revert, partial-then-settle two-stage, double-credit blocked, `initializeV2` once-only; the existing credit/cancel/close/partial/settlement tests reworked onto the attestation flow. `Upgrade.t.sol` validates the V2 upgrade preserves storage.
+
+---
+
+## FC-10: Protocol fees (bet fee, withdrawal fee, relay-gas reimbursement)
+
+**Status:** IMPLEMENTED (2026-06-06) — Circom/groth16 (bet_auth 9→10 public inputs) + Solidity (Vault) + frontend. Testing-round rates.
+**Driver:** revenue + relay-gas cost recovery, without breaking the privacy invariant.
+
+### Decision (George, 2026-06-06)
+- **Bet fee:** 0.05% of every bet (`betFeeBps = 5`), to the `feeRecipient` (owner/governance). Minimum bet `$1` (Polymarket order floor).
+- **Withdrawal fee:** flat `$0.10` per withdrawal (testing value; was framed as `$10`), to the `feeRecipient`. Minimum withdrawal `$1` (testing).
+- **Relay gas:** charged in **USDC from the note** (folded into the bet fee as `relayGasFeeUSDC`), NOT as a native-POL transfer from the user's wallet. The native-POL-to-relayer option was rejected because it re-links wallet↔bet on-chain and adds a second user-wallet tx (only `deposit()` should ever come from the user's wallet — T19). `relayGasFeeUSDC` defaults to 0; governance sets the live rate.
+
+### Why the bet fee is in the circuit but the withdrawal fee is not
+The hidden note balance is only enforceable inside the circuit (the Vault never sees it), so any fee taken *from that balance* must be a term in the circuit's balance equation. The withdrawal payout is USDC the Vault sends directly, so its fee is contract-only (`transfer(recipient, amount - withdrawalFeeUSDC)`).
+
+### Anti-forgery
+`fee` is a **Vault-injected public input** to `bet_auth` (not user-supplied). The Vault computes `fee = bet_amount*betFeeBps/10000 + relayGasFeeUSDC` from `feeConfig` and passes it to the verifier; a proof built with any other fee yields a `new_commitment` that fails verification. Identical pattern to the injected `bet_amount` for cancellations. Applies to all order types (FOK/FAK/GTC/GTD) — they all funnel through `authorizeBet`.
+
+### Implementation
+- **Circuit** `groth16/bet_auth.circom`: +1 public input `fee` (range-checked), `new_balance = current_balance - bet_amount - fee`. Public signals 9→10. Verifier + zkey/wasm regenerated; `Benchmarking/groth16/src/constants.ts` `bet_auth: 9→10`; `RealVerifier.t.sol` asserts 10 inputs.
+- **Vault:** packed `FeeConfig feeConfig` + `uint256 feeAccumulator` state (appended; `__gap` 50→47). `authorizeBet` computes/injects the fee, enforces `minBet`, accrues `feeAccumulator`. `withdraw` enforces `minWithdrawal` and skims `withdrawalFeeUSDC`. New `setFeeParams(FeeConfig)` (onlyOwner) and `withdrawFees(uint256)` (onlyFeeRecipient). Defaults set in `initialize` (upgraded proxies must call `setFeeParams` once).
+- **EIP-170:** the fee logic pushed the Vault ~759 B over the 24576 limit. Resolved by extracting the 8 public-input structs (to file scope) and per-proof `verify<Proof>(verifier, proof, inputs, injected)` dispatch into the external **`library VaultInputs`** (`src/VaultInputs.sol`), DELEGATECALL-linked. Vault is now 24,270 B (~306 B headroom); `VaultInputs` ~3.7 KB deployed separately. Foundry auto-links it.
+- **Frontend:** `BetModal` reads `feeConfig`, computes the same fee, deducts it from the note balance, threads `fee` into the bet_auth witness, enforces `minBet`, and displays the fee + total. `withdraw` page enforces `minWithdrawal` and shows fee + net "you receive". `recoverNotesWithClient` reads `feeConfig` and reconstructs `new_balance = balance - bet_amount - fee`, with a commitment-verified fallback so bets placed before the fee was enabled still recover.
+
+### Tests
+`Vault.t.sol`: bet-fee accrual, relay-gas-bundled fee, min-bet revert/boundary, min-withdrawal revert, `withdrawFees` happy/not-recipient/over-accrued, `setFeeParams` update/not-owner/zero-recipient/min<fee, new-rate-applies; two existing withdrawal tests updated for the net payout. `recovery.acceptance.test.ts`: fee-net post-bet balance reconstruction. End-to-end: `forge script MockDeploy` deploys with the library linked and on-chain `feeConfig` reads back the defaults.

@@ -51,9 +51,15 @@ function formatUsdc(micro: bigint): string {
   return fracStr ? `$${whole.toLocaleString()}.${fracStr}` : `$${whole.toLocaleString()}`
 }
 
-function formatAge(ts: number | null): string {
+// Age relative to a reference "now" in unix seconds. For on-chain events the reference is
+// the CHAIN HEAD's timestamp (not the client wall clock): a local Anvil chain's block clock
+// drifts from real time (instant mining / time warps), so `Date.now()` produced nonsense ages
+// like "negative" or "hours ago" for a tx placed seconds earlier. Comparing block-time to
+// block-time keeps ages correct regardless of that drift.
+function formatAge(ts: number | null, nowSec?: number): string {
   if (ts === null) return '—'
-  const diff = Math.floor((Date.now() / 1000) - ts)
+  const ref = nowSec ?? Math.floor(Date.now() / 1000)
+  const diff = Math.max(0, Math.floor(ref - ts))
   if (diff < 60) return `${diff}s ago`
   if (diff < 3600) return `${Math.floor(diff / 60)}m ago`
   if (diff < 86400) return `${Math.floor(diff / 3600)}h ago`
@@ -107,12 +113,12 @@ async function fetchVaultTxs(
     marketResolved,
   ] = await Promise.all([
     client.getLogs({ address: vaultAddress, event: parseAbiItem('event Deposited(address indexed depositor, bytes32 commitment, uint256 amount)'), fromBlock: 0n }),
-    client.getLogs({ address: vaultAddress, event: parseAbiItem('event BetAuthorized(bytes32 indexed nullifier, bytes32 market_id, bytes32 position_id, uint64 expected_shares, uint256 bet_amount, uint64 price, bytes32 new_commitment)'), fromBlock: 0n }),
+    client.getLogs({ address: vaultAddress, event: parseAbiItem('event BetAuthorized(bytes32 indexed nullifier, bytes32 market_id, bytes32 position_id, uint64 expected_shares, uint256 bet_amount, uint64 price, uint8 outcome_side, bytes32 new_commitment)'), fromBlock: 0n }),
     client.getLogs({ address: vaultAddress, event: parseAbiItem('event SettlementCredited(bytes32 indexed nullifier, bytes32 nullifier_of_bet, bytes32 new_commitment)'), fromBlock: 0n }),
     client.getLogs({ address: vaultAddress, event: parseAbiItem('event BetCancellationCredited(bytes32 indexed nullifier, bytes32 nullifier_of_bet, bytes32 new_commitment)'), fromBlock: 0n }),
     client.getLogs({ address: vaultAddress, event: parseAbiItem('event NACancellationCredited(bytes32 indexed nullifier, bytes32 nullifier_of_bet, bytes32 new_commitment)'), fromBlock: 0n }),
     client.getLogs({ address: vaultAddress, event: parseAbiItem('event Withdrawn(bytes32 indexed nullifier, address recipient, uint256 amount, bytes32 new_commitment)'), fromBlock: 0n }),
-    client.getLogs({ address: vaultAddress, event: parseAbiItem('event MarketResolved(bytes32 indexed market_id, uint64 payout_per_share, uint64 resolvedAt)'), fromBlock: 0n }),
+    client.getLogs({ address: vaultAddress, event: parseAbiItem('event MarketResolved(bytes32 indexed market_id, uint64 resolvedAt)'), fromBlock: 0n }),
   ])
 
   const blockNums = new Set<bigint>()
@@ -208,6 +214,16 @@ async function fetchVaultTxs(
   return rows
 }
 
+// Chain head timestamp (unix seconds) — the reference "now" for event ages.
+async function fetchChainNow(chainId: number): Promise<number | null> {
+  try {
+    const block = await buildClient(chainId).getBlock({ blockTag: 'latest' })
+    return Number(block.timestamp)
+  } catch {
+    return null
+  }
+}
+
 async function fetchUniqueDepositors(
   vaultAddress: `0x${string}`,
   chainId: number,
@@ -245,6 +261,7 @@ export default function ExplorerPage() {
   const [error, setError] = useState<string | null>(null)
   const [filter, setFilter] = useState<TxType | 'ALL'>('ALL')
   const [lastRefreshed, setLastRefreshed] = useState<Date | null>(null)
+  const [chainNow, setChainNow] = useState<number | null>(null)
 
   const refresh = useCallback(async () => {
     if (!VAULT_ADDRESS || VAULT_ADDRESS === '0x') {
@@ -254,12 +271,14 @@ export default function ExplorerPage() {
     }
     try {
       setLoading(true)
-      const [rows, dep] = await Promise.all([
+      const [rows, dep, now] = await Promise.all([
         fetchVaultTxs(VAULT_ADDRESS, CHAIN_ID),
         fetchUniqueDepositors(VAULT_ADDRESS, CHAIN_ID),
+        fetchChainNow(CHAIN_ID),
       ])
       setTxs(rows)
       setDepositors(dep)
+      setChainNow(now)
       setLastRefreshed(new Date())
       setError(null)
     } catch (e) {
@@ -371,7 +390,7 @@ export default function ExplorerPage() {
                         </span>
                       </td>
                       <td style={{ color: 'var(--text-3)', fontSize: 11 }}>
-                        {formatAge(tx.timestamp)}
+                        {formatAge(tx.timestamp, chainNow ?? undefined)}
                       </td>
                       <td style={{ color: 'var(--text-2)', fontSize: 11 }}>
                         {tx.blockNumber.toString()}

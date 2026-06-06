@@ -11,10 +11,20 @@
 
 import { Router, Request, Response } from "express";
 import { ethers } from "ethers";
-import { state } from "../state";
+import { state, RestingOrder } from "../state";
 import { v4 as uuidv4 } from "uuid";
 
 export const ordersRouter = Router();
+
+/**
+ * Synthetic best bid/ask for a token — mirrors GET /book so a limit order can be judged
+ * "marketable" (crosses the spread → fills now) vs resting. Prices are probabilities (0..1).
+ */
+function bookBest(tokenId: string): { bid: number; ask: number } {
+  const seed = parseInt(tokenId.slice(-4), 16) || 0;
+  const illiquid = seed % 7 === 0;
+  return { bid: illiquid ? 0.49 : 0.5, ask: 0.51 };
+}
 
 const MOCK_CTF_ABI = [
   "function mintShares(address account, uint256 id, uint256 amount) external",
@@ -141,6 +151,30 @@ ordersRouter.post("/", (req: Request, res: Response) => {
   // signing layer polls GET /order/:id for the terminal state. FOK is unchanged.
   const orderTypeUpper = received.orderType.toUpperCase();
   if (orderTypeUpper === "GTC" || orderTypeUpper === "GTD") {
+    // GTD carries a unix-seconds expiry in the order body; GTC has none (expiration 0).
+    const expirationRaw = (body as { expiration?: unknown }).expiration;
+    const expiration =
+      orderTypeUpper === "GTD" && typeof expirationRaw === "number" && expirationRaw > 0
+        ? Math.floor(expirationRaw)
+        : 0;
+
+    // Marketability: a real CLOB fills a limit order immediately if its price crosses the
+    // book, and otherwise rests it. The mock has no live matching engine, so approximate
+    // using the same synthetic book as GET /book. A non-marketable order rests "live" (a GTD
+    // then expires via the sweep → FAILED/reclaim; a GTC rests until /admin/limit-fill). This
+    // is why a GTC/GTD at a "should-have-filled" price previously never filled.
+    const sizeMicro = Math.floor(parseFloat(received.size) * 1e6);
+    // The order's price field is probability*100 (microToDecimal of the 1e8-scaled price),
+    // e.g. "51" = 0.51; tolerate a plain "0.51" too.
+    let prob = parseFloat(received.price);
+    if (isFinite(prob) && prob > 1) prob = prob / 100;
+    const { bid, ask } = bookBest(received.tokenId);
+    const isSell = received.side.toUpperCase() === "SELL";
+    const marketable = isFinite(prob) && prob > 0 && (isSell ? prob <= bid : prob >= ask);
+    const fillNow = marketable && state.fillBehavior === "fill";
+
+    const filledShares = fillNow && prob > 0 ? Math.floor(sizeMicro / prob) : 0;
+    const status: RestingOrder["status"] = fillNow ? "matched" : "live";
     state.restingOrders[orderId] = {
       orderID: orderId,
       tokenId: received.tokenId,
@@ -149,11 +183,22 @@ ordersRouter.post("/", (req: Request, res: Response) => {
       price: received.price,
       size: received.size,
       createdAt: now,
-      status: "live",
-      filledShares: 0,
-      spentAmount: 0,
+      status,
+      filledShares,
+      spentAmount: fillNow ? sizeMicro : 0,
+      expiration,
     };
-    res.json({ success: true, errorMsg: "", orderID: orderId, transactTime: now, status: "live" });
+    // Mint shares for an immediately-marketable BUY so settlement/redemption finds holdings.
+    if (fillNow && !isSell && filledShares > 0) {
+      void mintCTFShares(received.tokenId, filledShares);
+      void debitDepositWalletPusd(sizeMicro);
+    }
+    console.log(
+      `[clob] ${orderTypeUpper} ${received.side} @ p=${prob} (book bid=${bid}/ask=${ask}) → ` +
+      (fillNow ? `MARKETABLE, filled ${filledShares} shares` : "resting (live)")
+    );
+    // The signing layer's wsFillTracker polls GET /order/:id and maps "matched" → FILLED.
+    res.json({ success: true, errorMsg: "", orderID: orderId, transactTime: now, status, filledShares, spentAmount: fillNow ? sizeMicro : 0, expiration });
     return;
   }
 
@@ -274,16 +319,47 @@ ordersRouter.post("/", (req: Request, res: Response) => {
 });
 
 /**
+ * Expire any live GTD resting orders whose expiration has elapsed. A GTD order that
+ * times out unfilled becomes a zero-fill terminal "expired" — the signing layer's fill
+ * tracker maps that to a FAILED attestation so the depositor reclaims the full stake.
+ * Returns the list of orders that JUST transitioned (so a sweep can broadcast them).
+ * Idempotent: already-terminal orders are skipped.
+ */
+export function expireDueGtdOrders(nowSec = Math.floor(Date.now() / 1000)): RestingOrderLike[] {
+  const expired: RestingOrderLike[] = [];
+  for (const order of Object.values(state.restingOrders)) {
+    if (order.status !== "live") continue;
+    if (order.expiration > 0 && nowSec >= order.expiration) {
+      order.status = "expired";
+      order.filledShares = 0;
+      order.spentAmount = 0;
+      expired.push(order);
+      console.log(`[clob] GTD order ${order.orderID.slice(0, 10)}... expired (unfilled) → reclaimable`);
+    }
+  }
+  return expired;
+}
+
+type RestingOrderLike = (typeof state.restingOrders)[string];
+
+/**
  * GET /order/:id  (FC-4)
  * Returns the current lifecycle state of a resting GTC/GTD limit order. The
  * signing layer polls this until the order reaches a terminal status
- * (matched / partial / cancelled) and then maps it to one operator report.
+ * (matched / partial / cancelled / expired) and then maps it to one operator report.
+ * GTD orders are lazily expired on read as a backstop to the periodic sweep.
  */
 ordersRouter.get("/:id", (req: Request, res: Response) => {
   const order = state.restingOrders[req.params.id];
   if (!order) {
     res.status(404).json({ error: "order not found" });
     return;
+  }
+  // Lazy-expire on read so a poll that arrives before the sweep still sees the terminal state.
+  if (order.status === "live" && order.expiration > 0 && Math.floor(Date.now() / 1000) >= order.expiration) {
+    order.status = "expired";
+    order.filledShares = 0;
+    order.spentAmount = 0;
   }
   res.json(order);
 });

@@ -78,6 +78,7 @@ const STORAGE_KEY = 'polyshield:notes'
 const INDEX_KEY_PREFIX = 'polyshield:deposit_index:'
 const ACTIVITY_STORAGE_KEY = 'polyshield:activity'
 const LAST_BLOCK_KEY = 'polyshield:last_block'
+const CHAIN_FP_KEY = 'polyshield:chain_fp'
 
 let cachedNotes: Note[] | null = null
 let cachedActivity: WalletActivityEvent[] | null = null
@@ -372,6 +373,12 @@ const positionClosedEvent = parseAbiItem(
 const consolidatedEvent = parseAbiItem(
   'event Consolidated(bytes32[4] nullifiers, bytes32 new_commitment)',
 )
+// FEE: governance fee config — recovery reads betFeeBps + relayGasFeeUSDC to reproduce the
+// post-bet balance (new_balance = balance - bet_amount - fee). The fee is not in the
+// BetAuthorized event, so it must be read from contract state.
+const feeConfigFn = parseAbiItem(
+  'function feeConfig() view returns (uint16 betFeeBps, uint64 relayGasFeeUSDC, uint64 minBet, uint64 withdrawalFeeUSDC, uint64 minWithdrawal, address feeRecipient)',
+)
 
 // Chronological comparator for on-chain logs: by blockNumber, then by logIndex
 // within a block. Used both for the per-bet BetSold queue and for the merged
@@ -424,6 +431,23 @@ export async function recoverNotesWithClient(
       client.getLogs({ address: vaultAddress, event: positionClosedEvent, fromBlock }),
       client.getLogs({ address: vaultAddress, event: consolidatedEvent, fromBlock }),
     ])
+
+  // FEE: read the current governance fee once so the replay reproduces each post-bet balance
+  // (new_balance = balance - bet_amount - fee). Bets placed before the fee was enabled are
+  // handled per-bet via a commitment check below, so a later rate change does not corrupt them.
+  let betFeeBps = 0n
+  let relayGasFeeUSDC = 0n
+  try {
+    const fc = (await client.readContract({
+      address: vaultAddress,
+      abi: [feeConfigFn],
+      functionName: 'feeConfig',
+    })) as readonly [number, bigint, bigint, bigint, bigint, `0x${string}`]
+    betFeeBps = BigInt(fc[0])
+    relayGasFeeUSDC = BigInt(fc[1])
+  } catch {
+    /* older Vault without feeConfig → treat fee as 0 */
+  }
 
   // FC-5 gap 4: real timestamps. Prefetch the block timestamp for every referenced
   // block once, so recovered notes/activity carry true on-chain times (not Date.now()).
@@ -545,9 +569,20 @@ export async function recoverNotesWithClient(
         if (betNull.toLowerCase() !== state.nullifier.toLowerCase() || state.spent) continue
 
         const betAmount = ev.args.bet_amount!
-        const newBalance = state.balance - betAmount
         const newNonce = state.nonce + 1n
         const newCommitment = ev.args.new_commitment! as `0x${string}`
+        // FEE: post-bet balance = current - bet_amount - fee. Verify against the on-chain
+        // commitment so bets placed before the fee was enabled (fee not applied) still recover:
+        // if the fee-adjusted balance does not reproduce the committed note, drop the fee.
+        const fee = (betAmount * betFeeBps) / 10_000n + relayGasFeeUSDC
+        let newBalance = state.balance - betAmount - fee
+        if (
+          fee > 0n &&
+          computeCommitment(secret, newBalance, newNonce, address).toLowerCase() !==
+            newCommitment.toLowerCase()
+        ) {
+          newBalance = state.balance - betAmount
+        }
 
         state.spent = true
         pushFree(state, ev.tx)
@@ -983,6 +1018,25 @@ export function getLastSeenBlock(): number {
 export function setLastSeenBlock(block: number): void {
   if (typeof window === 'undefined') return
   localStorage.setItem(LAST_BLOCK_KEY, block.toString())
+}
+
+/**
+ * Chain fingerprint = hash of the genesis block (block 0). Anvil seeds the genesis
+ * timestamp from the wall clock on every `dev:mock` restart, so this value is unique
+ * per chain instance. Comparing it on load detects a reset reliably even when the new
+ * chain's block height already exceeds the previous session's last-seen block (the case
+ * the block-number-decrease heuristic alone misses). Survives resetAllLocalState — it is
+ * chain identity, not protocol state, and is overwritten with the new value right after a
+ * reset is handled.
+ */
+export function getChainFingerprint(): string | null {
+  if (typeof window === 'undefined') return null
+  return localStorage.getItem(CHAIN_FP_KEY)
+}
+
+export function setChainFingerprint(fp: string): void {
+  if (typeof window === 'undefined') return
+  localStorage.setItem(CHAIN_FP_KEY, fp)
 }
 
 /**

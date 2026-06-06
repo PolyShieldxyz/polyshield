@@ -127,6 +127,17 @@ function loadPersisted(): TrackedOrder[] {
   }));
 }
 
+// BN254 field modulus — a tracked order's conditionId is the BetAuthorized market_id
+// (already reduced), so a resolution's raw conditionId must be compared mod this.
+const BN254_P = 0x30644e72e131a029b85045b68181585d2833e84879b9709143e1f593f0000001n;
+function sameMarket(a: string, b: string): boolean {
+  try {
+    return BigInt(a) % BN254_P === BigInt(b) % BN254_P;
+  } catch {
+    return false;
+  }
+}
+
 // ── Tracker state ────────────────────────────────────────────────────────────
 const byOrderId = new Map<string, TrackedOrder>();
 const finalized = new Set<string>(); // nullifiers we've already attested for this process
@@ -196,6 +207,26 @@ export function trackOrder(o: TrackedOrder): void {
   subscribe();
   // In case the order already filled between submit and subscribe.
   void reconcileOne(o);
+}
+
+/**
+ * Cancel every still-tracked resting order for a market that just RESOLVED. A resolved
+ * market can no longer fill, so any order still on the book is dead — finalize it as a
+ * zero-fill cancellation (→ FAILED attestation) so the depositor can reclaim the full
+ * stake via betCancellationCredit. Idempotent + single-write: an order that already
+ * filled (FILLED attestation) is unaffected. Called by the settlement resolver on
+ * ConditionResolution. Handles GTC (never expires) and any GTD still resting at resolution.
+ */
+export function cancelOrdersForMarket(conditionId: string): void {
+  for (const o of Array.from(byOrderId.values())) {
+    if (finalized.has(o.nullifier)) continue;
+    if (!sameMarket(o.conditionId, conditionId)) continue;
+    logger.info(
+      { nullifier: o.nullifier, orderID: o.orderID, conditionId },
+      "market resolved — cancelling still-resting order (reclaimable)",
+    );
+    void finalize(o, "cancelled", 0n, 0n);
+  }
 }
 
 // ── Websocket ────────────────────────────────────────────────────────────────

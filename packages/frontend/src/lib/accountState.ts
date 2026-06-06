@@ -1,8 +1,11 @@
 'use client'
 
 import { useEffect, useRef, useState, useCallback } from 'react'
-import { useBlockNumber, useDisconnect } from 'wagmi'
-import { fetchPendingCredit, fetchMarketResolvedAt } from '@/lib/api'
+import { useBlockNumber, useDisconnect, usePublicClient } from 'wagmi'
+import { fetchPendingCredit, fetchMarketResolvedAt, fetchBetStatus, fetchAttestation, BET_STATUS } from '@/lib/api'
+
+// FC-9 attestation reportType: a bet that actually filled has a FILLED (1) attestation.
+const REPORT_FILLED = 1
 import {
   formatUsdc,
   getCashBalance,
@@ -12,6 +15,8 @@ import {
   getWalletActivity,
   getLastSeenBlock,
   setLastSeenBlock,
+  getChainFingerprint,
+  setChainFingerprint,
   resetAllLocalState,
   receiptCircuitKey,
   type Note,
@@ -44,10 +49,32 @@ type SettlementStatus =
   | { kind: 'lost' }
   | { kind: 'pending' }
 
+/**
+ * Did this bet actually fill (i.e. does the depositor hold shares)? A FOK fill stays
+ * ACTIVE on-chain but carries a FILLED operator attestation; a post-partial bet is on-chain
+ * FILLED. A resting/expired/unfilled order has neither — it holds no shares.
+ */
+async function betDidFill(nullifierOfBet: `0x${string}`): Promise<boolean> {
+  try {
+    const status = await fetchBetStatus(VAULT_ADDRESS, nullifierOfBet)
+    if (status === BET_STATUS.FILLED) return true
+    const att = await fetchAttestation(nullifierOfBet) // bet-outcome attestation
+    return !!att && att.reportType === REPORT_FILLED
+  } catch {
+    return false
+  }
+}
+
 async function checkSettlementStatus(receipt: Note): Promise<SettlementStatus> {
   if (!receipt.expectedShares) return { kind: 'pending' }
   const circuitKey = receiptCircuitKey(receipt)
   if (!circuitKey) return { kind: 'pending' }
+  // Gate on ACTUAL fill: an unfilled/resting order holds no shares and must NEVER settle as a
+  // winning position — otherwise a resolved market makes it show a phantom profit (and the
+  // on-chain creditSettlement would revert for lack of a FILLED attestation anyway). An
+  // unfilled order is recovered via the reclaim/refund path, not settlement.
+  const nullifierOfBet = (receipt.nullifier_of_bet ?? receipt.nullifier) as `0x${string}`
+  if (!(await betDidFill(nullifierOfBet))) return { kind: 'pending' }
   const outcomeSide = receipt.side === 'NO' ? 1 : 0
   const payoutPerShare = await fetchPendingCredit(VAULT_ADDRESS, circuitKey, outcomeSide)
   if (payoutPerShare > 0n) {
@@ -186,34 +213,66 @@ export function useChainResetDetector(): boolean {
   const [justReset, setJustReset] = useState(false)
   const { data: blockNumber } = useBlockNumber({ watch: true, query: { refetchInterval: 3000 } })
   const { disconnect } = useDisconnect()
+  const publicClient = usePublicClient()
   const justResetRef = useRef(false)
 
+  const handleReset = useCallback(() => {
+    // Clear all local protocol state AND disconnect the wallet so the user reconnects
+    // clean (prevents stale account/nonce state in the wallet provider).
+    resetAllLocalState()
+    disconnect()
+    if (!justResetRef.current) {
+      justResetRef.current = true
+      setJustReset(true)
+      // Auto-clear the flag after the UI has had time to show a banner
+      window.setTimeout(() => {
+        justResetRef.current = false
+        setJustReset(false)
+      }, 5000)
+    }
+  }, [disconnect])
+
+  // Primary, robust signal: the genesis block hash. Anvil reseeds the genesis timestamp
+  // from the wall clock on every `dev:mock` restart, so a changed hash means a fresh chain
+  // — detected reliably even when the new chain's height already exceeds last-seen (the case
+  // the block-number-decrease check below misses).
+  useEffect(() => {
+    if (!publicClient) return
+    let cancelled = false
+    void (async () => {
+      try {
+        const genesis = await publicClient.getBlock({ blockNumber: 0n })
+        if (cancelled || !genesis.hash) return
+        const stored = getChainFingerprint()
+        if (stored && stored !== genesis.hash) {
+          handleReset()
+        }
+        // Record (or refresh) the fingerprint for the now-current chain.
+        setChainFingerprint(genesis.hash)
+      } catch {
+        /* RPC unavailable — fall back to the block-number heuristic below */
+      }
+    })()
+    return () => {
+      cancelled = true
+    }
+  }, [publicClient, handleReset])
+
+  // Secondary signal: block number going backwards. Cheap and instant on the common case,
+  // and the only signal if the genesis fetch fails.
   useEffect(() => {
     if (blockNumber === undefined) return
     const current = Number(blockNumber)
     const last = getLastSeenBlock()
 
     if (last > 0 && current < last) {
-      // Block number went backwards — chain was reset.
-      // Clear all local protocol state AND disconnect the wallet so the user
-      // reconnects clean (prevents stale account/nonce state in the wallet provider).
-      resetAllLocalState()
-      disconnect()
-      if (!justResetRef.current) {
-        justResetRef.current = true
-        setJustReset(true)
-        // Auto-clear the flag after the UI has had time to show a banner
-        window.setTimeout(() => {
-          justResetRef.current = false
-          setJustReset(false)
-        }, 5000)
-      }
+      handleReset()
     }
 
     if (current > last) {
       setLastSeenBlock(current)
     }
-  }, [blockNumber, disconnect])
+  }, [blockNumber, handleReset])
 
   return justReset
 }

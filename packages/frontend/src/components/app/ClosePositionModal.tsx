@@ -78,7 +78,10 @@ export function ClosePositionModal({
   async function pollUntilSold(nullifierOfBet: `0x${string}`, timeoutMs = 60_000): Promise<SignedAttestation> {
     const start = Date.now()
     while (Date.now() - start < timeoutMs) {
-      const att = await fetchAttestation(nullifierOfBet)
+      // Fetch the SOLD slot specifically (reportType 4). A filled position already has a
+      // FILLED bet-outcome attestation; without this selector the store would return FILLED
+      // and the close would never see SOLD (the cause of the "did not fill in time" timeout).
+      const att = await fetchAttestation(nullifierOfBet, REPORT_SOLD)
       if (att && att.reportType === REPORT_SOLD) return att
       await new Promise((r) => setTimeout(r, 2_000))
     }
