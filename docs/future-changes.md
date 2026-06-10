@@ -444,3 +444,59 @@ The hidden note balance is only enforceable inside the circuit (the Vault never 
 
 ### Tests
 `Vault.t.sol`: bet-fee accrual, relay-gas-bundled fee, min-bet revert/boundary, min-withdrawal revert, `withdrawFees` happy/not-recipient/over-accrued, `setFeeParams` update/not-owner/zero-recipient/min<fee, new-rate-applies; two existing withdrawal tests updated for the net payout. `recovery.acceptance.test.ts`: fee-net post-bet balance reconstruction. End-to-end: `forge script MockDeploy` deploys with the library linked and on-chain `feeConfig` reads back the defaults.
+
+---
+
+## FC-11: Live Polymarket market integration + settlement conditionId path
+
+**Status (2026-06-07):** market *data* + order *placement* IMPLEMENTED (frontend + signing-layer, no contract change). Settlement on live markets is the remaining gap and needs Project Agent sign-off (touches a circuit/contract interface).
+
+### Problem
+The frontend shipped wired to **fixture markets** (`lib/devMarkets.ts` / `lib/marketsData.ts`) whose `conditionId`s are `keccak256(label)` placeholders, not real Polymarket markets. The signing layer's order builder used the on-chain synthetic `position_id` as the CLOB `tokenID`, which a real CLOB rejects. So on live mainnet the app showed mock markets and could not place real orders.
+
+### Done — market data (frontend)
+- `packages/frontend/src/lib/polymarket.ts` (server): fetches the **Gamma API** (`gamma-api.polymarket.com/markets`), filters to binary YES/NO order-book markets, maps real `conditionId` + YES/NO `clobTokenIds` + prices/volume/endDate.
+- `/api/markets` (list, top by 24h volume) and `/api/markets/[condition_id]` (single + live CLOB order book) now return live data; fixtures remain only as a down-fallback. Markets list starts empty (no mock flash). `MarketEntry` gained optional `yesTokenId`/`noTokenId`/`acceptingOrders`/`source`.
+
+### Done — order placement (signing-layer)
+- `packages/backend/signing-layer/src/marketRegistry.ts`: mirrors the Gamma universe into SQLite keyed by **`toFieldSafe(conditionId)` = `BigInt(conditionId) % BN254_P`** (the exact reduction the Vault/circuit use as on-chain `market_id`), storing the real conditionId + YES/NO tokenIds. Syncs at boot + every 10 min; production-only (no-op in mock). `resolveToken(market_id, outcome_side)` → real `{tokenId, conditionId}`.
+- `eventListener.processBetEvent` now takes `outcome_side` and swaps the synthetic `position_id`/`market_id` for the resolved real tokenId/conditionId before submitting (FOK/FAK/GTC/GTD all route through it). Registry miss → falls back to on-chain ids; the order then fails *recoverably* (cancellation credit).
+- `orderBuilder.ts` price/size scale fix (latent bug masked by the mock): real CLOB BUYs now use `price = event.price / 1e8` (on-chain price is 1e8-scaled, see zk-design.md) and `size = event.expected_shares / 1e6` (CLOB BUY size is a share COUNT, not the USDC amount). FOK/FAK/limit only; the SELL/close path uses its own 1e6 limit-price scale (unchanged).
+
+### REMAINING — settlement conditionId (needs Project Agent sign-off)
+On-chain the bet's `condition_id` is set to the **field-safe `market_id`** placeholder (see CLAUDE.md "NOTE ON `BetRecord.condition_id`"). `Vault.resolveMarket` verifies payouts via `ctf.payoutNumerators(conditionId)`; with the reduced value as the key it won't match the real CTF condition, so `creditSettlement` / `naCancellationCredit` cannot verify for live bets. Closing this requires carrying the **real `conditionId`** to `resolveMarket` and `betRecords.condition_id` — most cleanly by adding `condition_id` as a `bet_auth` public input (BetAuthPublicInputs), which is a ZK circuit interface change (sign-off required). Until then: order placement works, settlement does not.
+
+### Live-validation checklist (small real funds, before trusting live betting)
+- Registry warmed (`market registry sync complete { upserted: N }`) before betting — bets in the first-sync window fail recoverably.
+- JIT funding succeeds (deposit wallet funded), POLY API creds valid, deposit-wallet approvals set (H3), builder config correct.
+- FAK partial-fill accounting (`filledShares`/`spentAmount`) against the real CLOB response shape.
+- Order price within tick + size precision accepted by the CLOB.
+
+---
+
+## FC-12: Backend indexing/cache/recovery layer + CTF-ABI fix + RPC resilience (IMPLEMENTED 2026-06-10)
+
+Status: **implemented** (mainnet test phase). Cross-cuts contracts, signing-layer, proof-relay, and frontend. Motivated by getting deposit→bet→claim→settle→withdraw working end-to-end on a real RPC, and by the discovery that clients re-scanning the chain is both slow and impossible on a metered RPC.
+
+### Problem
+1. **`resolveMarket` reverted on mainnet.** The code read CTF payouts via `payoutNumerators(conditionId) → uint256[]` (an array getter that exists only on the test `MockCTF`). The real Gnosis CTF exposes the **element accessor** `payoutNumerators(conditionId, index) → uint256` + `getOutcomeSlotCount`. So settlement never reached the chain.
+2. **Settlement was never triggered.** The resolver relied on a live `ctf.on("ConditionResolution")` subscription, which silently dies on filter-less public RPCs → `resolveMarket` was never called → `pendingCredit`/`marketResolvedAt` stayed 0 → the frontend never showed "ready to settle".
+3. **Per-request chain scans.** Every proof (claim/settle/withdraw) rebuilt the whole Merkle tree from `LeafInserted` history via `eth_getLogs`, and recovery/explorer each re-scanned all events — devastating at scale and impossible under Alchemy free's **10-block `eth_getLogs` cap** / pruned public nodes.
+
+### Solution (all implemented)
+- **CTF ABI fix.** `interfaces/ICTF.sol` → element accessor + `getOutcomeSlotCount`; `Vault.resolveMarket` and `VaultLogic.naCancellationCredit` loop `i ∈ [0, getOutcomeSlotCount)`; `MockCTF` mirrors the real ABI (array setter kept for tests). Needed a UUPS upgrade (`script/UpgradeVault.s.sol`). `resolveMarket` also reordered to run **before** the redemption pipeline so a redeem failure never blocks user settlement.
+- **Settlement resolver** (`signing-layer/settlementResolver.ts`): keep `ctf.on` (dev/filter-RPCs) **filtered to the vault's own `tracked_markets`** (the CTF event is global — unfiltered it stormed the RPC trying to resolve every Polymarket market), PLUS a **poll fallback** over `tracked_markets` using the CTF `payoutDenominator` *state* read (works on pruned/filter-less RPCs). `tracked_markets` (`trackedMarkets.ts`) is populated per-bet by the event-listener (raw conditionId from the market registry) — no historical `getLogs` needed to know the vault's markets.
+- **Proof-relay backend index/cache** (see `architecture.md` §2.4): `CachedMerkleTree` (→ `/merkle-path`, O(32), per-leaf root check vs `LeafInserted.newRoot`) and `VaultEventIndex` (→ `/recovery-data/:depositor` and `/events`), both windowed + cursor-persisted + chunk-env, SQLite `merkle.db`.
+- **Frontend** consumes the backend: `recoverNotesViaBackend` (shim-client feeding the unchanged replay; secret-matching stays client-side), the Explorer (`/api/events`), and merkle paths — none scan the chain. Reads use a resilient `ethCall` (retries 429, never fabricates state).
+- **RPC resilience:** `RetryingJsonRpcProvider` (single 429-retry layer, all methods) in signing-layer + proof-relay; chunked/cursor-persisted/de-nested scans; event-listener cursor advances to the scanned head + persists in the data volume (was re-scanning a huge range every 15s). `LOG_SCAN_CHUNK` env (=10 for Alchemy free).
+
+### Operational requirement (see architecture.md §2.5)
+Production needs a **full/archive RPC with a usable `eth_getLogs` range** — Alchemy free (10-block cap) and pruned public nodes are not viable. Free-tier testing works with `LOG_SCAN_CHUNK=10` (one-time scans grind but complete; they resume via the persisted cursor).
+
+### Privacy
+The backend index serves only PUBLIC, anonymous on-chain data. It cannot link spends to a wallet (no secret server-side; only `Deposited` is wallet-keyed) and cannot forge notes (the client's replay only acts on events matching its own derived nullifier). Worst case from a bad backend = *incomplete* recovery.
+
+### Remaining / hardening
+- Client-side trust check: verify the served `currentRoot` against the on-chain tree (not yet wired).
+- Past `MarketResolved` events aren't back-indexed for the Explorer (the event-index cursor finished before that event type was added); resets re-scan. Recovery is unaffected.
+- The local note cache can desync from chain if a settle tx lands but the tab is reloaded mid-flight before localStorage updates (shows a settled bet as "pending"); **Restore** reconciles it.

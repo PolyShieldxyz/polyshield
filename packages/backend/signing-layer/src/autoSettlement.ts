@@ -6,7 +6,8 @@ import path from "path";
 import crypto from "crypto";
 import { z } from "zod";
 import { resolveMarketManually } from "./settlementResolver";
-import { submitFOKSellOrder } from "./orderBuilder";
+import { submitMarketSellOrder, submitLimitSellOrder, getOrCreateClobClient, attestFailedFor } from "./orderBuilder";
+import { getTrackedOrder, cancelTrackedOrder } from "./wsFillTracker";
 import { recordLimitOrder } from "./limitOrderStore";
 import { getAttestation } from "./attestationStore";
 import { config } from "./config";
@@ -53,7 +54,8 @@ function initDb(): void {
       UNIQUE(market_id, nullifier_of_bet)
     )
   `);
-  // FC-1: pre-settlement close (FOK SELL) requests.
+  // FC-1: pre-settlement close (SELL) requests. order_type: FAK = Market close (sell now),
+  // GTC/GTD = resting Limit close.
   db.exec(`
     CREATE TABLE IF NOT EXISTS close_requests (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -61,9 +63,14 @@ function initDb(): void {
       position_id TEXT NOT NULL,
       sold_shares TEXT NOT NULL,
       limit_price TEXT NOT NULL,
-      requested_at INTEGER NOT NULL
+      requested_at INTEGER NOT NULL,
+      order_type TEXT NOT NULL DEFAULT 'FAK',
+      expiration INTEGER NOT NULL DEFAULT 0
     )
   `);
+  // FC-1 migration: add the order-type columns to a pre-existing close_requests table (idempotent).
+  try { db.exec(`ALTER TABLE close_requests ADD COLUMN order_type TEXT NOT NULL DEFAULT 'FAK'`); } catch { /* column exists */ }
+  try { db.exec(`ALTER TABLE close_requests ADD COLUMN expiration INTEGER NOT NULL DEFAULT 0`); } catch { /* column exists */ }
   logger.info({ path: DB_PATH }, "claim_permissions + close_requests tables ready");
 }
 
@@ -90,6 +97,10 @@ export function startAutoSettlementServer(
     // BigInt range checks below remain authoritative for the numeric bounds.
     sold_shares: z.string().regex(/^[0-9]+$/),
     limit_price: z.string().regex(/^[0-9]+$/),
+    // FC-1: FAK = Market close (sell now, default); GTC/GTD = resting Limit close. expiration is the
+    // GTD lifetime in seconds (ignored for FAK/GTC).
+    order_type: z.enum(["FAK", "GTC", "GTD"]).optional(),
+    expiration: z.number().int().nonnegative().optional(),
   });
   const limitOrderSchema = z.object({
     nullifier_of_bet: HEX32,
@@ -98,6 +109,8 @@ export function startAutoSettlementServer(
     order_type: z.enum(["GTC", "GTD", "FAK"]),
     expiration: z.number().int().nonnegative().optional(),
   });
+
+  const cancelBetSchema = z.object({ nullifier_of_bet: HEX32 });
 
   /**
    * POST /claim-permission
@@ -146,7 +159,7 @@ export function startAutoSettlementServer(
       res.status(400).json({ error: "invalid inputs" });
       return;
     }
-    const { nullifier_of_bet, position_id, sold_shares, limit_price } = parsed.data;
+    const { nullifier_of_bet, position_id, sold_shares, limit_price, order_type, expiration } = parsed.data;
 
     let soldSharesBig: bigint;
     let limitPriceBig: bigint;
@@ -162,21 +175,26 @@ export function startAutoSettlementServer(
       return;
     }
 
+    const orderType = order_type ?? "FAK"; // default Market close
+    const exp = typeof expiration === "number" && expiration > 0 ? Math.floor(expiration) : 0;
+
     db.prepare(`
-      INSERT INTO close_requests (nullifier_of_bet, position_id, sold_shares, limit_price, requested_at)
-      VALUES (?, ?, ?, ?, ?)
-    `).run(nullifier_of_bet, position_id, sold_shares, limit_price, Math.floor(Date.now() / 1000));
+      INSERT INTO close_requests (nullifier_of_bet, position_id, sold_shares, limit_price, requested_at, order_type, expiration)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
+    `).run(nullifier_of_bet, position_id, sold_shares, limit_price, Math.floor(Date.now() / 1000), orderType, exp);
 
-    logger.info({ nullifier_of_bet, position_id, sold_shares, limit_price }, "Close request recorded — submitting FOK SELL");
+    logger.info({ nullifier_of_bet, position_id, sold_shares, limit_price, order_type: orderType, expiration: exp }, "Close request recorded — submitting SELL");
 
-    // Fire-and-forget: the SELL + reportSold runs async; the frontend polls bet status
-    // (CLOSING) before generating the close proof.
-    submitFOKSellOrder(
-      { nullifier_of_bet, position_id, sold_shares: soldSharesBig, limit_price: limitPriceBig },
-      wallet,
-      provider
-    ).catch((err) => {
-      logger.error({ err, nullifier_of_bet }, "submitFOKSellOrder failed");
+    // Fire-and-forget: the SELL + SOLD attestation runs async; the frontend polls the SOLD
+    // attestation before generating the close proof. Market close (FAK) fills now; Limit close
+    // (GTC/GTD) rests and is driven to terminal by the websocket fill tracker.
+    const closeReq = { nullifier_of_bet, position_id, sold_shares: soldSharesBig, limit_price: limitPriceBig };
+    const submit =
+      orderType === "GTC" || orderType === "GTD"
+        ? submitLimitSellOrder(closeReq, { orderType, expiration: exp }, wallet, provider)
+        : submitMarketSellOrder(closeReq, wallet, provider);
+    submit.catch((err) => {
+      logger.error({ err, nullifier_of_bet }, "close SELL submission failed");
     });
 
     res.json({ ok: true });
@@ -193,6 +211,47 @@ export function startAutoSettlementServer(
    * default FOK. `expiration` is the GTD effective lifetime in seconds (ignored for
    * GTC and FAK).
    */
+  /**
+   * POST /cancel-bet
+   * Body: { nullifier_of_bet }
+   *
+   * User-initiated cancel/recover for a bet that is stuck pending — e.g. its order never reached
+   * Polymarket (rejected/400), or a resting GTC/GTD the user wants to abandon. Safe by design:
+   *   - already has a terminal attestation → no-op (idempotent).
+   *   - no live CLOB order (never placed) → attest FAILED so the stake is reclaimable.
+   *   - resting order → cancel it on the CLOB and let the fill tracker finalize with the TRUE
+   *     fill (FAILED if zero, PARTIAL if partly filled). Never blind-FAILED → no double-spend.
+   */
+  app.post("/cancel-bet", operatorAuth, async (req, res) => {
+    const parsed = cancelBetSchema.safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({ error: "invalid inputs" });
+      return;
+    }
+    const { nullifier_of_bet } = parsed.data;
+    if (getAttestation(nullifier_of_bet)) {
+      res.json({ ok: true, outcome: "already-finalized" });
+      return;
+    }
+    const order = getTrackedOrder(nullifier_of_bet);
+    if (!order) {
+      // No resting CLOB order can fill → safe to attest FAILED (reclaimable).
+      await attestFailedFor(wallet, nullifier_of_bet);
+      logger.info({ nullifier_of_bet }, "cancel-bet: no live order — attested FAILED (reclaimable)");
+      res.json({ ok: true, outcome: "failed" });
+      return;
+    }
+    let client: unknown = null;
+    try {
+      client = await getOrCreateClobClient(wallet);
+    } catch (err) {
+      logger.warn({ err: String(err) }, "cancel-bet: clob client unavailable");
+    }
+    const outcome = await cancelTrackedOrder(nullifier_of_bet, client);
+    logger.info({ nullifier_of_bet, outcome }, "cancel-bet: resting order cancel processed");
+    res.json({ ok: true, outcome });
+  });
+
   app.post("/limit-order", operatorAuth, (req, res) => {
     const parsed = limitOrderSchema.safeParse(req.body);
     if (!parsed.success) {

@@ -5,84 +5,106 @@ const SECTIONS: Record<string, { title: string; content: string }[]> = {
   'Getting started': [
     {
       title: 'Overview',
-      content: `Polyshield is a ZK-based privacy vault for Polymarket. Depositors fund a shared vault, then authorize bets via ZK proofs. All bets appear on-chain as coming from the vault's single Polymarket EOA. No depositor address ever appears in a Polymarket transaction.
+      content: `Polyshield is a ZK-based privacy vault for Polymarket, live on Polygon mainnet. Depositors fund a shared vault, then authorize bets via zero-knowledge proofs. All bets appear on-chain as coming from the vault's single Polymarket EOA, so no depositor address ever appears in a Polymarket transaction.
 
 **What Polyshield hides:** which depositor authorized which bet.
-**What Polyshield does NOT hide:** that a wallet deposited into the vault (the deposit transaction is public).`,
+**What Polyshield does NOT hide:** that a wallet deposited into the vault — the deposit transaction is public by design.
+
+Every privacy-sensitive operation (note generation, proof generation) happens in your browser. No secret ever leaves your device, and no backend service can link a bet to a depositor.`,
     },
     {
       title: 'Quickstart',
-      content: `1. Connect your EVM wallet (Polygon Amoy testnet)
-2. Deposit USDC into the vault — the Vault contract records a Poseidon commitment
-3. Your browser generates a spending note \`(secret, balance, nonce, owner_address)\` locally
-Your note secret is derived from your wallet signature — no backup is needed. If you switch devices, click "Recover notes" to restore from on-chain history.
-4. Browse markets and authorize bets via ZK proof
-5. Collect winnings via settlement credit proofs
-6. Withdraw to your own address via the withdrawal relay`,
+      content: `1. Connect your EVM wallet (Polygon mainnet)
+2. Deposit USDC into the vault — your browser generates a spending note locally and submits a mandatory deposit-binding ZK proof that ties the committed balance to the amount you actually transferred
+3. The note \`(secret, balance, nonce, owner_address)\` lives only in your browser; the secret is derived from a wallet signature, so there is nothing to back up
+4. Browse live Polymarket markets and authorize a bet via a BET_AUTH proof — the proof relay submits it, never your wallet
+5. When a market resolves, claim your winnings with a one-click settlement-credit proof — the payout becomes a fresh private note
+6. Withdraw to your own address via a withdrawal proof (wallet-to-wallet only)
+
+On a new device, click "Recover notes" — the app rebuilds your note set from the backend index + your wallet signature, with no chain scan.`,
     },
   ],
   'Architecture': [
     {
-      title: 'Vault contract',
-      content: `The Vault.sol contract (Polygon) is the trust anchor. It:
-- Maintains an append-only Poseidon Merkle tree (depth 32) of note commitments
-- Stores a NullifierRegistry mapping to prevent double-spend
-- Verifies 5 types of ZK proofs: BET_AUTH, SETTLE_CRED, WITHDRAW, BET_CANCEL, CANCEL_CRED
-- Enforces a $50,000 per-address cumulative deposit cap in MVP
+      title: 'System overview',
+      content: `Four layers, each with a distinct trust role:
 
-The Vault accepts the last 30 Merkle roots (not just the current one) to allow for proof generation latency.`,
+**On-chain (Polygon):** the Vault (UUPS proxy) plus its CommitmentMerkleTree, NullifierRegistry, and 9 Groth16 verifier adapters. The source of truth; trustless except the owner's upgrade key.
+
+**Frontend (your browser):** holds the wallet-derived secret, generates all proofs (snarkjs WASM). The only party that can link a wallet to a note.
+
+**Proof relay:** submits your proofs to the Vault and pays gas, so your wallet is never \`tx.from\` on a bet. It is ALSO the backend index/cache (serves merkle paths, recovery data, and explorer events). Stateless w.r.t. trust — it cannot forge proofs or de-anonymize.
+
+**Signing layer:** holds the vault EOA key, listens for BetAuthorized events, places CLOB orders, resolves settled markets, and funds collateral just-in-time. Centralized in v1, AWS Nitro TEE in v2.`,
+    },
+    {
+      title: 'Vault contract',
+      content: `The Vault.sol contract (Polygon mainnet, UUPS upgradeable behind an ERC-1967 proxy) is the trust anchor. It:
+- Maintains an append-only Poseidon Merkle tree (depth 32) of note commitments
+- Stores a NullifierRegistry mapping to prevent double-spend (checks-effects-interactions)
+- Verifies 9 ZK proof types: DEPOSIT, BET_AUTH, SETTLEMENT_CREDIT, WITHDRAWAL, BET_CANCEL, CANCEL_CREDIT, POSITION_CLOSE, PARTIAL_CREDIT, CONSOLIDATE
+- Derives settlement payouts on-chain from the real Gnosis CTF and injects them into proofs (users never supply payout values)
+- Enforces a $50,000 per-address cumulative deposit cap in MVP
+- Holds a governance-mutable fee config (bet fee, withdrawal fee, relay-gas reimbursement)
+
+The Vault accepts a rolling window of the last 1024 Merkle roots (O(1) membership), so a proof generated a few blocks ago still verifies. To stay under the 24 KB contract-size limit, bulky logic lives in two delegatecall libraries (VaultInputs, VaultLogic).`,
     },
     {
       title: 'Note structure',
       content: `A spending note has four fields:
-\`\`\`
-secret: Field         // Derived from wallet signature — never random
-balance: u64          // USDC balance in micro-units (6 decimals)
-nonce: u64            // Increments on each spend
-owner_address: Field  // Depositing wallet address cast to BN254 field
-\`\`\`
+secret — derived from a wallet signature, never random, never stored
+balance — USDC balance in micro-units (6 decimals)
+nonce — increments on each spend
+owner_address — depositing wallet address cast to a BN254 field
 
 The commitment stored on-chain: \`C = Poseidon4(secret, balance, nonce, owner_address)\`
-The nullifier (public, computed once per spend): \`N = poseidon2(secret, nonce)\`
+The nullifier (public, revealed once per spend): \`N = Poseidon2(secret, nonce)\`
 
-The secret is re-derived from your wallet signature on demand — never stored.`,
+The secret is re-derived from your wallet signature on demand. The nullifier does not include balance or owner, so it cannot be correlated to a deposit amount or address.`,
     },
     {
       title: 'ZK circuits',
-      content: `Five Noir circuits implement the proof system:
+      content: `Nine Circom circuits, compiled to WASM + Groth16 (snarkjs, BN254). Proofs are generated client-side in the browser and verified on-chain by snarkjs-generated verifier adapters. (Noir \`.nr\` files in the repo are a specification reference only — they are not compiled.)
 
-**BET_AUTH** — Proves note has sufficient balance for the bet, computes nullifier, produces new note commitment after spend.
+**DEPOSIT** — Binds the committed balance and owner to the deposited amount and msg.sender. Mandatory: without it a depositor could commit more than they paid.
 
-**SETTLE_CRED** — Proves you held a winning position; produces a new note with the payout added to balance.
+**BET_AUTH** — Proves the note has enough balance, computes the nullifier, and produces the new note after spending \`bet_amount + fee\` (the fee is Vault-injected).
 
-**WITHDRAW** — Proves knowledge of note secrets; commits to recipient address via poseidon2(address, 0).
+**SETTLEMENT_CREDIT** — Proves you held a winning position; the Vault injects payout-per-share and shares-held, so you cannot inflate the credit.
 
-**BET_CANCEL** — Cancels a failed FOK bet and restores the spent note balance.
+**WITHDRAWAL** — Proves knowledge of the note secret and commits to the recipient via \`Poseidon2(address, 0)\`; enforces withdraw-to-self.
 
-**CANCEL_CRED** — Handles N/A market resolutions (all-zero CTF payout numerators).
+**BET_CANCEL / CANCEL_CREDIT** — Refund a failed/cancelled bet, or an N/A market resolution (all CTF payout numerators zero).
 
-Circuits use \`bn254::hash_2\` (nullifier) and \`bn254::hash_4\` (commitment) from Noir's BN254 stdlib. Commitment hashes 4 inputs: secret, balance, nonce, owner_address.`,
+**POSITION_CLOSE** — Credit from selling a position before settlement (proceeds from a signed operator attestation).
+
+**PARTIAL_CREDIT** — Refund the unfilled remainder of a partially-filled limit order.
+
+**CONSOLIDATE** — Merge up to 4 same-owner notes into one.`,
     },
     {
       title: 'Signing layer',
-      content: `The Signing Layer is a Node.js service that:
-1. Listens for \`BetAuthorized\` events from the Vault (after 1 block confirmation)
-2. Reads bet parameters from the event (market_id, position_id, expected_shares, price)
-3. Submits a Fill-Or-Kill order to Polymarket's CLOB API using the vault EOA
-4. On FOK failure: calls \`Vault.reportFOKFailure()\` to enable cancellation credit
+      content: `The Signing Layer is a Node.js service holding the vault EOA key. It:
+1. Listens for \`BetAuthorized\` events (via a windowed, cursor-persisted log scan) and resolves the real Polymarket tokenId/conditionId from a market registry
+2. Funds the Polymarket deposit wallet just-in-time (JIT collateral) right before the order
+3. Submits the order to the live CLOB — FAK for market orders, GTC/GTD for resting limit orders
+4. Tracks fills over a websocket and signs a single EIP-712 operator attestation per bet (FILLED / FAILED / PARTIAL / SOLD), which the user submits with their credit proof — the operator no longer pushes status on-chain
+5. Detects market resolution (a tracked-markets poll + filtered CTF event) and calls \`resolveMarket\`, then best-effort redeems the collateral
 
-**v1:** Centralized operator. **v2 (planned):** AWS Nitro Enclave with remote attestation.`,
+A dead-man circuit breaker halts all signing on a Polymarket ban (403 / account-flagged). **v1:** centralized operator. **v2:** AWS Nitro Enclave with remote attestation.`,
     },
     {
-      title: 'Proof relay',
-      content: `The Proof Relay is a stateless Express service with 5 POST endpoints:
-- \`POST /relay/bet\` → \`Vault.authorizeBet()\`
-- \`POST /relay/settlement\` → \`Vault.creditSettlement()\`
-- \`POST /relay/withdrawal\` → \`Vault.withdraw()\`
-- \`POST /relay/bet-cancel\` → \`Vault.betCancellationCredit()\`
-- \`POST /relay/na-cancel\` → \`Vault.naCancellationCredit()\`
+      title: 'Proof relay & backend index',
+      content: `The Proof Relay is a stateless service with two roles.
 
-The relay's own EOA pays gas. Your wallet only ever signs \`Vault.deposit()\`. Source IP is never logged.`,
+**1. Relay** — accepts a proof + public inputs and submits the matching Vault call from its own EOA, paying gas. Your wallet only ever signs \`Vault.deposit()\`. It cannot forge proofs. Endpoints cover every spend path: bet, settlement, withdrawal, bet-cancel, na-cancel, partial-fill, position-close, consolidate, deposit.
+
+**2. Backend index/cache (FC-12)** — mirrors the public on-chain state into SQLite so clients never re-scan the chain:
+- \`GET /merkle-path/:commitment\` — the merkle path for a proof, O(32) lookup, zero chain calls (CachedMerkleTree)
+- \`GET /recovery-data/:depositor\` — your deposits + all anonymous spend events for note recovery (VaultEventIndex)
+- \`GET /events\` — all indexed events for the public explorer
+
+Privacy is preserved: the index stores only public, anonymous data. It cannot link a spend to a wallet (no secret server-side) and cannot forge notes (your client matches events by your own derived nullifier).`,
     },
   ],
   'Security': [
@@ -90,56 +112,75 @@ The relay's own EOA pays gas. Your wallet only ever signs \`Vault.deposit()\`. S
       title: 'Threat model',
       content: `Polyshield protects against a network observer with full on-chain visibility who is trying to link a depositor address to a specific Polymarket bet.
 
-**Mitigated threats:**
-- Observer identifies which wallet placed a CLOB order (vault EOA is shared across all depositors)
-- Observer links a nullifier to a depositor address (nullifier = poseidon(secret, nonce); not derivable without secret)
-- Relay operator learns which depositor authorized which bet (relay only sees ZK proof public inputs; no depositor ID is present)
+**Mitigated:**
+- Observer identifies which wallet placed a CLOB order — all orders come from the vault's single shared EOA
+- Observer links a nullifier to a depositor — nullifier = Poseidon2(secret, nonce), not derivable without the secret
+- Relay or signing layer learns who authorized a bet — they only see ZK proofs and public inputs; no depositor ID is present
+- Forged deposit balance, double-spend, fee under-payment, forged attestation, double/inflated credit, redirected withdrawal — all blocked on-chain regardless of who sends the transaction
+- Malicious backend index — serves only public data; worst case is incomplete recovery, never theft or de-anonymization
 
-**Not mitigated:**
-- That a wallet used Polyshield (deposit is public)
-- Deposit amount (ERC-20 transfer amount is on-chain)
+**Not mitigated (by design):**
+- That a wallet used Polyshield (the deposit is public)
+- The deposit amount (ERC-20 transfer amount is on-chain)
+- Calling a spend function from your OWN wallet self-deanonymizes (the frontend never does this; it is a client discipline)
 
-Full threat model: \`docs/threat-model.md\` in the repository.`,
+**Largest trust assumption:** the contracts are instantly upgradeable by the owner key (UUPS, no timelock), so that key must be a multisig/HSM in production. Full detail: \`docs/threat-model.md\`.`,
     },
     {
-      title: 'Note backup',
-      content: `Your note secret is derived from your wallet signature using a deterministic formula. You do not need to back up any secret.
+      title: 'Note backup & recovery',
+      content: `Your note secret is derived deterministically from your wallet signature, so there is nothing to back up.
 
-**Recovery:** On a new device or after clearing storage, click "Recover notes" in the app. The app re-derives your secrets by index and replays your note history from on-chain events.
+**Recovery:** on a new device or after clearing storage, click "Recover notes". The app fetches your public events from the backend index (\`/recovery-data\`, no chain scan), re-derives your secrets by index, and keeps only the events whose nullifier matches your own — rebuilding your full note set, including credit notes.
 
-**What you must preserve:** Your wallet. Your note secret is recoverable as long as you control the depositing wallet. If you lose access to that wallet, your vault position is unrecoverable — there is no admin override.
+**What you must preserve:** your wallet. As long as you control the depositing wallet, your position is recoverable. Lose the wallet and the position is unrecoverable — there is no admin override.
 
-**Withdrawal restriction:** You can only withdraw to the wallet address that made the original deposit. This is enforced cryptographically inside the withdrawal ZK circuit.`,
+**Withdrawal restriction:** you can only withdraw to the wallet that made the original deposit, enforced inside the withdrawal circuit via the \`owner_address\` field and re-checked by the Vault.`,
+    },
+    {
+      title: 'Fees',
+      content: `All fee rates live in one governance-mutable Vault config and accrue in the pool, claimable by the fee recipient. Three fees:
+
+**Bet fee + relay gas** — \`bet_amount * betFeeBps / 10000 + relayGasFeeUSDC\`, computed by the Vault and injected into the BET_AUTH proof. Because the Vault (not the user) supplies the fee, a forged proof with any other fee fails verification. The gas reimbursement is charged in USDC from the note, never as a native transfer (which would re-link wallet to bet).
+
+**Withdrawal fee** — a flat USDC amount skimmed from the payout by \`withdraw()\` directly (no circuit change needed, because the Vault controls the USDC).
+
+Current testing defaults: bet fee 0.05%, withdrawal fee $0.10, min bet $1, min withdrawal $1.`,
     },
   ],
   'API reference': [
     {
-      title: 'Indexer REST API',
-      content: `The Polymarket Indexer exposes settlement data for proof generation.
+      title: 'Proof relay API',
+      content: `All relay endpoints accept a JSON body with \`proof\` (hex-encoded) and \`inputs\` (proof-type-specific public inputs). Returns \`{ txHash: "0x..." }\` on success. The relay pays gas; your wallet is never the transaction sender.
 
-\`GET /settlement/:market_id\`
-Returns:
-\`\`\`json
-{
-  "conditionId": "0x...",
-  "positionId": "0x...",
-  "payout_per_share": 1000000,
-  "block_number": 21448072,
-  "outcome": 1
-}
-\`\`\`
-
-\`GET /health\` → 200 OK`,
+\`POST /relay/bet\` — Vault.authorizeBet()
+\`POST /relay/settlement\` — Vault.creditSettlement()
+\`POST /relay/withdrawal\` — Vault.withdraw() (+ recipientAddress)
+\`POST /relay/bet-cancel\` — Vault.betCancellationCredit()
+\`POST /relay/na-cancel\` — Vault.naCancellationCredit()
+\`POST /relay/partial-credit\` — Vault.partialFillCredit()
+\`POST /relay/position-close\` — Vault.closePosition()
+\`POST /relay/consolidate\` — Vault.consolidate()
+\`POST /relay/deposit\` — Vault.deposit()`,
     },
     {
-      title: 'Proof relay API',
-      content: `All relay endpoints accept a JSON body with \`proof\` (hex-encoded bytes) and \`inputs\` (proof-type-specific public inputs). Returns \`{ txHash: "0x..." }\` on success.
+      title: 'Backend index API (FC-12)',
+      content: `The proof-relay also serves the public on-chain mirror so clients never scan the chain.
 
-\`POST /relay/bet\` — \`{ proof, inputs: BetAuthInputs }\`
-\`POST /relay/settlement\` — \`{ proof, inputs: SettlementInputs }\`
-\`POST /relay/withdrawal\` — \`{ proof, inputs: WithdrawalInputs, recipientAddress }\`
-\`POST /relay/bet-cancel\` — \`{ proof, inputs: BetCancelInputs }\`
-\`POST /relay/na-cancel\` — \`{ proof, inputs: NACancelInputs }\``,
+\`GET /merkle-path/:commitment\` — merkle path + root for a leaf (O(32), zero chain calls)
+\`GET /recovery-data/:depositor\` — that wallet's Deposited events + all anonymous spend events + block timestamps + feeConfig + currentRoot
+\`GET /events?limit=N\` — all indexed Vault events (anonymous) for the explorer
+\`GET /health\` → 200 OK
+
+All data is public and anonymous; the index cannot de-anonymize or forge notes.`,
+    },
+    {
+      title: 'Indexer REST API',
+      content: `The Polymarket Indexer exposes supplementary settlement data.
+
+\`GET /settlement/:market_id\` → \`{ conditionId, positionId, payout_per_share, block_number, outcome }\`
+\`GET /health\` → 200 OK
+
+Note: the frontend reads resolution/payout directly from the Vault (\`pendingCredit\` / \`marketResolvedAt\`) on-chain; the indexer is supplementary.`,
     },
   ],
 }

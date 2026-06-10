@@ -21,7 +21,15 @@ const NAV_LINKS: [string, string][] = [
 
 export function TopNav() {
   const pathname = usePathname()
-  const isApp = pathname.startsWith('/app')
+  // On the app.* subdomain the middleware rewrites "/markets" -> "/app/markets"
+  // INTERNALLY, so usePathname() still reports "/markets". Detect the subdomain too,
+  // otherwise the app pages render the marketing nav. (Brief first-paint flash on the
+  // subdomain is expected — window isn't available during SSR.)
+  const [appHost, setAppHost] = useState(false)
+  useEffect(() => {
+    if (typeof window !== 'undefined') setAppHost(window.location.hostname.startsWith('app.'))
+  }, [])
+  const isApp = pathname.startsWith('/app') || appHost
 
   if (isApp) {
     return <AppTopNav pathname={pathname} />

@@ -1,7 +1,7 @@
 'use client'
 
 import { useEffect, useState, useCallback } from 'react'
-import { createPublicClient, http, parseAbiItem, type Log } from 'viem'
+import { createPublicClient, http } from 'viem'
 import { polygon, polygonAmoy } from 'viem/chains'
 import { defineChain } from 'viem'
 
@@ -78,6 +78,9 @@ function blockExplorerTx(chainId: number, txHash: string): string {
   return `#` // local dev — no explorer
 }
 
+// Use the configured RPC for mainnet/amoy (NOT viem's default chain RPC, which falls back to
+// drpc/public endpoints with tight free-tier limits). Falls back to undefined => viem default.
+const MAINNET_RPC = process.env.NEXT_PUBLIC_POLYGON_RPC || process.env.NEXT_PUBLIC_CHAIN_RPC || undefined
 function buildClient(chainId: number) {
   const IS_DEV = process.env.NEXT_PUBLIC_DEV_MODE === 'true'
   const DEV_RPC = process.env.NEXT_PUBLIC_CHAIN_RPC ?? 'http://127.0.0.1:8545'
@@ -91,125 +94,47 @@ function buildClient(chainId: number) {
     })
     return createPublicClient({ chain: anvilChain, transport: http(DEV_RPC) })
   }
-  if (chainId === 80002) return createPublicClient({ chain: polygonAmoy, transport: http() })
-  return createPublicClient({ chain: polygon, transport: http() })
+  if (chainId === 80002) return createPublicClient({ chain: polygonAmoy, transport: http(MAINNET_RPC) })
+  return createPublicClient({ chain: polygon, transport: http(MAINNET_RPC) })
 }
 
-// ── Event fetchers ───────────────────────────────────────────────────────────
+// ── Event fetchers (served from the backend index — see fetchBackendEvents) ───
+
+// A single indexed event as served by the proof-relay /api/events (public, anonymous).
+type BackendEvent = { type: string; blockNumber: number; logIndex: number; txHash: string; blockTs: number | null; args: Record<string, unknown> }
+
+// Fetch all indexed Vault events from the BACKEND index (proof-relay), not the chain — so the
+// Explorer works on a metered RPC (no per-client getLogs scan / 10-block cap).
+async function fetchBackendEvents(limit = 2000): Promise<BackendEvent[]> {
+  const res = await fetch(`/api/events?limit=${limit}`, { cache: 'no-store' })
+  if (!res.ok) throw new Error(`events HTTP ${res.status}`)
+  const data = (await res.json()) as { events?: BackendEvent[]; error?: string }
+  if (data.error) throw new Error(data.error)
+  return data.events ?? []
+}
 
 async function fetchVaultTxs(
-  vaultAddress: `0x${string}`,
-  chainId: number,
+  _vaultAddress: `0x${string}`,
+  _chainId: number,
 ): Promise<VaultTx[]> {
-  const client = buildClient(chainId)
+  const events = await fetchBackendEvents(2000)
+  const big = (v: unknown): bigint | null => (v == null ? null : BigInt(v as string))
+  const nf = (e: BackendEvent) => (e.args.nullifier as string | undefined) ?? undefined
 
-  const [
-    deposited,
-    betAuthorized,
-    settlementCredited,
-    betCancelled,
-    naCancelled,
-    withdrawn,
-    marketResolved,
-  ] = await Promise.all([
-    client.getLogs({ address: vaultAddress, event: parseAbiItem('event Deposited(address indexed depositor, bytes32 commitment, uint256 amount)'), fromBlock: 0n }),
-    client.getLogs({ address: vaultAddress, event: parseAbiItem('event BetAuthorized(bytes32 indexed nullifier, bytes32 market_id, bytes32 position_id, uint64 expected_shares, uint256 bet_amount, uint64 price, uint8 outcome_side, bytes32 new_commitment)'), fromBlock: 0n }),
-    client.getLogs({ address: vaultAddress, event: parseAbiItem('event SettlementCredited(bytes32 indexed nullifier, bytes32 nullifier_of_bet, bytes32 new_commitment)'), fromBlock: 0n }),
-    client.getLogs({ address: vaultAddress, event: parseAbiItem('event BetCancellationCredited(bytes32 indexed nullifier, bytes32 nullifier_of_bet, bytes32 new_commitment)'), fromBlock: 0n }),
-    client.getLogs({ address: vaultAddress, event: parseAbiItem('event NACancellationCredited(bytes32 indexed nullifier, bytes32 nullifier_of_bet, bytes32 new_commitment)'), fromBlock: 0n }),
-    client.getLogs({ address: vaultAddress, event: parseAbiItem('event Withdrawn(bytes32 indexed nullifier, address recipient, uint256 amount, bytes32 new_commitment)'), fromBlock: 0n }),
-    client.getLogs({ address: vaultAddress, event: parseAbiItem('event MarketResolved(bytes32 indexed market_id, uint64 resolvedAt)'), fromBlock: 0n }),
-  ])
-
-  const blockNums = new Set<bigint>()
-  const allLogs = [...deposited, ...betAuthorized, ...settlementCredited, ...betCancelled, ...naCancelled, ...withdrawn, ...marketResolved]
-  allLogs.forEach((l) => { if (l.blockNumber != null) blockNums.add(l.blockNumber) })
-
-  const blockTimestamps = new Map<bigint, number>()
-  await Promise.all(
-    [...blockNums].map(async (bn) => {
-      try {
-        const block = await client.getBlock({ blockNumber: bn })
-        blockTimestamps.set(bn, Number(block.timestamp))
-      } catch {
-        // leave undefined — will show as '—'
-      }
-    }),
-  )
-
-  const ts = (log: Log) => (log.blockNumber != null ? (blockTimestamps.get(log.blockNumber) ?? null) : null)
-
-  const rows: VaultTx[] = [
-    ...deposited.map((l) => ({
-      id: `dep-${l.transactionHash}-${l.logIndex}`,
-      type: 'Deposit' as TxType,
-      timestamp: ts(l),
-      blockNumber: l.blockNumber ?? 0n,
-      txHash: l.transactionHash ?? '',
-      amount: (l.args as { amount?: bigint }).amount ?? null,
-      status: 'Confirmed' as const,
-    })),
-    ...betAuthorized.map((l) => ({
-      id: `bet-${l.transactionHash}-${l.logIndex}`,
-      type: 'Bet Authorized' as TxType,
-      timestamp: ts(l),
-      blockNumber: l.blockNumber ?? 0n,
-      txHash: l.transactionHash ?? '',
-      amount: (l.args as { bet_amount?: bigint }).bet_amount ?? null,
-      nullifier: (l.args as { nullifier?: string }).nullifier ?? undefined,
-      status: 'Confirmed' as const,
-    })),
-    ...settlementCredited.map((l) => ({
-      id: `settle-${l.transactionHash}-${l.logIndex}`,
-      type: 'Settlement Credited' as TxType,
-      timestamp: ts(l),
-      blockNumber: l.blockNumber ?? 0n,
-      txHash: l.transactionHash ?? '',
-      amount: null,
-      nullifier: (l.args as { nullifier?: string }).nullifier ?? undefined,
-      status: 'Confirmed' as const,
-    })),
-    ...betCancelled.map((l) => ({
-      id: `betcancel-${l.transactionHash}-${l.logIndex}`,
-      type: 'Bet Cancellation' as TxType,
-      timestamp: ts(l),
-      blockNumber: l.blockNumber ?? 0n,
-      txHash: l.transactionHash ?? '',
-      amount: null,
-      nullifier: (l.args as { nullifier?: string }).nullifier ?? undefined,
-      status: 'Confirmed' as const,
-    })),
-    ...naCancelled.map((l) => ({
-      id: `nacancel-${l.transactionHash}-${l.logIndex}`,
-      type: 'N/A Cancellation' as TxType,
-      timestamp: ts(l),
-      blockNumber: l.blockNumber ?? 0n,
-      txHash: l.transactionHash ?? '',
-      amount: null,
-      nullifier: (l.args as { nullifier?: string }).nullifier ?? undefined,
-      status: 'Confirmed' as const,
-    })),
-    ...withdrawn.map((l) => ({
-      id: `wdraw-${l.transactionHash}-${l.logIndex}`,
-      type: 'Withdrawal' as TxType,
-      timestamp: ts(l),
-      blockNumber: l.blockNumber ?? 0n,
-      txHash: l.transactionHash ?? '',
-      amount: (l.args as { amount?: bigint }).amount ?? null,
-      nullifier: (l.args as { nullifier?: string }).nullifier ?? undefined,
-      status: 'Confirmed' as const,
-    })),
-    ...marketResolved.map((l) => ({
-      id: `mktres-${l.transactionHash}-${l.logIndex}`,
-      type: 'Market Resolved' as TxType,
-      timestamp: ts(l),
-      blockNumber: l.blockNumber ?? 0n,
-      txHash: l.transactionHash ?? '',
-      amount: null,
-      status: 'Confirmed' as const,
-    })),
-  ]
-
+  const rows: VaultTx[] = []
+  for (const e of events) {
+    const base = { timestamp: e.blockTs ?? null, blockNumber: BigInt(e.blockNumber), txHash: e.txHash, status: 'Confirmed' as const }
+    switch (e.type) {
+      case 'Deposited': rows.push({ id: `dep-${e.txHash}-${e.logIndex}`, type: 'Deposit', amount: big(e.args.amount), ...base }); break
+      case 'BetAuthorized': rows.push({ id: `bet-${e.txHash}-${e.logIndex}`, type: 'Bet Authorized', amount: big(e.args.bet_amount), nullifier: nf(e), ...base }); break
+      case 'SettlementCredited': rows.push({ id: `settle-${e.txHash}-${e.logIndex}`, type: 'Settlement Credited', amount: null, nullifier: nf(e), ...base }); break
+      case 'BetCancellationCredited': rows.push({ id: `betcancel-${e.txHash}-${e.logIndex}`, type: 'Bet Cancellation', amount: null, nullifier: nf(e), ...base }); break
+      case 'NACancellationCredited': rows.push({ id: `nacancel-${e.txHash}-${e.logIndex}`, type: 'N/A Cancellation', amount: null, nullifier: nf(e), ...base }); break
+      case 'Withdrawn': rows.push({ id: `wdraw-${e.txHash}-${e.logIndex}`, type: 'Withdrawal', amount: big(e.args.amount), nullifier: nf(e), ...base }); break
+      case 'MarketResolved': rows.push({ id: `mktres-${e.txHash}-${e.logIndex}`, type: 'Market Resolved', amount: null, ...base }); break
+      default: break // PartialFillCredited / BetSold / PositionClosed / Consolidated — not shown in the explorer
+    }
+  }
   rows.sort((a, b) => Number(b.blockNumber - a.blockNumber))
   return rows
 }
@@ -225,17 +150,17 @@ async function fetchChainNow(chainId: number): Promise<number | null> {
 }
 
 async function fetchUniqueDepositors(
-  vaultAddress: `0x${string}`,
-  chainId: number,
+  _vaultAddress: `0x${string}`,
+  _chainId: number,
 ): Promise<number> {
-  const client = buildClient(chainId)
-  const logs = await client.getLogs({
-    address: vaultAddress,
-    event: parseAbiItem('event Deposited(address indexed depositor, bytes32 commitment, uint256 amount)'),
-    fromBlock: 0n,
-  })
-  const unique = new Set(logs.map((l) => (l.args as { depositor?: string }).depositor?.toLowerCase()))
-  unique.delete(undefined as unknown as string)
+  const events = await fetchBackendEvents(5000)
+  const unique = new Set<string>()
+  for (const e of events) {
+    if (e.type === 'Deposited') {
+      const d = (e.args.depositor as string | undefined)?.toLowerCase()
+      if (d) unique.add(d)
+    }
+  }
   return unique.size
 }
 

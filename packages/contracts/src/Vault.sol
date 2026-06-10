@@ -9,7 +9,6 @@ import {PausableUpgradeable} from "@openzeppelin-upgradeable/utils/PausableUpgra
 import {EIP712Upgradeable} from "@openzeppelin-upgradeable/utils/cryptography/EIP712Upgradeable.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
-import {ECDSA} from "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
 
 import {CommitmentMerkleTree} from "./CommitmentMerkleTree.sol";
 import {NullifierRegistry} from "./NullifierRegistry.sol";
@@ -22,6 +21,10 @@ import {ICTF} from "./interfaces/ICTF.sol";
 // library (DELEGATECALL-linked) to keep this contract under the 24576-byte runtime limit.
 import {
     VaultInputs,
+    BetStatus,
+    BetRecord,
+    OperatorAttestation,
+    FeeConfig,
     BetAuthPublicInputs,
     SettlementPublicInputs,
     WithdrawalPublicInputs,
@@ -31,6 +34,9 @@ import {
     PartialFillPublicInputs,
     ConsolidatePublicInputs
 } from "./VaultInputs.sol";
+// EIP-170: bulkier spend-path function bodies live in this external (DELEGATECALL-linked)
+// library so the Vault stays under the 24576-byte runtime limit.
+import {VaultLogic} from "./VaultLogic.sol";
 
 /// @notice Privacy-preserving vault for Polymarket positions.
 /// Users deposit USDC, then authorize bets, credit settlements, and withdraw
@@ -59,72 +65,16 @@ contract Vault is
     uint8 public constant CONSOLIDATE = 8;    // FC-8: K=4 note consolidation (merge)
 
     // -------------------------------------------------------------------------
-    // Types
+    // Types — BetStatus / BetRecord / OperatorAttestation / FeeConfig and the
+    // public-input structs are defined at FILE SCOPE in VaultInputs.sol (imported
+    // above) so the external VaultLogic library can also reference them. ABI unchanged.
     // -------------------------------------------------------------------------
-    enum BetStatus {
-        ACTIVE,
-        FILLED,
-        FAILED,
-        CREDITED,
-        CANCELLED_CREDITED,
-        CLOSING,          // FC-1: operator reported a FOK SELL fill; awaiting close proof
-        CLOSED_CREDITED,  // FC-1: fully sold and credited (terminal)
-        PARTIAL_FILLED,   // FC-4: limit order partially filled then terminated; awaiting partial-credit proof
-        RESTING           // FC-4: operator confirmed a live (resting) GTC/GTD limit order
-    }
 
-    struct BetRecord {
-        bytes32 market_id; // circuit-safe field element (conditionId % BN254_P)
-        bytes32 condition_id; // same as market_id at authorizeBet time
-        bytes32 position_id;
-        uint64 expected_shares;
-        uint64 bet_amount;
-        uint8 outcome_side;  // 0 = YES, 1 = NO
-        BetStatus status;
-        uint64 sell_proceeds; // FC-1: operator-reported proceeds of the pending close (Vault-injected)
-        uint64 sold_shares;   // FC-1: shares sold in the pending close (full vs partial accounting)
-        uint64 filled_shares; // FC-4: shares actually filled on a partial limit-order fill (Vault-injected)
-        uint64 spent_amount;  // FC-4: bet_amount portion consumed by the partial fill (Vault-injected)
-    }
-
-    // Public-input structs (BetAuthPublicInputs, SettlementPublicInputs, …) moved to
-    // VaultInputs.sol (file scope) — imported above. Their ABI is unchanged.
-
-    // FC-9: gasless operator reporting. Instead of paying gas to push fill status on-chain,
-    // the operator signs this struct OFF-CHAIN (EIP-712) and the user submits the signature
-    // with their credit/cancel/close proof. The Vault recovers the signer and verifies it is
-    // signingLayerOperator. reportType: 1=FILLED, 2=FAILED, 3=PARTIAL, 4=SOLD.
-    // For PARTIAL: amountA=filled_shares, amountB=spent_amount.
-    // For SOLD:    amountA=sold_shares,  amountB=proceeds.
-    // For FILLED/FAILED: amountA/amountB are unused (0).
-    struct OperatorAttestation {
-        bytes32 nullifierOfBet;
-        uint8 reportType;
-        uint64 amountA;
-        uint64 amountB;
-    }
-
-    // Report-type constants for OperatorAttestation.reportType.
+    // Report-type constants for OperatorAttestation.reportType (1=FILLED, 2=FAILED, 3=PARTIAL, 4=SOLD).
     uint8 public constant REPORT_FILLED = 1;
     uint8 public constant REPORT_FAILED = 2;
     uint8 public constant REPORT_PARTIAL = 3;
     uint8 public constant REPORT_SOLD = 4;
-
-    // FEE (P2/P4): all governance-mutable fee parameters in one packed struct (2 slots).
-    // betFeeBps         — protocol bet fee in basis points (5 = 0.05%); deducted in-circuit.
-    // relayGasFeeUSDC   — flat USDC (6dp) relay-gas reimbursement, bundled into the bet fee.
-    // minBet            — minimum bet_amount (Polymarket order floor); $1 = 1e6.
-    // withdrawalFeeUSDC — flat USDC (6dp) fee skimmed from each withdrawal payout.
-    // minWithdrawal     — minimum withdrawal_amount; must be >= withdrawalFeeUSDC.
-    // feeRecipient      — address that may claim accumulated fees via withdrawFees().
-    struct FeeConfig {
-        uint16 betFeeBps;
-        uint64 relayGasFeeUSDC;
-        uint64 minBet;
-        uint64 withdrawalFeeUSDC;
-        uint64 minWithdrawal;
-        address feeRecipient;
-    }
 
     // -------------------------------------------------------------------------
     // Constants
@@ -133,9 +83,7 @@ contract Vault is
     // BN254 scalar field prime — conditionIds that exceed this are reduced before
     // use as circuit Field inputs and as pendingCredit keys.
     uint256 private constant BN254_P = 21888242871839275222246405745257275088548364400416034343698204186575808495617;
-    // FC-9: EIP-712 type hash for the operator's off-chain fill attestation.
-    bytes32 private constant OPERATOR_ATTESTATION_TYPEHASH =
-        keccak256("OperatorAttestation(bytes32 nullifierOfBet,uint8 reportType,uint64 amountA,uint64 amountB)");
+    // FC-9 attestation verification (typehash + ECDSA) now lives in VaultLogic.
 
     // -------------------------------------------------------------------------
     // State
@@ -153,7 +101,11 @@ contract Vault is
     mapping(uint8 => address) public verifiers;
     mapping(uint8 => address) public pendingVerifiers;
     mapping(uint8 => uint256) public verifierUpdateAt;
-    uint256 public constant VERIFIER_TIMELOCK = 48 hours;
+    // ⚠ TEST-ONLY: lowered from `48 hours` to `15 minutes` so the mainnet TEST deploy does
+    // not stall for two days between proposeVerifier and acceptVerifier. REVERT to `48 hours`
+    // before the real launch. This delay is the public-notice window that lets users/watchers
+    // detect a malicious or mistaken verifier swap before it goes live (see docs/threat-model.md).
+    uint256 public constant VERIFIER_TIMELOCK = 15 minutes;
     mapping(bytes32 => BetRecord) public betRecords;
     mapping(address => uint256) public cumulativeDeposits;
     // circuit_key (conditionId % BN254_P) => outcome_side => payout_per_share
@@ -173,10 +125,18 @@ contract Vault is
     FeeConfig public feeConfig;
     uint256 public feeAccumulator;
 
+    // FC-11: circuit_key (conditionId % BN254_P, the on-chain market_id) => REAL CTF conditionId.
+    // On-chain market_id is the field-safe reduction of the conditionId, which is lossy and cannot
+    // be used as a CTF lookup key. The operator records the real conditionId here (resolveMarket
+    // for resolved markets; registerCondition for N/A markets) so naCancellationCredit can query
+    // ctf.payout*(realConditionId). Trustless: writes verify conditionId % BN254_P == circuit_key.
+    mapping(bytes32 => bytes32) public conditionIdOf;
+
     /// @dev Reserved storage slots for future UUPS upgrades. Append new state by
     /// shrinking this gap; never reorder or remove the state variables declared above.
     /// FEE added FeeConfig (2 slots) + feeAccumulator (1 slot): __gap 50 -> 47.
-    uint256[47] private __gap;
+    /// FC-11 added conditionIdOf (1 slot): __gap 47 -> 46.
+    uint256[46] private __gap;
 
     // -------------------------------------------------------------------------
     // Errors
@@ -196,6 +156,7 @@ contract Vault is
     error MarketNotResolved();
     error ConditionNotResolved();
     error BetNotCancellable();
+    error ConditionNotRegistered();
     error BetNotActive();
     error BetTimeoutNotElapsed();
     error InsufficientVaultLiquidity();
@@ -205,8 +166,10 @@ contract Vault is
     error ZeroAddress();
     error VerifierTimelockActive();
     error PayoutRoundsToZero();
-    error BetNotClosing();          // FC-1: closePosition requires status CLOSING
-    error InvalidSoldShares();      // FC-1: sold_shares must be > 0 and <= expected_shares
+    error BetNotClosing();          // FC-1: closePosition requires status ACTIVE or FILLED
+    error InvalidSoldShares();      // FC-1: cumulative sold_shares must be > prior and <= expected_shares
+    error NonMonotonicProceeds();   // FC-1: cumulative sell_proceeds must not decrease across closes
+    error AlreadyPartiallyClosed(); // FC-1: naCancellationCredit blocked once the position was (partly) sold
     error CannotCloseResolvedMarket(); // FC-1: resolved markets settle, they do not close
     error BetNotPartialFillable();  // FC-4: reportPartialFill requires status ACTIVE or RESTING
     error BetNotPartialFilled();    // FC-4: partialFillCredit requires status PARTIAL_FILLED
@@ -225,6 +188,7 @@ contract Vault is
     // -------------------------------------------------------------------------
     event Deposited(address indexed depositor, bytes32 commitment, uint256 amount);
     event MarketResolved(bytes32 indexed market_id, uint64 resolvedAt);
+    event ConditionRegistered(bytes32 indexed circuit_key, bytes32 condition_id);
     event VerifierProposed(uint8 indexed proofType, address verifier, uint256 availableAt);
     event VerifierAccepted(uint8 indexed proofType, address verifier);
     event BetAuthorized(
@@ -328,26 +292,11 @@ contract Vault is
         adminCancelTimelock = 7 days;
     }
 
-    /// @dev FC-9: recover the operator attestation signer and require it equals the operator.
-    function _verifyOperatorAttestation(OperatorAttestation calldata att, bytes calldata sig) internal view {
-        bytes32 structHash = keccak256(
-            abi.encode(OPERATOR_ATTESTATION_TYPEHASH, att.nullifierOfBet, att.reportType, att.amountA, att.amountB)
-        );
-        if (ECDSA.recover(_hashTypedDataV4(structHash), sig) != signingLayerOperator) revert InvalidAttestation();
-    }
-
-    /// @dev FC-9: verify an attestation bound to `nullifierOfBet` whose reportType is in the
-    /// {primaryType, altType} set (pass altType == primaryType when only one type is allowed).
-    function _checkAttestation(
-        OperatorAttestation calldata att,
-        bytes calldata sig,
-        bytes32 nullifierOfBet,
-        uint8 primaryType,
-        uint8 altType
-    ) internal view {
-        if (att.nullifierOfBet != nullifierOfBet) revert AttestationMismatch();
-        if (att.reportType != primaryType && att.reportType != altType) revert AttestationMismatch();
-        _verifyOperatorAttestation(att, sig);
+    /// @dev Bundle the handles every spend-path VaultLogic function needs. The EIP-712 domain
+    /// separator is computed here (EIP712Upgradeable) and passed so the library can verify
+    /// operator attestations without the Vault's inherited internals.
+    function _ctx() internal view returns (VaultLogic.Ctx memory) {
+        return VaultLogic.Ctx(tree, nullifiers, signingLayerOperator, _domainSeparatorV4());
     }
 
     /// @notice UUPS upgrade authorization. Owner-gated, instant (no timelock).
@@ -443,8 +392,13 @@ contract Vault is
     function pause() external onlyOwner { _pause(); }
     function unpause() external onlyOwner { _unpause(); }
 
-    /// @notice Convert vault USDC to pUSD via onramp and forward to the Polymarket
-    /// deposit wallet. Operator-callable; tracks deployed amount in deployedToPolymarket.
+    /// @notice Fund the Polymarket deposit wallet in USDC directly (JIT, Option 3).
+    /// Operator-callable; tracks deployed amount in deployedToPolymarket.
+    /// @dev Real Polymarket settles in USDC.e, so the vault forwards USDC straight to the
+    /// deposit wallet — the prior pUSD onramp hop was removed (the mainnet pUSD/onramp was a
+    /// non-functional stub and `onramp.deposit()` reverted). The `onramp`/`offramp` handles
+    /// remain in storage for the settlement-return pipeline; this funding path no longer uses
+    /// the onramp. Approved as a collateral-model change (see docs/collateral-* / FC-7).
     function fundPolymarketWallet(uint256 amount) external nonReentrant whenNotPaused {
         if (msg.sender != signingLayerOperator) revert OnlyOperator();
         if (usdc.balanceOf(address(this)) < amount) revert InsufficientVaultLiquidity();
@@ -453,11 +407,7 @@ contract Vault is
         if (deployedToPolymarket + amount > deploymentCap) revert DeployCapExceeded();
         deployedToPolymarket += amount;
 
-        IERC20 pusd = IERC20(onramp.pusdAddress());
-        usdc.forceApprove(address(onramp), amount);
-        onramp.deposit(amount); // USDC leaves vault, pUSD arrives at vault
-
-        pusd.safeTransfer(depositWallet, amount); // forward pUSD to deposit wallet
+        usdc.safeTransfer(depositWallet, amount); // fund the deposit wallet in USDC directly
         emit FundedPolymarketWallet(amount);
     }
 
@@ -603,6 +553,13 @@ contract Vault is
     // Market Resolution
     // -------------------------------------------------------------------------
 
+    /// @dev Reduce a conditionId to the BN254 field range used as the on-chain market_id /
+    /// pendingCredit / conditionIdOf key. Shared by resolveMarket, creditSettlement,
+    /// registerCondition and naCancellationCredit so the reduction is defined once.
+    function _circuitKey(bytes32 conditionId) internal pure returns (bytes32) {
+        return bytes32(uint256(conditionId) % BN254_P);
+    }
+
     /// @notice Called by the operator after a Polymarket market resolves (non-N/A).
     /// Reads payout from the CTF contract and stores per-outcome payouts keyed by
     /// the BN254-reduced circuit_key so settlement proofs can use it directly.
@@ -612,37 +569,52 @@ contract Vault is
         if (msg.sender != signingLayerOperator) revert OnlyOperator();
 
         // Reduce conditionId to BN254 field range for use as circuit-compatible key.
-        bytes32 circuit_key = bytes32(uint256(market_id) % BN254_P);
+        bytes32 circuit_key = _circuitKey(market_id);
         if (marketResolvedAt[circuit_key] != 0) revert MarketAlreadyResolved();
 
-        uint256[] memory numerators = ctf.payoutNumerators(market_id);
         uint256 denominator = ctf.payoutDenominator(market_id);
         if (denominator == 0) revert ConditionNotResolved();
 
+        // Read payouts element-by-index from the real CTF (no array getter exists on-chain — see
+        // ICTF). Store payout for each outcome; for binary markets numerators[i]/denominator is
+        // exactly 0 or 1. Users whose outcome_side lost get payout_per_share = 0 and their bet is
+        // treated as worthless (no settlement needed). A reverting branch undoes any writes made
+        // above it, so the NotNA / PayoutRoundsToZero guards are safe to check after the loop.
+        uint256 slotCount = ctf.getOutcomeSlotCount(market_id);
         bool anyNonZero = false;
-        for (uint256 i = 0; i < numerators.length; i++) {
-            if (numerators[i] > 0) { anyNonZero = true; break; }
-        }
-        if (!anyNonZero) revert NotNA();
-
-        // Store payout for each outcome. For binary markets numerators[i]/denominator
-        // is exactly 0 or 1. Users whose outcome_side lost get payout_per_share = 0
-        // and their bet is treated as worthless (no settlement needed).
         bool anyNonZeroAfterDiv = false;
-        for (uint256 i = 0; i < numerators.length; i++) {
+        for (uint256 i = 0; i < slotCount; i++) {
+            uint256 numerator = ctf.payoutNumerators(market_id, i);
+            if (numerator > 0) anyNonZero = true;
             // SEC-005: division can exceed uint64 for non-binary markets; revert instead of
             // silently truncating, which would corrupt settlement math.
-            uint256 ratio = numerators[i] / denominator;
+            uint256 ratio = numerator / denominator;
             require(ratio <= type(uint64).max, "pps overflow");
             uint64 pps = uint64(ratio);
             pendingCredit[circuit_key][uint8(i)] = pps;
             if (pps > 0) anyNonZeroAfterDiv = true;
         }
+        if (!anyNonZero) revert NotNA();
         if (!anyNonZeroAfterDiv) revert PayoutRoundsToZero();
 
         uint64 resolvedAt = uint64(block.timestamp);
         marketResolvedAt[circuit_key] = resolvedAt;
+        // FC-11: record the real conditionId so N/A cancellation (and any future CTF lookup)
+        // can use it. `market_id` here is the real conditionId; circuit_key is its reduction.
+        conditionIdOf[circuit_key] = market_id;
         emit MarketResolved(circuit_key, resolvedAt);
+    }
+
+    /// @notice Operator records the real CTF conditionId for a market whose payouts are all
+    /// zero (N/A). resolveMarket reverts NotNA for such markets and never records the mapping,
+    /// so naCancellationCredit would have no real conditionId to query CTF with. Trustless: the
+    /// supplied conditionId must reduce to the circuit_key the bets used, so the operator cannot
+    /// map a market to the wrong condition. Idempotent.
+    function registerCondition(bytes32 condition_id) external {
+        if (msg.sender != signingLayerOperator) revert OnlyOperator();
+        bytes32 circuit_key = _circuitKey(condition_id);
+        conditionIdOf[circuit_key] = condition_id;
+        emit ConditionRegistered(circuit_key, condition_id);
     }
 
     // -------------------------------------------------------------------------
@@ -663,34 +635,10 @@ contract Vault is
         OperatorAttestation calldata att,
         bytes calldata sig
     ) external nonReentrant whenNotPaused {
-        _requireUnspentKnownRoot(inputs.nullifier, inputs.merkle_root);
-
-        BetRecord storage rec = betRecords[inputs.nullifier_of_bet];
-        if (rec.market_id == bytes32(0)) revert BetNotFound();
-        if (rec.market_id != inputs.market_id) revert WrongMarket();
-        // FILLED (post-partial) needs no attestation; an ACTIVE full-fill needs a FILLED att.
-        if (rec.status != BetStatus.FILLED) {
-            if (rec.status != BetStatus.ACTIVE) revert BetNotFilled();
-            _checkAttestation(att, sig, inputs.nullifier_of_bet, REPORT_FILLED, REPORT_FILLED);
-        }
-
-        // Market must be resolved. Losing bets (payout_per_share == 0) proceed with total_credit = 0.
-        // Use the same BN254-reduced key that resolveMarket wrote to storage.
-        bytes32 circuit_key = bytes32(uint256(inputs.market_id) % BN254_P);
-        if (marketResolvedAt[circuit_key] == 0) revert MarketNotResolved();
-        uint64 payout_per_share = pendingCredit[circuit_key][rec.outcome_side];
-
-        // Verify total_credit arithmetic on-chain — circuit trusts this as injected.
-        // payout_per_share is 0 or 1 for binary markets; for a loss total_credit must be 0.
-        uint64 shares_held = rec.expected_shares;
-        require(uint256(shares_held) * uint256(payout_per_share) == uint256(inputs.total_credit), "Invalid total_credit");
-
-        if (!VaultInputs.verifySettlement(verifiers[SETTLEMENT_CREDIT], proof, inputs)) revert InvalidProof();
-
-        _spendAndInsert(inputs.nullifier, inputs.new_commitment);
-        rec.status = BetStatus.CREDITED;
-
-        emit SettlementCredited(inputs.nullifier, inputs.nullifier_of_bet, inputs.new_commitment);
+        // Body in VaultLogic (EIP-170). Modifiers stay here; storage mappings passed by ref.
+        VaultLogic.creditSettlement(
+            _ctx(), betRecords, pendingCredit, marketResolvedAt, verifiers[SETTLEMENT_CREDIT], proof, inputs, att, sig
+        );
     }
 
     // -------------------------------------------------------------------------
@@ -751,21 +699,7 @@ contract Vault is
         OperatorAttestation calldata att,
         bytes calldata sig
     ) external nonReentrant whenNotPaused {
-        _requireUnspentKnownRoot(inputs.nullifier, inputs.merkle_root);
-
-        BetRecord storage rec = betRecords[inputs.nullifier_of_bet];
-        if (rec.market_id == bytes32(0)) revert BetNotFound();
-        if (rec.status != BetStatus.FAILED) {
-            if (rec.status != BetStatus.ACTIVE) revert BetNotFailed();
-            _checkAttestation(att, sig, inputs.nullifier_of_bet, REPORT_FAILED, REPORT_FAILED);
-        }
-
-        if (!VaultInputs.verifyBetCancel(verifiers[BET_CANCEL], proof, inputs, rec.bet_amount)) revert InvalidProof();
-
-        _spendAndInsert(inputs.nullifier, inputs.new_commitment);
-        rec.status = BetStatus.CANCELLED_CREDITED;
-
-        emit BetCancellationCredited(inputs.nullifier, inputs.nullifier_of_bet, inputs.new_commitment);
+        VaultLogic.betCancellationCredit(_ctx(), betRecords, verifiers[BET_CANCEL], proof, inputs, att, sig);
     }
 
     // -------------------------------------------------------------------------
@@ -785,76 +719,34 @@ contract Vault is
         OperatorAttestation calldata att,
         bytes calldata sig
     ) external nonReentrant whenNotPaused {
-        _requireUnspentKnownRoot(inputs.nullifier, inputs.merkle_root);
-
-        BetRecord storage rec = betRecords[inputs.nullifier_of_bet];
-        if (rec.market_id == bytes32(0)) revert BetNotFound();
-        if (rec.market_id != inputs.market_id) revert WrongMarket();
-        if (rec.status != BetStatus.FILLED && rec.status != BetStatus.FAILED) {
-            if (rec.status != BetStatus.ACTIVE) revert BetNotCancellable();
-            _checkAttestation(att, sig, inputs.nullifier_of_bet, REPORT_FILLED, REPORT_FAILED);
-        }
-        // C2: confirm the condition has actually resolved (denominator > 0) before checking N/A
-        uint256 denominator = ctf.payoutDenominator(inputs.market_id);
-        if (denominator == 0) revert ConditionNotResolved();
-
-        // Verify N/A: all payoutNumerators must be zero
-        uint256[] memory numerators = ctf.payoutNumerators(inputs.market_id);
-        for (uint256 i = 0; i < numerators.length; i++) {
-            if (numerators[i] != 0) revert NotNA();
-        }
-
-        if (!VaultInputs.verifyNACancel(verifiers[CANCEL_CREDIT], proof, inputs, rec.bet_amount)) revert InvalidProof();
-
-        _spendAndInsert(inputs.nullifier, inputs.new_commitment);
-        rec.status = BetStatus.CANCELLED_CREDITED;
-
-        emit NACancellationCredited(inputs.nullifier, inputs.nullifier_of_bet, inputs.new_commitment);
+        VaultLogic.naCancellationCredit(
+            _ctx(), betRecords, conditionIdOf, ctf, verifiers[CANCEL_CREDIT], proof, inputs, att, sig
+        );
     }
 
     // -------------------------------------------------------------------------
     // Position Close (FC-1: secondary sale before settlement)
     // -------------------------------------------------------------------------
 
-    /// @notice Credit operator-attested FOK SELL proceeds back into the user's note.
+    /// @notice Credit operator-attested SELL proceeds back into the user's note.
     /// Mirrors creditSettlement: the user spends the post-bet note, proves membership,
-    /// and recommits balance + sell_proceeds. The proceeds come from a SOLD operator
-    /// attestation (amountA = sold_shares, amountB = proceeds), injected so the user
-    /// cannot inflate them in the proof.
+    /// and recommits balance + the newly-credited proceeds. The proceeds come from a SOLD
+    /// operator attestation (amountA = cumulative sold_shares, amountB = cumulative proceeds),
+    /// injected so the user cannot inflate them in the proof.
     ///
-    /// FC-9: position close is all-or-nothing — the SOLD attestation must cover the whole
-    /// position (att.amountA == rec.expected_shares). Callable on a filled position: an ACTIVE
-    /// full-fill bet or a FILLED (post-partial) record. Resolved markets settle, not close.
-    /// The record becomes CLOSED_CREDITED (terminal); no path back to FILLED.
+    /// FC-1: a close may be PARTIAL. The attestation carries the CUMULATIVE shares sold; the Vault
+    /// credits only the delta proceeds and records cumulative sold_shares/sell_proceeds. A full close
+    /// (att.amountA == rec.expected_shares) is terminal (CLOSED_CREDITED); a partial leaves the record
+    /// FILLED so the unsold remainder settles at resolution (creditSettlement nets out sold_shares).
+    /// The cumulative gate (amountA strictly > recorded) also makes a persisted SOLD non-replayable.
+    /// Callable on an ACTIVE full-fill bet or a FILLED (post-partial) record. Resolved markets settle.
     function closePosition(
         bytes calldata proof,
         ClosePublicInputs calldata inputs,
         OperatorAttestation calldata att,
         bytes calldata sig
     ) external nonReentrant whenNotPaused {
-        _requireUnspentKnownRoot(inputs.nullifier, inputs.merkle_root);
-
-        BetRecord storage rec = betRecords[inputs.nullifier_of_bet];
-        if (rec.market_id == bytes32(0)) revert BetNotFound();
-        // A position can be closed only while filled: ACTIVE (full fill) or FILLED (post-partial).
-        if (rec.status != BetStatus.ACTIVE && rec.status != BetStatus.FILLED) revert BetNotClosing();
-        _checkAttestation(att, sig, inputs.nullifier_of_bet, REPORT_SOLD, REPORT_SOLD);
-        // Full close only: the attested sold_shares must equal the whole held position.
-        if (att.amountA != rec.expected_shares) revert InvalidSoldShares();
-        // Resolved markets settle (creditSettlement); they do not close.
-        bytes32 circuit_key = bytes32(uint256(rec.market_id) % BN254_P);
-        if (marketResolvedAt[circuit_key] != 0) revert CannotCloseResolvedMarket();
-
-        uint64 sell_proceeds = att.amountB;
-        if (!VaultInputs.verifyClose(verifiers[POSITION_CLOSE], proof, inputs, sell_proceeds)) revert InvalidProof();
-
-        _spendAndInsert(inputs.nullifier, inputs.new_commitment);
-        rec.status = BetStatus.CLOSED_CREDITED;
-
-        // Emit BetSold (proceeds) before PositionClosed so wallet recovery can reconstruct the
-        // credited balance from chain (it pairs the two by block/logIndex within this tx).
-        emit BetSold(inputs.nullifier_of_bet, att.amountA, sell_proceeds);
-        emit PositionClosed(inputs.nullifier, inputs.nullifier_of_bet, inputs.new_commitment, true);
+        VaultLogic.closePosition(_ctx(), betRecords, marketResolvedAt, verifiers[POSITION_CLOSE], proof, inputs, att, sig);
     }
 
     // -------------------------------------------------------------------------
@@ -880,35 +772,7 @@ contract Vault is
         OperatorAttestation calldata att,
         bytes calldata sig
     ) external nonReentrant whenNotPaused {
-        _requireUnspentKnownRoot(inputs.nullifier, inputs.merkle_root);
-
-        BetRecord storage rec = betRecords[inputs.nullifier_of_bet];
-        if (rec.market_id == bytes32(0)) revert BetNotFound();
-        // Only a not-yet-credited bet can be partial-credited. A FILLED/terminal record has
-        // already been normalized/credited and must not be re-entered.
-        if (rec.status != BetStatus.ACTIVE) revert BetNotPartialFilled();
-        _checkAttestation(att, sig, inputs.nullifier_of_bet, REPORT_PARTIAL, REPORT_PARTIAL);
-
-        uint64 filled_shares = att.amountA;
-        uint64 spent_amount = att.amountB;
-        // Strict partial: a true partial fill leaves a positive unfilled remainder. A full fill
-        // must go through creditSettlement/closePosition instead (refund would be 0 here).
-        if (filled_shares == 0 || filled_shares >= rec.expected_shares) revert InvalidFilledShares();
-        if (spent_amount == 0 || spent_amount >= rec.bet_amount) revert InvalidSpentAmount();
-        uint64 refund_amount = rec.bet_amount - spent_amount;
-
-        if (!VaultInputs.verifyPartialCredit(verifiers[PARTIAL_CREDIT], proof, inputs, refund_amount)) revert InvalidProof();
-
-        _spendAndInsert(inputs.nullifier, inputs.new_commitment);
-
-        // Normalize to a clean FILLED record reflecting only the shares actually bought.
-        rec.expected_shares = filled_shares;
-        rec.bet_amount = spent_amount;
-        rec.status = BetStatus.FILLED;
-        rec.filled_shares = 0;
-        rec.spent_amount = 0;
-
-        emit PartialFillCredited(inputs.nullifier, inputs.nullifier_of_bet, inputs.new_commitment);
+        VaultLogic.partialFillCredit(_ctx(), betRecords, verifiers[PARTIAL_CREDIT], proof, inputs, att, sig);
     }
 
     // -------------------------------------------------------------------------
@@ -931,28 +795,8 @@ contract Vault is
         bytes calldata proof,
         ConsolidatePublicInputs calldata inputs
     ) external nonReentrant whenNotPaused {
-        if (!tree.isKnownRoot(inputs.merkle_root)) revert UnknownRoot();
-        // Belt-and-suspenders: the circuit already forces slot 0 active, but guard here
-        // so a mis-wired verifier slot can never insert a leaf without spending a note.
-        if (inputs.nullifier[0] == bytes32(0)) revert EmptyConsolidation();
-
-        // CHECKS: every non-zero (active) nullifier must be unspent.
-        for (uint256 j = 0; j < 4; j++) {
-            if (inputs.nullifier[j] != bytes32(0) && nullifiers.isSpent(inputs.nullifier[j]))
-                revert NullifierSpent();
-        }
-        if (!VaultInputs.verifyConsolidate(verifiers[CONSOLIDATE], proof, inputs))
-            revert InvalidProof();
-
-        // EFFECTS: spend every non-zero nullifier (no de-dup — see notice). A duplicate
-        // active note reverts AlreadySpent in NullifierRegistry.markSpent.
-        for (uint256 j = 0; j < 4; j++) {
-            if (inputs.nullifier[j] != bytes32(0)) nullifiers.markSpent(inputs.nullifier[j]);
-        }
-        tree.insert(inputs.new_commitment);
-
-        emit Consolidated(inputs.nullifier, inputs.new_commitment);
-        // INTERACTIONS: none — no token movement, no betRecords touched.
+        // Body lives in VaultLogic (EIP-170). nonReentrant/whenNotPaused stay here (Vault state).
+        VaultLogic.consolidate(tree, nullifiers, verifiers[CONSOLIDATE], proof, inputs);
     }
 
 }

@@ -185,7 +185,7 @@ const FEATURES = [
   },
   {
     num: 'F.03', title: 'Strategy-safe execution.',
-    body: 'FOK orders, randomized relay delay, and decoy traffic eliminate timing correlation attacks. Your conviction stays yours — not alpha for copy traders and bots.',
+    body: 'Market orders, randomized relay delay, and decoy traffic eliminate timing correlation attacks. Your conviction stays yours — not alpha for copy traders and bots.',
     diagram: (
       <svg viewBox="0 0 320 160" width="100%">
         <text x="10" y="24" fontFamily="JetBrains Mono" fontSize="9" fill="var(--red)" opacity="0.7">EXPOSED (today)</text>
@@ -249,7 +249,7 @@ const ARCH_NODES = [
   { id: 'vault', label: 'Vault Contract', x: 400, y: 140, color: 'var(--cyan)', role: 'Verifies ZK proofs, maintains commitment Merkle tree, holds USDC.' },
   { id: 'tree', label: 'Merkle Tree', x: 560, y: 80, color: 'rgba(255,255,255,0.5)', role: 'Poseidon depth-32 append-only commitment accumulator.' },
   { id: 'nullifier', label: 'Nullifier Registry', x: 560, y: 200, color: 'rgba(255,255,255,0.5)', role: 'Tracks spent nullifiers to prevent double-spend.' },
-  { id: 'signer', label: 'Signing Layer', x: 400, y: 280, color: 'var(--amber)', role: 'Centralized signing operator (v1). Listens for BetAuthorized events and submits FOK orders to Polymarket CLOB. TEE-attested enclave is planned for v2.' },
+  { id: 'signer', label: 'Signing Layer', x: 400, y: 280, color: 'var(--amber)', role: 'Centralized signing operator (v1). Listens for BetAuthorized events and submits orders to the Polymarket CLOB. TEE-attested enclave is planned for v2.' },
   { id: 'pm', label: 'Polymarket', x: 560, y: 340, color: 'rgba(255,255,255,0.4)', role: 'CTF exchange. Executes fills. Sees vault trades, not depositor identity.' },
 ]
 const ARCH_EDGES = [

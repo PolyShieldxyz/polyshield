@@ -286,6 +286,40 @@ ordersRouter.post("/", (req: Request, res: Response) => {
         });
         break;
 
+      case "partial_fill": {
+        // L3 e2e: simulate a FOK whose budgeted order was downsized below the committed
+        // expected_shares — it still MATCHED, but for fewer shares than committed. Returns
+        // explicit filled/spent (status MATCHED) so submitFOKOrder attests PARTIAL (reconciled
+        // via partialFillCredit), and mints exactly `filled` shares + debits `spent` so
+        // settlement/redemption find the right holdings. Mirrors the FAK partial computation.
+        const isSellFok = received.side.toUpperCase() === "SELL";
+        const betAmount1e6 = Math.floor(parseFloat(received.size) * 1e6);
+        const fokPrice = parseFloat(received.price);
+        const fokFullShares = fokPrice > 0 ? Math.floor(betAmount1e6 / fokPrice) : betAmount1e6;
+        const bps = Math.min(9999, Math.max(1, Math.floor(state.partialFillBps)));
+        let spent = Math.floor((betAmount1e6 * bps) / 10000);
+        let filled = fokPrice > 0 ? Math.floor(spent / fokPrice) : spent;
+        // Force a STRICT partial (filled < expected, spent < bet) so partialFillCredit accepts it.
+        if (spent <= 0) spent = 1;
+        if (spent >= betAmount1e6) spent = Math.max(1, betAmount1e6 - 1);
+        if (filled <= 0) filled = 1;
+        if (filled >= fokFullShares) filled = Math.max(1, fokFullShares - 1);
+        if (!isSellFok) {
+          void mintCTFShares(received.tokenId, filled);
+          void debitDepositWalletPusd(spent);
+        }
+        res.json({
+          success: true,
+          errorMsg: "",
+          orderID: orderId,
+          transactTime: now,
+          status: "MATCHED",
+          filledShares: filled,
+          spentAmount: spent,
+        });
+        break;
+      }
+
       case "no_fill":
         res.json({
           success: false,

@@ -4,6 +4,59 @@ pragma solidity ^0.8.24;
 import {IVerifier} from "./interfaces/IVerifier.sol";
 
 // =============================================================================
+// Vault domain types — at file scope so the Vault AND the external VaultLogic
+// library (which holds the spend-path bodies for EIP-170) can both reference
+// them, and pass `mapping(... => BetRecord) storage` across the library boundary.
+// Moving them here from inside the Vault does NOT change the external ABI.
+// =============================================================================
+
+enum BetStatus {
+    ACTIVE,
+    FILLED,
+    FAILED,
+    CREDITED,
+    CANCELLED_CREDITED,
+    CLOSING,          // FC-1: operator reported a FOK SELL fill; awaiting close proof
+    CLOSED_CREDITED,  // FC-1: fully sold and credited (terminal)
+    PARTIAL_FILLED,   // FC-4: limit order partially filled then terminated; awaiting partial-credit proof
+    RESTING           // FC-4: operator confirmed a live (resting) GTC/GTD limit order
+}
+
+struct BetRecord {
+    bytes32 market_id; // circuit-safe field element (conditionId % BN254_P)
+    bytes32 condition_id; // same as market_id at authorizeBet time
+    bytes32 position_id;
+    uint64 expected_shares;
+    uint64 bet_amount;
+    uint8 outcome_side;  // 0 = YES, 1 = NO
+    BetStatus status;
+    uint64 sell_proceeds; // FC-1: operator-reported proceeds of the pending close (Vault-injected)
+    uint64 sold_shares;   // FC-1: shares sold in the pending close (full vs partial accounting)
+    uint64 filled_shares; // FC-4: shares actually filled on a partial limit-order fill (Vault-injected)
+    uint64 spent_amount;  // FC-4: bet_amount portion consumed by the partial fill (Vault-injected)
+}
+
+// FC-9: gasless operator reporting — signed OFF-CHAIN (EIP-712), submitted with a credit proof.
+// reportType: 1=FILLED, 2=FAILED, 3=PARTIAL, 4=SOLD. PARTIAL: amountA=filled_shares,
+// amountB=spent_amount. SOLD: amountA=sold_shares, amountB=proceeds. FILLED/FAILED: unused (0).
+struct OperatorAttestation {
+    bytes32 nullifierOfBet;
+    uint8 reportType;
+    uint64 amountA;
+    uint64 amountB;
+}
+
+// FEE (P2/P4): governance-mutable fee parameters in one packed struct (2 slots).
+struct FeeConfig {
+    uint16 betFeeBps;
+    uint64 relayGasFeeUSDC;
+    uint64 minBet;
+    uint64 withdrawalFeeUSDC;
+    uint64 minWithdrawal;
+    address feeRecipient;
+}
+
+// =============================================================================
 // Public-input structs — mirror each circuit's `pub` parameter list in order.
 // Defined at file scope (not inside the Vault) so both the Vault and the
 // VaultInputs library can reference them. Moving them here does NOT change the

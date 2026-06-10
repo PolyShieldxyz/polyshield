@@ -38,18 +38,107 @@ export interface MerkleProof {
 
 const LEAF_INSERTED_TOPIC = ethers.id("LeafInserted(uint32,bytes32,bytes32)");
 
+// Default span per eth_getLogs request. Public Polygon RPCs (e.g. publicnode) reject a
+// single fromBlock:0→latest scan over millions of blocks, so we page. getLogsChunked also
+// halves the span on a range/result-limit error, so this is just a starting size.
+// Max blocks per getLogs request. MUST be ≤ the RPC's getLogs range limit (Alchemy FREE caps it at
+// 10!; most other tiers allow ≥2000–10000). Set LOG_SCAN_CHUNK to match your RPC.
+const DEFAULT_LOG_CHUNK = Number(process.env.LOG_SCAN_CHUNK ?? "10000");
+// Gentle delay between successful getLogs requests to stay under a provider's per-second
+// compute-unit cap (Alchemy free tier ~330 CUPS; eth_getLogs is dozens of CU each). Tunable.
+const LOG_REQUEST_DELAY_MS = Number(process.env.MERKLE_LOG_DELAY_MS ?? "250");
+
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+/** A 429 / "compute units per second" / rate-limit error — retry the SAME range with backoff, never
+ * halve (halving means MORE requests, which makes a rate limit worse). Distinct from a range/result
+ * limit, which we recover from by halving. */
+function isRateLimit(err: unknown): boolean {
+  const e = err as { code?: unknown; error?: { code?: unknown; message?: unknown }; shortMessage?: unknown; message?: unknown };
+  const code = e?.error?.code ?? e?.code;
+  const msg = String(e?.error?.message ?? e?.shortMessage ?? e?.message ?? "").toLowerCase();
+  return code === 429 || code === -32005 || msg.includes("compute unit") || msg.includes("rate limit") ||
+    msg.includes("too many requests") || msg.includes("429") || msg.includes("throughput");
+}
+
+/**
+ * JsonRpcProvider that retries rate-limit (429) errors on EVERY RPC method — including the
+ * eth_sendRawTransaction / eth_getTransactionReceipt used when RELAYING user proofs (authorizeBet,
+ * creditSettlement, partialFillCredit, withdraw). Without this, a metered RPC's 429 intermittently
+ * fails the relay (and the user's claim/settle/withdraw). Range-too-large errors are NOT retried here
+ * (the merkle scan pages via getLogsChunked instead).
+ */
+export class RetryingJsonRpcProvider extends ethers.JsonRpcProvider {
+  async send(method: string, params: Array<unknown> | Record<string, unknown>): Promise<unknown> {
+    let attempt = 0;
+    for (;;) {
+      try {
+        return await super.send(method, params);
+      } catch (err) {
+        if (isRateLimit(err) && attempt < 8) {
+          attempt++;
+          await sleep(Math.min(8_000, 300 * 2 ** attempt));
+          continue;
+        }
+        throw err;
+      }
+    }
+  }
+}
+
+/**
+ * Fetch logs over [fromBlock, toBlock] in chunks, adapting to the RPC's limits:
+ *  - rate-limit (429): back off exponentially and RETRY the same range (don't halve);
+ *  - range/result-too-large: halve the span and retry;
+ *  - single-block non-rate-limit failure: a genuine RPC error → give up.
+ */
+export async function getLogsChunked(
+  provider: ethers.JsonRpcProvider,
+  filter: { address: string; topics: (string | string[] | null)[] },
+  fromBlock: number,
+  toBlock: number,
+  startChunk: number,
+): Promise<ethers.Log[]> {
+  const out: ethers.Log[] = [];
+  let from = fromBlock;
+  let chunk = Math.max(1, startChunk);
+  while (from <= toBlock) {
+    const to = Math.min(from + chunk - 1, toBlock);
+    try {
+      const logs = await provider.getLogs({ ...filter, fromBlock: from, toBlock: to });
+      out.push(...logs);
+      from = to + 1;
+      if (from <= toBlock && LOG_REQUEST_DELAY_MS > 0) await sleep(LOG_REQUEST_DELAY_MS);
+    } catch (err) {
+      // 429s are ALREADY retried inside RetryingJsonRpcProvider — do NOT also retry here. Nested
+      // retries (8× in the provider × N× here) compound into a multi-minute hang. Propagate a
+      // rate-limit so the caller (cache sync next tick / API fallback) handles it; only SHRINK the
+      // span for a genuine range/result-too-large error.
+      if (isRateLimit(err)) throw err;
+      if (to === from) throw err; // single-block non-rate-limit failure → genuine error
+      chunk = Math.max(1, Math.floor(chunk / 2));
+    }
+  }
+  return out;
+}
+
 export async function computeMerkleProof(
   treeAddress: string,
   commitment: string,
   provider: ethers.JsonRpcProvider,
+  opts?: { fromBlock?: number; chunkSize?: number },
 ): Promise<MerkleProof | null> {
-  // 1. Fetch all LeafInserted events
-  const logs = await provider.getLogs({
-    address: treeAddress,
-    topics: [LEAF_INSERTED_TOPIC],
-    fromBlock: 0,
-    toBlock: "latest",
-  });
+  // 1. Fetch all LeafInserted events. Start from the tree's deploy block (opts.fromBlock) so
+  //    we don't scan the entire chain history, and page to stay under RPC getLogs limits.
+  const latest = await provider.getBlockNumber();
+  const fromBlock = Math.max(0, Math.min(opts?.fromBlock ?? 0, latest));
+  const logs = await getLogsChunked(
+    provider,
+    { address: treeAddress, topics: [LEAF_INSERTED_TOPIC] },
+    fromBlock,
+    latest,
+    opts?.chunkSize ?? DEFAULT_LOG_CHUNK,
+  );
 
   // Parse leaves in insertion order
   const leaves: bigint[] = [];

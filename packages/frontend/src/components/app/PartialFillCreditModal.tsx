@@ -10,7 +10,7 @@ import {
   computeNullifier,
   deriveSecret,
   formatUsdc,
-  getSpendableNotes,
+  getFreeNoteForDeposit,
   markNoteSpent,
   recordWalletActivity,
   replaceNote,
@@ -98,28 +98,25 @@ export function PartialFillCreditModal({
   const run = async () => {
     setError(null)
     try {
-      // partial_credit mirrors bet_cancel: it spends the immediate post-bet note
-      // (the BET_OUTPUT note whose nonce = receipt.nonce + 1) because the circuit
-      // derives nullifier_of_bet = Poseidon2(secret, nonce - 1). It is NOT an
-      // arbitrary cash note.
-      const outputNote = getSpendableNotes(address).find(
-        (n) => n.depositIndex === receipt.depositIndex && n.nonce === receipt.nonce + 1n,
-      )
-      if (!outputNote) {
+      // Decoupled refund: spend the CURRENT note in this bet's deposit lineage and bind the bet
+      // via bet_nonce = receipt.nonce (circuit derives nullifier_of_bet = Poseidon2(secret,
+      // bet_nonce)). No longer requires the immediate post-bet note, so a later action that
+      // consumed it doesn't orphan the refund.
+      const freeNote = getFreeNoteForDeposit(address, receipt.depositIndex)
+      if (!freeNote) {
         throw new Error(
-          'The post-bet note for this position is unavailable (already spent on a later action). ' +
-          'Partial-fill refund requires the original post-bet note.',
+          'No spendable note found for this position. Recover your notes from chain (Portfolio → Restore) and retry.',
         )
       }
-      if (refundAmount <= 0n) {
-        throw new Error('Nothing to refund — the order filled completely.')
-      }
-
+      // A $0 refund (full-budget short fill: the full stake was spent but fewer shares filled than
+      // quoted) STILL requires this partialFillCredit call — it normalizes the bet record on-chain
+      // (expected_shares := filled_shares, status := FILLED) so the position becomes settleable. The
+      // Vault accepts refund_amount == 0 (L3 "B-relax"). Blocking it here strands the bet.
       setPhase('proving')
-      const secret = await deriveSecret(signMessageAsync, address, outputNote.depositIndex)
-      const merkle = await fetchMerklePath(outputNote.commitment)
-      const newNonce = outputNote.nonce + 1n
-      const newBalance = outputNote.balance + refundAmount
+      const secret = await deriveSecret(signMessageAsync, address, freeNote.depositIndex)
+      const merkle = await fetchMerklePath(freeNote.commitment)
+      const newNonce = freeNote.nonce + 1n
+      const newBalance = freeNote.balance + refundAmount
       const newCommitment = computeCommitment(secret, newBalance, newNonce, address)
       const newNullifier = computeNullifier(secret, newNonce)
 
@@ -127,13 +124,14 @@ export function PartialFillCreditModal({
         type: 'partial_credit',
         inputs: {
           secret,
-          current_balance: outputNote.balance,
-          nonce: outputNote.nonce,
+          current_balance: freeNote.balance,
+          nonce: freeNote.nonce,
           merkle_path: merkle.path,
           merkle_path_indices: merkle.pathIndices,
           owner_address: address,
+          bet_nonce: receipt.nonce, // nonce of the note the bet was made from
           merkle_root: merkle.root,
-          nullifier: outputNote.nullifier,
+          nullifier: freeNote.nullifier,
           new_commitment: newCommitment,
           nullifier_of_bet: nullifierOfBet,
           refund_amount: refundAmount,
@@ -142,18 +140,18 @@ export function PartialFillCreditModal({
 
       const { txHash } = await relayPartialCredit(proof, {
         merkle_root: merkle.root,
-        nullifier: outputNote.nullifier,
+        nullifier: freeNote.nullifier,
         new_commitment: newCommitment,
         nullifier_of_bet: nullifierOfBet,
       }, attestation ?? undefined)
       await waitForTransactionConfirmation(txHash as `0x${string}`)
 
-      markNoteSpent(outputNote.commitment)
+      markNoteSpent(freeNote.commitment)
       addNote({
         id: newCommitment,
         kind: 'CANCEL_CREDIT',
         owner_address: address,
-        depositIndex: outputNote.depositIndex,
+        depositIndex: freeNote.depositIndex,
         balance: newBalance,
         nonce: newNonce,
         commitment: newCommitment,
@@ -209,7 +207,7 @@ export function PartialFillCreditModal({
           </div>
           <div className="row" style={{ justifyContent: 'space-between', gap: 12 }}>
             <button className="btn" onClick={onClose}>Cancel</button>
-            <button className="btn btn-primary" disabled={loading || refundAmount <= 0n} onClick={() => void run()}>
+            <button className="btn btn-primary" disabled={loading} onClick={() => void run()}>
               Claim ${formatUsdc(refundAmount)}
             </button>
           </div>

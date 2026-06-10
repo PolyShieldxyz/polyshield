@@ -9,7 +9,7 @@ interface Phase {
   id: string
   label: string
   title: string
-  status: 'IN PROGRESS' | 'PLANNED' | 'RESEARCH'
+  status: 'SHIPPED' | 'IN PROGRESS' | 'PLANNED' | 'RESEARCH'
   items?: PhaseItem[]
   sections?: PhaseSection[]
 }
@@ -17,114 +17,102 @@ interface Phase {
 const PHASES: Phase[] = [
   {
     id: 'P1',
-    label: 'MVP Alpha · H1 2026',
-    title: 'Core Protocol',
-    status: 'IN PROGRESS',
+    label: 'Core Protocol · shipped',
+    title: 'Private Vault — Live on Polygon Mainnet',
+    status: 'SHIPPED',
     items: [
-      'Circom ZK circuits compiled to WASM + Groth16 proving keys: BET_AUTH, SETTLE_CRED, WITHDRAWAL, BET_CANCEL, CANCEL_CRED',
-      'Vault.sol with Poseidon Merkle tree (depth 32), NullifierRegistry, 5 Groth16 verifiers (snarkjs)',
-      'Node.js Signing Layer v1 — centralized operator, FOK-only order submission to Polymarket CLOB',
-      'Polymarket Indexer: CTF ConditionResolution listener, payout_per_share computation, REST API',
-      'Proof Relay: 5 stateless endpoints (bet, settlement, withdrawal, bet-cancel, na-cancel); relay EOA pays gas',
-      'Next.js frontend: deposit, bet, settle, and withdraw flows with client-side WASM prover',
-      '$50,000 USDC per-address cumulative deposit cap enforced in Vault.deposit()',
-      'Local dev stack: Anvil + MockUSDC + MockCTF + mock CLOB server + all backend services',
-      'No fees in P1 — fee infrastructure is a P2 feature',
+      '9 Circom circuits compiled to WASM + Groth16 proving keys: DEPOSIT, BET_AUTH, SETTLEMENT_CREDIT, WITHDRAWAL, BET_CANCEL, CANCEL_CREDIT, POSITION_CLOSE, PARTIAL_CREDIT, CONSOLIDATE',
+      'UUPS-upgradeable Vault + CommitmentMerkleTree (Poseidon, depth 32, rolling 1024-root window) + NullifierRegistry + 9 Groth16 verifier adapters, all behind ERC-1967 proxies',
+      'Mandatory deposit-binding proof (FC-2): the committed balance is cryptographically tied to the amount actually transferred — no over-commitment',
+      'Wallet-derived secrets — secrets derived deterministically from an EIP-191 signature, so users never back anything up; full note recovery from chain history',
+      'Operator-driven one-click settlement with payouts derived on-chain from the real Gnosis CTF; client-side WASM proving (real Groth16, no mocks)',
+      '$50,000 USDC per-address cumulative deposit cap, enforced in Vault.deposit()',
+      'Full deposit → bet → settle → withdraw exercised end-to-end on Polygon mainnet with real funds',
     ],
   },
   {
     id: 'P2',
-    label: 'Private Beta · H2 2026',
-    title: 'Full ZK Flow + Fees',
-    status: 'PLANNED',
+    label: 'Orders, Fees & Infra · shipped',
+    title: 'Order Types, Fees & Backend Index',
+    status: 'SHIPPED',
     items: [
-      'WASM prover fully wired: real Groth16 proofs in the browser via snarkjs — no mock proofs',
-      'Random-secret note generation with mandatory ECIES-encrypted backup to the user\'s wallet public key',
-      'Operator-driven settlement: users claim winnings with one click — no payout witness required',
-      '"Withdrawal with Change" circuit: withdraw settled balance while active positions remain open',
-      'Bet authorization fee: percentage of bet amount, rate TBD — deducted inside BET_AUTH circuit as a Vault-injected public input',
-      'Relay gas fee: flat USDC amount bundled with the bet auth fee, rate TBD — not surfaced to users separately',
-      'All fee rates stored as governance-mutable Vault storage slots; no circuit redeployment needed to update rates',
-      'Fee accumulator and feeRecipient in Vault.sol; owner-controlled initially',
-      'Polygon Amoy testnet deployment',
-      'Private beta cohort: limited invite-only access, testnet USDC provided — no open public access',
-      'End-to-end integration tests across all 5 proof types and the full deposit → bet → settle → withdraw flow',
+      'FAK market orders + GTC/GTD resting limit orders (FC-4), with partial-fill credit for the unfilled remainder',
+      'Gasless operator reporting (FC-9): the operator signs a single EIP-712 attestation per bet instead of pushing status on-chain',
+      'Just-in-time collateral deployment (FC-7): nothing is pre-deployed; the deposit wallet is funded per-bet, with a reused residual buffer',
+      'Protocol fees (FC-10): bet fee + relay-gas reimbursement (injected into BET_AUTH) and a withdrawal fee — all governance-mutable, accruing in the pool',
+      'Note consolidation (FC-8) and pre-settlement position close / secondary sale (FC-1)',
+      'Backend index/cache + recovery + explorer (FC-12): clients fetch merkle paths, recovery data, and events from the relay — never re-scanning the chain',
+      'Live Polymarket integration: real Gamma markets, a conditionId→tokenId market registry, and a settlement resolver (poll + filtered CTF event)',
+      'Single-host Docker deployment behind Caddy with automatic TLS',
     ],
   },
   {
     id: 'P3',
-    label: 'Multi-chain · H1 2027',
-    title: 'Chain Expansion & Wallet Hardening',
-    status: 'PLANNED',
+    label: 'Hardening & Beta · in progress',
+    title: 'Audit, Trust-Minimize the Owner Key, Public Beta',
+    status: 'IN PROGRESS',
     items: [
-      'Wallet-derived secrets: secrets derived deterministically from an EIP-191 wallet signature — no note backup ever needed; full note recovery from on-chain history',
-      'Multi-chain deposits: accept USDC from Ethereum mainnet, Base, and Arbitrum into the Polygon vault',
-      'Cross-chain deposit bridge: lock-and-mint or canonical bridge integration',
-      'Multi-EOA rotation: vault EOA ban recovery without disrupting the commitment tree; governance-controlled authorizedSigners mapping in Vault.sol',
-      'Withdrawal timing posture: Standard / Fast / Paranoid submission delay buckets at the relay layer',
+      'Third-party security audit + remediation; enable a tuned Content-Security-Policy',
+      'Move the contract owner (instant UUPS upgrade key) to a multisig / HSM and evaluate an upgrade timelock',
+      'Base-buffer collateral policy (Option 4 / FC-6) layered over JIT to smooth funding',
+      'Persist the signing-layer circuit-breaker halt flag across restarts + a real alert sink (PagerDuty/Telegram)',
+      'Grow the anonymity set; define the governance path to lift the per-address deposit cap',
+      'Polygon Amoy public testnet cohort and invite-only mainnet beta',
     ],
   },
   {
     id: 'P4',
-    label: 'Advanced Infrastructure · H2 2027',
-    title: 'TEE, Governance & Privacy Primitives',
-    status: 'RESEARCH',
+    label: 'TEE & Trust Minimization · planned',
+    title: 'Confidential Signing & Resilience',
+    status: 'PLANNED',
     items: [
-      'Signing Layer v2: AWS Nitro Enclave — EOA private key never leaves the enclave boundary',
-      'Remote attestation endpoint: users can independently verify the enclave is running unmodified code',
-      'Per-address deposit cap removal: lifted via governance once the anonymity set is large enough to resist concentration attacks',
-      'Withdrawal fee: fixed USDC amount per withdrawal, rate TBD — enforced by Vault.withdraw() directly, no circuit change needed',
-      'Fee governance transition: transfer fee parameter ownership to an on-chain governance contract',
-      'Privacy metrics dashboard: live anonymity set size, K-anonymity score, timing entropy',
-      'Decoy traffic system: background cover transactions to reduce timing-correlation attacks',
-      'Onion-routed proof relay: multi-hop relay network to prevent IP-level correlation',
-      'SMT-based nullifier registry: O(log n) membership proofs replacing the flat mapping',
-      'WebSocket live vault feed: real-time BetAuthorized and SettlementCredited event streaming',
-      'Expand to other ecosystems: Solana, Cosmos, Polkadot — modular vault architecture with chain-specific adapters',
+      'Signing Layer v2: AWS Nitro Enclave — the vault EOA key never leaves the enclave boundary',
+      'Remote attestation endpoint + on-chain attestation gate: the Vault accepts bets only from an attested, unmodified signer',
+      'Multi-EOA rotation: recover from a Polymarket ban without disrupting the commitment tree',
+      'Withdrawal timing posture (Standard / Fast / Paranoid) and an onion-routed relay to resist IP/timing correlation',
+      'Fee governance transition: move fee parameters to an on-chain governance contract',
     ],
   },
   {
     id: 'P5',
-    label: 'Multi-market · 2028',
-    title: 'Prediction Market Expansion',
+    label: 'Multi-chain & Scaling · research',
+    title: 'Cross-Chain Deposits & Proof Scaling',
     status: 'RESEARCH',
     items: [
-      'Expand beyond Polymarket: integrate additional prediction market protocols',
-      'Abstracted market interface: generic signing layer adapter for any CLOB-based prediction market',
-      'Compliant withdrawal mode: selective disclosure ZK proof for regulatory transparency',
+      'Multi-chain deposits: accept USDC from Ethereum, Base, and Arbitrum into the Polygon vault via a canonical/lock-and-mint bridge',
+      'SMT-based nullifier registry: O(log n) membership proofs replacing the flat mapping',
+      'Recursive proofs: aggregate multiple bet authorizations into a single on-chain proof',
+      'WebSocket live vault feed; native-speed mobile WASM prover',
+      'Expand beyond Polymarket via a generic CLOB adapter; optional compliant selective-disclosure withdrawal mode',
     ],
   },
   {
     id: 'P6',
-    label: '2029+',
-    title: 'Cryptography Frontier',
+    label: 'Cryptography Frontier · research',
+    title: 'Post-Quantum & FHE',
     status: 'RESEARCH',
     sections: [
       {
         sectionTitle: 'Post-Quantum ZKP Research',
         items: [
           'Research lattice-based and hash-based ZK proof systems resistant to quantum adversaries',
-          'Evaluate STARKs and other post-quantum-friendly transparent proof systems as long-term replacements',
-          'Assess migration path from BN254-based Groth16 to a post-quantum ZK backend',
-          'Contribute to open ZK standards for quantum-resistant commitment schemes',
+          'Evaluate STARKs and other transparent, post-quantum-friendly proof systems',
+          'Assess a migration path from BN254-based Groth16 to a post-quantum ZK backend',
         ],
       },
       {
         sectionTitle: 'Next-Generation Proving',
         items: [
-          'Recursive proofs: aggregate multiple bet authorizations in a single on-chain proof',
           'ZK coprocessor integration: offload proof verification gas to a dedicated coprocessor network',
-          'Mobile WASM prover: native-speed proof generation on iOS and Android',
           'Proof marketplace: permissionless GPU operators compete to generate proofs for users',
         ],
       },
       {
         sectionTitle: 'Fully Homomorphic Encryption Research',
         items: [
-          'Research FHE primitives for private smart contract state: vault balances and positions computed without decryption',
-          'Evaluate FHE-ZK hybrid architectures — FHE for state confidentiality, ZK for state transition validity',
+          'Research FHE primitives for private vault state computed without decryption',
+          'Evaluate FHE-ZK hybrids — FHE for state confidentiality, ZK for transition validity',
           'Assess FHE-based private order matching as an alternative to the CLOB-proxy architecture',
-          'Contribute to FHE standards and tooling for EVM and non-EVM blockchain applications',
         ],
       },
     ],
@@ -132,6 +120,7 @@ const PHASES: Phase[] = [
 ]
 
 const STATUS_COLOR: Record<string, string> = {
+  SHIPPED: 'var(--green)',
   'IN PROGRESS': 'var(--amber)',
   PLANNED: 'var(--cyan)',
   RESEARCH: 'var(--violet)',
@@ -143,7 +132,7 @@ export default function RoadmapPage() {
       <div className="micro" style={{ color: 'var(--cyan)' }}>ROADMAP</div>
       <h1 className="h2 mt-3" style={{ margin: 0 }}>Building privacy infrastructure for prediction markets.</h1>
       <p className="body mt-4" style={{ maxWidth: 600 }}>
-        Six phases from working prototype to cryptography frontier. Each phase is independently useful while enabling the next.
+        Six phases from working prototype to cryptography frontier. The core protocol, the full order/fee/recovery stack, and live Polymarket integration are <strong style={{ color: 'var(--green)' }}>shipped and running on Polygon mainnet</strong> — the remaining phases harden, decentralize, and scale it.
       </p>
 
       <div className="col mt-12 gap-6" style={{ marginTop: 48 }}>

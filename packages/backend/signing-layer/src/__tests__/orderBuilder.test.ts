@@ -6,9 +6,9 @@
 
 import { ethers } from "ethers";
 
-// Prevent real env var reads. JIT funding reads pusdAddress + depositWalletAddress;
+// Prevent real env var reads. JIT funding reads pusdAddress + depositWalletAddress + onrampAddress;
 // the mocked pUSD balanceOf below returns a large balance so funding short-circuits
-// via the residual-buffer path (no fundPolymarketWallet call).
+// via the residual-buffer path (no fundPolymarketWallet / wrap call).
 jest.mock("../config", () => ({
   config: {
     vaultEoaPrivateKey: "0x" + "a".repeat(64),
@@ -19,6 +19,8 @@ jest.mock("../config", () => ({
     vaultContractAddress: "0x" + "b".repeat(40),
     signingLayerOperatorAddress: "0x" + "c".repeat(40),
     pusdAddress: "0x" + "d".repeat(40),
+    usdcAddress: "0x" + "f".repeat(40),
+    onrampAddress: "0x" + "a".repeat(40),
     depositWalletAddress: "0x" + "e".repeat(40),
   },
 }));
@@ -88,11 +90,17 @@ describe("submitFOKOrder (mock CLOB path)", () => {
   let attestationStore: any;
   let fokStatus: string;
   let lastOrderBody: Record<string, unknown> | undefined;
+  // L3: when set, the mock CLOB response carries explicit fill amounts (the fok_downsize knob),
+  // so submitFOKOrder attests the ACTUAL fill rather than assuming a full fill.
+  let fokFilled: number | undefined;
+  let fokSpent: number | undefined;
 
   beforeEach(() => {
     jest.clearAllMocks();
     process.env.POLY_API_URL = "http://localhost:3001"; // forces mock-mode fetch path
     lastOrderBody = undefined;
+    fokFilled = undefined;
+    fokSpent = undefined;
 
     // eslint-disable-next-line @typescript-eslint/no-var-requires
     attestationStore = require("../attestationStore");
@@ -111,7 +119,13 @@ describe("submitFOKOrder (mock CLOB path)", () => {
       return {
         ok: true,
         status: 200,
-        json: async () => ({ success: fokStatus === "matched", status: fokStatus, orderID: "0xorder1", transactTime: "t" }),
+        json: async () => ({
+          success: fokStatus === "matched",
+          status: fokStatus,
+          orderID: "0xorder1",
+          transactTime: "t",
+          ...(fokFilled !== undefined ? { filledShares: fokFilled, spentAmount: fokSpent } : {}),
+        }),
       } as unknown as Response;
     }) as unknown as typeof fetch;
   });
@@ -130,6 +144,18 @@ describe("submitFOKOrder (mock CLOB path)", () => {
       expect.anything(),
       expect.anything(),
       { nullifierOfBet: event.nullifier, reportType: ReportType.FILLED, amountA: 0n, amountB: 0n },
+    );
+  });
+
+  it("attests PARTIAL with actuals when a matched FOK was downsized below expected (L3)", async () => {
+    fokStatus = "matched";
+    fokFilled = 120_000_000; // < expected_shares (200e6) → short fill
+    fokSpent = 60_000_000;
+    await run();
+    expect(attestationStore.signAndStoreAttestation).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.anything(),
+      { nullifierOfBet: event.nullifier, reportType: ReportType.PARTIAL, amountA: 120_000_000n, amountB: 60_000_000n },
     );
   });
 

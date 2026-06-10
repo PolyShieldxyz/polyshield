@@ -1,0 +1,12 @@
+# Keep the build context small and never ship secrets/state into an image.
+**/node_modules
+**/dist
+**/.env
+**/.env.*
+**/__tests__
+**/*.test.ts
+**/*.db
+data
+mock-clob-server
+mock-env
+.git

@@ -39,8 +39,14 @@ contract MockCTF is ICTF {
         _balances[id][account] += amount;
     }
 
-    function payoutNumerators(bytes32 conditionId) external view returns (uint256[] memory) {
-        return _numerators[conditionId];
+    /// @notice Element accessor matching the real Gnosis CTF's `mapping(bytes32 => uint256[])` getter.
+    /// (The setter `setPayoutNumerators` still takes the full array for test/mock convenience.)
+    function payoutNumerators(bytes32 conditionId, uint256 index) external view returns (uint256) {
+        return _numerators[conditionId][index];
+    }
+
+    function getOutcomeSlotCount(bytes32 conditionId) external view returns (uint256) {
+        return _numerators[conditionId].length;
     }
 
     function payoutDenominator(bytes32 conditionId) external view returns (uint256) {

@@ -1,0 +1,109 @@
+name: polyshield
+
+# Single-host deployment: Caddy terminates HTTPS and is the ONLY service with published
+# ports. Everything else talks over the private `internal` network by service name and is
+# unreachable from the internet (no ports: published => not exposed to the host either).
+#
+#   internet --443/80--> caddy --> frontend:3000
+#                                     |-- /api/relay/*     -> proof-relay:3002
+#                                     |-- /api/signing/*   -> signing-layer:3004  (vault key)
+#                                     |-- /api/settlement/*-> indexer:3003
+
+networks:
+  internal:
+    driver: bridge
+
+volumes:
+  indexer_data:     # persistent: indexer SQLite (settlement records). DO NOT lose.
+  signing_data:     # persistent: signing-layer settlement.db (attestations). DO NOT lose.
+  proofrelay_data:  # persistent: proof-relay merkle cache (rebuildable from chain — safe to lose, just slower cold start).
+  caddy_data:       # persistent: Let's Encrypt certs/account. Losing it re-issues certs.
+  caddy_config:
+
+services:
+  caddy:
+    image: caddy:2
+    restart: unless-stopped
+    ports:
+      - "80:80"     # required for the ACME HTTP-01 challenge
+      - "443:443"
+    environment:
+      - SSLIP_HOST=${SSLIP_HOST}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    networks: [internal]
+    depends_on: [frontend]
+
+  frontend:
+    build:
+      context: ../packages/frontend
+      dockerfile: Dockerfile
+      args:
+        # NEXT_PUBLIC_* are baked into the bundle at build time (from deploy/.env).
+        NEXT_PUBLIC_CHAIN_ID: ${NEXT_PUBLIC_CHAIN_ID}
+        NEXT_PUBLIC_CHAIN_RPC: ${NEXT_PUBLIC_CHAIN_RPC}
+        NEXT_PUBLIC_POLYGON_RPC: ${NEXT_PUBLIC_POLYGON_RPC}
+        NEXT_PUBLIC_VAULT_ADDRESS: ${NEXT_PUBLIC_VAULT_ADDRESS}
+        NEXT_PUBLIC_USDC_ADDRESS: ${NEXT_PUBLIC_USDC_ADDRESS}
+        NEXT_PUBLIC_WC_PROJECT_ID: ${NEXT_PUBLIC_WC_PROJECT_ID}
+        NEXT_PUBLIC_DEV_MODE: ${NEXT_PUBLIC_DEV_MODE:-false}
+        NEXT_PUBLIC_VAULT_DEPLOY_BLOCK: ${NEXT_PUBLIC_VAULT_DEPLOY_BLOCK}
+    restart: unless-stopped
+    env_file:
+      - ./env/frontend.env       # server-only: OPERATOR_API_TOKEN (must match signing-layer)
+    environment:
+      - NODE_ENV=production
+      # Server-side proxy targets — private compose-network DNS names.
+      - PROOF_RELAY_URL=http://proof-relay:3002
+      - SIGNING_LAYER_URL=http://signing-layer:3004
+      - INDEXER_URL=http://indexer:3003
+    networks: [internal]
+    depends_on: [proof-relay, indexer, signing-layer]
+
+  proof-relay:
+    build:
+      context: ../packages/backend
+      dockerfile: proof-relay/Dockerfile
+    restart: unless-stopped
+    env_file:
+      - ./env/common.env         # RPC + contract addresses (shared)
+      - ./env/proof-relay.env    # RELAYER_PRIVATE_KEY (secret)
+    environment:
+      - PROOF_RELAY_DB_PATH=/data/merkle.db   # backend merkle read-cache (persists across restarts)
+    volumes:
+      - proofrelay_data:/data
+    networks: [internal]
+
+  indexer:
+    build:
+      context: ../packages/backend
+      dockerfile: indexer/Dockerfile
+    restart: unless-stopped
+    env_file:
+      - ./env/common.env
+    environment:
+      - INDEXER_DB_PATH=/data/polyshield.db
+    volumes:
+      - indexer_data:/data
+    networks: [internal]
+
+  signing-layer:
+    build:
+      context: ../packages/backend
+      dockerfile: signing-layer/Dockerfile
+    # NOT unless-stopped: the dead-man circuit breaker halts via process.exit(1) on a
+    # Polymarket 403 / ACCOUNT_FLAGGED. With auto-restart the container would resurrect and
+    # resume signing against a banned account. on-failure:2 allows recovery from transient
+    # crashes but stops resurrecting after repeated exits — a tripped breaker stays DOWN
+    # until a human investigates. See README "Circuit breaker".
+    restart: on-failure:2
+    env_file:
+      - ./env/common.env
+      - ./env/signing-layer.env  # VAULT KEY + Polymarket creds + OPERATOR_API_TOKEN (secret)
+    environment:
+      - SETTLEMENT_DB_PATH=/data/settlement.db
+    volumes:
+      - signing_data:/data
+    networks: [internal]

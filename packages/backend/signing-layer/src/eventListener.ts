@@ -2,13 +2,40 @@ import fs from "fs";
 import path from "path";
 import { ethers } from "ethers";
 import pino from "pino";
-import { submitFOKOrder, submitLimitOrder, submitFAKOrder } from "./orderBuilder";
+import { submitLimitOrder, submitFAKOrder } from "./orderBuilder";
 import { getLimitOrder } from "./limitOrderStore";
 import { getAttestation } from "./attestationStore";
+import { isOrderTracked } from "./wsFillTracker";
+import { resolveToken, marketMetaForKey } from "./marketRegistry";
+import { upsertTrackedMarket } from "./trackedMarkets";
+import { queryFilterChunked } from "./logScan";
 import { config } from "./config";
 
-const STATE_FILE = path.join(process.cwd(), "data", "event-listener-state.json");
+// Persist the scan cursor in the DATA VOLUME (next to settlement.db) so a container recreate doesn't
+// reset it to 0 and re-scan the whole history from the deploy block. Falls back to ./data locally.
+const STATE_FILE = process.env.EVENT_LISTENER_STATE_FILE
+  ?? (process.env.SETTLEMENT_DB_PATH
+    ? path.join(path.dirname(process.env.SETTLEMENT_DB_PATH), "event-listener-state.json")
+    : path.join(process.cwd(), "data", "event-listener-state.json"));
 const SAFETY_BUFFER = 100;
+// Cold-start floor for the BetAuthorized scan. A public RPC (publicnode) rejects a
+// fromBlock:0→latest getLogs over millions of blocks, so never scan below the vault's deploy
+// block. Falls back to TREE_DEPLOY_BLOCK (same Deploy.s.sol run) when VAULT_DEPLOY_BLOCK unset.
+const DEPLOY_BLOCK = Number(process.env.VAULT_DEPLOY_BLOCK ?? process.env.TREE_DEPLOY_BLOCK ?? "0");
+// Poll cadence for the BetAuthorized scan. publicnode has no eth_newFilter/getFilterChanges
+// support (a live `vault.on` subscription dies with "filter not found"), so we poll getLogs.
+const EVENT_POLL_MS = Number(process.env.EVENT_POLL_MS ?? "15000");
+// Blocks per scan WINDOW for the catch-up. The cursor is persisted after each window so an
+// interrupted long scan (the one-time historical catch-up on a tiny-getLogs-limit RPC) resumes
+// instead of restarting from the deploy block.
+const SCAN_WINDOW = Number(process.env.LOG_SCAN_WINDOW ?? "5000");
+// Nullifiers whose processing we've already STARTED this process-lifetime. Prevents the
+// poller from re-submitting an order (especially a resting GTC/GTD that has no terminal
+// attestation yet) on a subsequent tick before its attestation lands.
+const inFlight = new Set<string>();
+
+// queryFilterChunked now lives in logScan.ts — rate-limit-aware (backs off on a 429 instead of
+// halving, which on a metered RPC like Alchemy would only multiply the requests).
 
 function loadLastBlock(): number {
   try {
@@ -36,6 +63,7 @@ async function processBetEvent(
   nullifier: string,
   market_id: string,
   position_id: string,
+  outcome_side: number,
   expected_shares: bigint,
   bet_amount: bigint,
   price: bigint,
@@ -43,11 +71,55 @@ async function processBetEvent(
   wallet: ethers.Wallet,
   provider: ethers.JsonRpcProvider
 ): Promise<void> {
-  const orderEvent = { nullifier, market_id, position_id, expected_shares, bet_amount, price, new_commitment };
+  // Swap the on-chain (field-safe market_id, synthetic position_id) for the REAL Polymarket
+  // conditionId + tokenId so the CLOB order targets a live market. In mock mode (registry
+  // empty) this falls through to the on-chain ids, preserving the existing mock path.
+  let realTokenId = position_id;
+  let realConditionId = market_id;
+  try {
+    const resolved = resolveToken(market_id, outcome_side);
+    if (resolved) {
+      realTokenId = resolved.tokenId;
+      realConditionId = resolved.conditionId;
+      logger.info(
+        { nullifier, market_id, outcome_side, tokenId: resolved.tokenId },
+        "resolved real Polymarket token for bet"
+      );
+    } else {
+      logger.warn(
+        { nullifier, market_id, outcome_side },
+        "market not in registry — using on-chain ids (order may fail on a real CLOB; recoverable via cancellation credit)"
+      );
+    }
+  } catch (err) {
+    logger.warn({ err, nullifier }, "resolveToken threw — using on-chain ids");
+  }
 
-  // FC-4: if the frontend registered an order-type intent for this nullifier, route
-  // accordingly: FAK (fill-and-kill market order) or a resting GTC/GTD limit order.
-  // Otherwise default to FOK (unchanged behavior).
+  // Persist this market so the settlement poll can resolve it later WITHOUT a historical BetAuthorized
+  // log scan (which a pruned RPC refuses with "History has been pruned"). The BetAuthorized log is
+  // readable right now (it just landed), so we capture market_id → real conditionId here while we can.
+  // Best-effort — a failure must never block order submission.
+  try {
+    const meta = marketMetaForKey(market_id);
+    upsertTrackedMarket(market_id, realConditionId, meta?.endDate ?? null);
+  } catch (err) {
+    logger.warn({ err, nullifier, market_id }, "failed to persist tracked market (settlement poll may miss it)");
+  }
+
+  const orderEvent = {
+    nullifier,
+    market_id: realConditionId,
+    position_id: realTokenId,
+    expected_shares,
+    bet_amount,
+    price,
+    new_commitment,
+  };
+
+  // If the frontend registered an order-type intent for this nullifier, route accordingly: a
+  // resting GTC/GTD limit order (or an explicit FAK, kept as a defensive route). Otherwise default
+  // to FAK — the frontend's "Market order": fills what the book offers now, refund the remainder via
+  // L3. (submitFOKOrder remains as a legacy primitive but is no longer on the live path.)
   const intent = getLimitOrder(nullifier);
   if (intent) {
     logger.info({ nullifier, order_type: intent.order_type }, "order-type intent found — routing");
@@ -59,7 +131,7 @@ async function processBetEvent(
     return;
   }
 
-  await submitFOKOrder(orderEvent, wallet, provider);
+  await submitFAKOrder(orderEvent, wallet, provider);
 }
 
 /**
@@ -81,17 +153,21 @@ async function catchUpMissedBets(
     const currentBlock = await provider.getBlockNumber();
     const rawLastBlock = loadLastBlock();
     const lastBlock = Math.min(Math.max(0, Number(rawLastBlock) || 0), currentBlock);
-    const fromBlock = Math.max(0, lastBlock - SAFETY_BUFFER);
+    // Floor at the deploy block so a fresh cursor (lastBlock 0) doesn't scan from genesis.
+    const fromBlock = Math.max(DEPLOY_BLOCK, lastBlock - SAFETY_BUFFER);
     logger.info({ fromBlock, lastBlock, currentBlock, rawLastBlock }, "event-listener: catchup scan range");
 
     const filter = vault.filters.BetAuthorized();
-    const logs = await vault.queryFilter(filter, fromBlock, "latest");
-    logger.info({ count: logs.length }, "event-listener: historical BetAuthorized events found");
+    // Scan in WINDOWs, persisting the cursor after each, so an interrupted long catch-up (the one-time
+    // historical scan on a tiny-getLogs-limit RPC like Alchemy free) RESUMES from the last window
+    // instead of restarting from the deploy block (which would re-burn the whole scan + RPC budget).
+    let cursor = fromBlock;
+    while (cursor <= currentBlock) {
+      const windowEnd = Math.min(cursor + SCAN_WINDOW - 1, currentBlock);
+      const logs = await queryFilterChunked(vault, filter, cursor, windowEnd);
+      if (logs.length) logger.info({ count: logs.length, from: cursor, to: windowEnd }, "event-listener: historical BetAuthorized events found");
 
-    let maxBlock = lastBlock;
-    for (const log of logs) {
-      if (log.blockNumber > maxBlock) maxBlock = log.blockNumber;
-
+      for (const log of logs) {
       const parsed = vault.interface.parseLog({ topics: log.topics as string[], data: log.data });
       if (!parsed) continue;
 
@@ -103,6 +179,12 @@ async function catchUpMissedBets(
         // a persisted attestation means the order already reached a terminal state,
         // so re-submitting would double-place on the CLOB.
         if (getAttestation(nullifier)) continue;
+        // Within-process dedup: don't re-submit a bet we've already started handling on a
+        // prior tick (its terminal attestation may not be written yet, e.g. a resting order).
+        if (inFlight.has(nullifier)) continue;
+        // Don't re-submit a resting GTC/GTD limit order that's already tracked (it has no
+        // terminal attestation yet, so the checks above wouldn't catch it) — would double-place.
+        if (isOrderTracked(nullifier)) continue;
 
         // Skip bets that don't exist on-chain (e.g. reverted tx). The bet record's
         // market_id is bytes32(0) when no record was written.
@@ -110,11 +192,13 @@ async function catchUpMissedBets(
         const market_id = rec[0] as string;
         if (!market_id || market_id === ethers.ZeroHash) continue;
 
-        logger.warn({ nullifier }, "event-listener: found un-attested bet from missed event — reprocessing");
+        inFlight.add(nullifier); // mark before submitting; kept on error to avoid double-submit
+        logger.warn({ nullifier }, "event-listener: found un-attested bet — processing");
         await processBetEvent(
           nullifier,
           parsed.args[1] as string,   // market_id
           parsed.args[2] as string,   // position_id
+          Number(parsed.args[6]),     // outcome_side
           parsed.args[3] as bigint,   // expected_shares
           parsed.args[4] as bigint,   // bet_amount
           parsed.args[5] as bigint,   // price
@@ -125,9 +209,14 @@ async function catchUpMissedBets(
       } catch (err) {
         logger.error({ err, nullifier }, "event-listener: catchup failed for bet");
       }
+      }
+      // Persist progress per WINDOW (the SCANNED HEAD of this window, not the last event's block).
+      // If a later window throws (a rate-limit propagated after the provider's retries), the cursor is
+      // already saved up to here, so the next tick / a restart resumes instead of re-scanning from the
+      // deploy block — which is what previously re-burned the whole range every 15s and saturated the RPC.
+      saveLastBlock(windowEnd);
+      cursor = windowEnd + 1;
     }
-
-    if (maxBlock > lastBlock) saveLastBlock(maxBlock);
   } catch (err) {
     logger.error({ err }, "event-listener: catchup scan failed");
   }
@@ -139,41 +228,28 @@ export function startEventListener(
 ): void {
   const vault = new ethers.Contract(config.vaultContractAddress, VAULT_ABI, provider);
 
-  // Catch up any ACTIVE bets that were placed before this process started
-  void catchUpMissedBets(vault, wallet, provider);
-
-  vault.on(
-    "BetAuthorized",
-    async (
-      nullifier: string,
-      market_id: string,
-      position_id: string,
-      expected_shares: bigint,
-      bet_amount: bigint,
-      price: bigint,
-      outcome_side: number,
-      new_commitment: string,
-      event: ethers.ContractEventPayload
-    ) => {
-      try {
-        // Wait for at least 1 confirmation before submitting the CLOB order
-        const receipt = await provider.waitForTransaction(event.log.transactionHash, 1);
-        if (!receipt || receipt.status !== 1) {
-          logger.warn({ nullifier, txHash: event.log.transactionHash }, "BetAuthorized tx failed — skipping");
-          return;
-        }
-
-        logger.info({ nullifier, market_id, position_id, bet_amount: bet_amount.toString() }, "BetAuthorized confirmed");
-
-        // The Signing Layer reads public event data only.
-        // User note preimage (secret, balance, nonce) is never received here.
-        await processBetEvent(nullifier, market_id, position_id, expected_shares, bet_amount, price, new_commitment, wallet, provider);
-        saveLastBlock(event.log.blockNumber);
-      } catch (err) {
-        logger.error({ err, nullifier }, "Failed to process BetAuthorized event");
-      }
+  // publicnode (and most public RPCs) do not support eth_newFilter/getFilterChanges, so a
+  // live `vault.on("BetAuthorized")` subscription silently dies ("filter not found") and no
+  // orders are ever submitted. Instead we POLL via queryFilter (getLogs) on an interval.
+  // catchUpMissedBets is idempotent (attestation store + in-flight set + on-chain bet-record
+  // check), and queryFilter only returns mined logs (≥1 confirmation), so polling both
+  // catches up missed bets and handles new ones. A re-entrancy guard prevents overlapping scans.
+  let scanning = false;
+  const tick = async () => {
+    if (scanning) return;
+    scanning = true;
+    try {
+      await catchUpMissedBets(vault, wallet, provider);
+    } finally {
+      scanning = false;
     }
-  );
+  };
 
-  logger.info({ vault: config.vaultContractAddress }, "Listening for BetAuthorized events");
+  void tick(); // initial scan immediately
+  setInterval(() => void tick(), EVENT_POLL_MS);
+
+  logger.info(
+    { vault: config.vaultContractAddress, pollMs: EVENT_POLL_MS },
+    "Polling for BetAuthorized events (getLogs; public RPC has no filter support)",
+  );
 }

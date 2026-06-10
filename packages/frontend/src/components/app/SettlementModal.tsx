@@ -68,7 +68,12 @@ export function SettlementModal({
     setLastCreditNote(null)
     setError(null)
     void import('@/lib/prover').then(({ initProver }) => initProver())
-  }, [open, readyBets])
+    // Run ONLY when the modal opens — NOT when readyBets changes. readyBets gets a fresh array
+    // reference on every 15–60s portfolio poll; including it here reset the modal to 'select'
+    // mid-proof-generation (wiping the "generating proof" UI and overwriting any 'error' before it
+    // could be seen) — i.e. the settle flow "disappeared with no error".
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open])
 
   useEffect(() => {
     if (phase !== 'done') return

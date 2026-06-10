@@ -26,9 +26,10 @@ import { consolidateNotes } from '@/lib/consolidate'
 import { fetchMerklePath, relayBet, requestLimitOrder, waitForTransactionConfirmation } from '@/lib/api'
 import { generateProofInWorker } from '@/lib/prover'
 import { log, proofSummary } from '@/lib/logger'
+import { marketBuyCeilingFromBook, roundToTick, type BookLevel } from '@/lib/pricing'
+import { type OrderKind, ORDER_KIND_LABEL } from '@/lib/orderType'
 
 type Phase = 'edit' | 'running' | 'success' | 'error'
-type OrderType = 'FOK' | 'FAK' | 'GTC' | 'GTD'
 const VAULT_ADDRESS = (process.env.NEXT_PUBLIC_VAULT_ADDRESS ??
   '0x0000000000000000000000000000000000000000') as `0x${string}`
 
@@ -38,21 +39,24 @@ interface BetModalProps {
   marketName: string
   conditionId: `0x${string}`
   side: 'YES' | 'NO'
+  // Display label for the chosen side ("UP"/"DOWN" for Up/Down markets, else "YES"/"NO").
+  // Display-only — `side` still drives the circuit's outcome_side (0/1).
+  sideLabel?: string
   initialAmount: number
   price: number
-  // FC-4: order type is chosen on the market page and passed in (read-only here).
-  orderType: OrderType
+  // L1: CLOB tick size + best executable ask for the selected side (from the market payload).
+  // A Market order commits a tick-snapped ceiling derived from the book depth; absent → tick 0.001.
+  tickSize?: number
+  bestAsk?: number
+  // Executable ask ladder for the selected side (ascending), walked to derive the market ceiling.
+  levels: BookLevel[]
+  // Order type is chosen on the market page and passed in (read-only here).
+  orderKind: OrderKind
   limitCents: number
+  expiryEnabled: boolean
   gtdMinutes: number
   onClose: () => void
   onSuccess?: () => void | Promise<void>
-}
-
-const ORDER_TYPE_LABEL: Record<OrderType, string> = {
-  FOK: 'Fill-or-kill',
-  FAK: 'Fill-and-kill',
-  GTC: 'Limit (GTC)',
-  GTD: 'Limit (GTD)',
 }
 
 function parseUsdcToMicro(value: string): bigint | null {
@@ -63,6 +67,14 @@ function parseUsdcToMicro(value: string): bigint | null {
   const whole = wholeRaw.length === 0 ? 0n : BigInt(wholeRaw)
   const frac = BigInt((fracRaw + '000000').slice(0, 6))
   return whole * 1_000_000n + frac
+}
+
+// Dollars (may include cents, e.g. 2.5) → micro-USDC. initialAmount arrives as a JS number
+// from the market page; BigInt(2.5) throws ("not an integer"), so round to micro first. This
+// was the bug that rejected fractional bet amounts like $2.50.
+function dollarsToMicro(dollars: number): bigint {
+  if (!Number.isFinite(dollars) || dollars <= 0) return 0n
+  return BigInt(Math.round(dollars * 1_000_000))
 }
 
 function formatUsdcInput(micro: bigint): string {
@@ -78,17 +90,22 @@ export function BetModal({
   marketName,
   conditionId,
   side,
+  sideLabel,
   initialAmount,
   price,
-  orderType,
+  tickSize,
+  bestAsk,
+  levels,
+  orderKind,
   limitCents,
+  expiryEnabled,
   gtdMinutes,
   onClose,
   onSuccess,
 }: BetModalProps) {
   const { address } = useAccount()
   const { signMessageAsync } = useSignMessage()
-  const [amountInput, setAmountInput] = useState(formatUsdcInput(BigInt(initialAmount) * 1_000_000n))
+  const [amountInput, setAmountInput] = useState(formatUsdcInput(dollarsToMicro(initialAmount)))
   const [phase, setPhase] = useState<Phase>('edit')
   const [error, setError] = useState<string | null>(null)
   const [txHash, setTxHash] = useState('')
@@ -99,12 +116,12 @@ export function BetModal({
   // FINDING: FUNC-001 — set when the worker fails and the prover falls back to the
   // main thread (polyshield:prover-fallback event), so we can tell the user.
   const [fallbackNote, setFallbackNote] = useState<string | null>(null)
-  // FC-4: advanced order types (orderType / limitCents / gtdMinutes) are now selected on
-  // the market page and arrive as props; this modal only displays and submits them.
+  // Order type (orderKind / limitCents / expiryEnabled / gtdMinutes) is selected on the market
+  // page and arrives as props; this modal only displays and submits it.
 
   useEffect(() => {
     if (!open) return
-    setAmountInput(formatUsdcInput(BigInt(initialAmount) * 1_000_000n))
+    setAmountInput(formatUsdcInput(dollarsToMicro(initialAmount)))
     setPhase('edit')
     setError(null)
     setTxHash('')
@@ -147,19 +164,26 @@ export function BetModal({
     return () => window.removeEventListener('polyshield:prover-fallback', onFallback)
   }, [])
 
-  // FOK fills at the market price; a limit order fills at most at the user's tick-snapped
-  // limit price (cents). The bet_auth proof is built at this effective price.
-  const effectivePrice = useMemo(
-    // FOK and FAK are market orders (use the live market price); GTC/GTD rest at the
-    // user's limit price.
-    () => (orderType === 'FOK' || orderType === 'FAK' ? price : limitCents / 100),
-    [orderType, price, limitCents],
-  )
   const amountMicro = useMemo(() => parseUsdcToMicro(amountInput), [amountInput])
+  // L1: the bet_auth proof commits this price. A Market BUY commits a tick-snapped CEILING from
+  // walking the book (worst price the stake would touch + slippage pad) so the executed fill is
+  // at-or-better and committed expected_shares is a guaranteed MINIMUM (surplus → pool, FC-4 Q4);
+  // L3 reconciliation then rarely fires. A Limit order rests at the user's tick-snapped limit price.
+  const effectivePrice = useMemo(() => {
+    if (orderKind === 'MARKET') {
+      const notionalUsd = amountMicro ? Number(amountMicro) / 1e6 : 0
+      return marketBuyCeilingFromBook(levels, notionalUsd, tickSize, bestAsk ?? price)
+    }
+    return roundToTick(limitCents / 100, tickSize)
+  }, [orderKind, price, bestAsk, tickSize, limitCents, levels, amountMicro])
   const shares = useMemo(() => {
     if (!amountMicro || effectivePrice <= 0) return 0n
     return (amountMicro * 100_000_000n) / BigInt(Math.round(effectivePrice * 100_000_000))
   }, [amountMicro, effectivePrice])
+  // Polymarket rejects orders below 5 shares ("Size lower than the minimum: 5"). shares is
+  // 1e6-scaled, so the floor is 5e6. Block here so the user isn't surprised by a failed order.
+  const MIN_SHARES = 5_000_000n
+  const belowMinShares = shares > 0n && shares < MIN_SHARES
 
   // FEE: read the governance fee config so the client computes the SAME Vault-injected fee it
   // must commit to in the bet_auth proof (fee = bet_amount*betFeeBps/10000 + relayGasFeeUSDC).
@@ -211,6 +235,14 @@ export function BetModal({
     if (amountMicro < minBet) {
       setPhase('error')
       setError(`Minimum bet is $${formatUsdc(minBet)} (Polymarket rejects smaller orders).`)
+      return
+    }
+    if (shares < MIN_SHARES) {
+      setPhase('error')
+      setError(
+        `Polymarket's minimum order is 5 shares — this bet is only ${(Number(shares) / 1e6).toFixed(2)}. ` +
+        `Increase the amount (≈$${(5 * effectivePrice).toFixed(2)} or more at this price).`,
+      )
       return
     }
     let cashNote = getCurrentCashNote(address)
@@ -334,17 +366,18 @@ export function BetModal({
         marketName,
         ...proofSummary(proof),
         stake: stake.toString(),
-        orderType,
+        orderKind,
       })
 
-      // FC-4: register the limit-order intent BEFORE relaying so it is stored when
-      // the BetAuthorized event fires (the signing layer reads it to submit a resting
-      // GTC/GTD order instead of the default FOK). Keyed by nullifier_of_bet.
-      if (orderType !== 'FOK') {
+      // Register a Limit-order intent BEFORE relaying so it is stored when the BetAuthorized event
+      // fires (the signing layer reads it to submit a resting GTC/GTD order). A Market order
+      // registers no intent and falls through to the signing layer's default FAK route. Keyed by
+      // nullifier_of_bet; expiryEnabled → GTD with the chosen lifetime, otherwise GTC.
+      if (orderKind === 'LIMIT') {
         await requestLimitOrder({
           nullifier_of_bet: nullifierHex,
-          order_type: orderType,
-          expiration: orderType === 'GTD' ? gtdMinutes * 60 : undefined,
+          order_type: expiryEnabled ? 'GTD' : 'GTC',
+          expiration: expiryEnabled ? gtdMinutes * 60 : undefined,
         })
       }
 
@@ -436,9 +469,9 @@ export function BetModal({
         <div className="col gap-4">
           <div className="panel" style={{ padding: 16 }}>
             <KV l="Market" v={marketName} />
-            <KV l="Side" v={side} />
+            <KV l="Side" v={sideLabel ?? side} />
             <KV l="Amount" v={`$${formatUsdc(amountMicro ?? 0n)} USDC`} />
-            <KV l="Estimated shares" v={shares.toString()} />
+            <KV l={orderKind === 'MARKET' ? 'Minimum shares' : 'Estimated shares'} v={shares.toString()} />
             <KV
               l={`Protocol fee${betFeeBps > 0n ? ` (${(Number(betFeeBps) / 100).toFixed(2)}%)` : ''}`}
               v={`$${formatUsdc(fee)} USDC`}
@@ -464,7 +497,7 @@ export function BetModal({
                   fontSize: 15,
                 }}
               />
-              <button className="btn" onClick={() => setAmountInput(formatUsdcInput(BigInt(initialAmount) * 1_000_000n))}>
+              <button className="btn" onClick={() => setAmountInput(formatUsdcInput(dollarsToMicro(initialAmount)))}>
                 Reset
               </button>
             </div>
@@ -478,28 +511,31 @@ export function BetModal({
                 Amount + ${formatUsdc(fee)} fee exceeds your balance. Max bettable is ${formatUsdc(maxBettable)}.
               </div>
             )}
+            {!belowMinBet && !exceedsBalance && belowMinShares && (
+              <div className="small mt-1" style={{ color: 'var(--red)', fontSize: 11 }}>
+                Polymarket minimum is 5 shares (this is {(Number(shares) / 1e6).toFixed(2)}). Bet ≈${(5 * effectivePrice).toFixed(2)}+ at this price.
+              </div>
+            )}
           </div>
           {/* Order type is chosen on the market page; shown here read-only for confirmation. */}
           <div className="col gap-2">
             <div className="row gap-2" style={{ alignItems: 'center' }}>
               <div className="micro">ORDER TYPE</div>
-              <span className="pill pill-soft" style={{ fontSize: 9 }}>ADVANCED</span>
             </div>
             <div className="panel" style={{ padding: 12 }}>
-              <KV l="Type" v={ORDER_TYPE_LABEL[orderType]} />
-              {(orderType === 'GTC' || orderType === 'GTD') && (
+              <KV l="Type" v={ORDER_KIND_LABEL[orderKind]} />
+              {orderKind === 'LIMIT' && (
                 <KV l="Limit price" v={`${limitCents}¢ ($${(limitCents / 100).toFixed(2)}/share)`} />
               )}
-              {orderType === 'GTD' && <KV l="Expires in" v={`${gtdMinutes} min`} />}
+              {orderKind === 'LIMIT' && expiryEnabled && <KV l="Expires in" v={`${gtdMinutes} min`} />}
             </div>
-            {(orderType === 'GTC' || orderType === 'GTD') && (
+            {orderKind === 'LIMIT' ? (
               <div className="small" style={{ fontSize: 11, color: 'var(--text-3)' }}>
-                Rests on the book; the full stake is held until it fills, expires, or partially fills (then reclaim the remainder).
+                Rests on the book at your limit price; the full stake is held until it fills, {expiryEnabled ? 'expires,' : 'you cancel,'} or partially fills (then reclaim the remainder).
               </div>
-            )}
-            {orderType === 'FAK' && (
+            ) : (
               <div className="small" style={{ fontSize: 11, color: 'var(--text-3)' }}>
-                Fills immediately at the market price for whatever size is available and kills the rest. If it fills only
+                Fills immediately at the best available price for whatever size the book offers now. If it fills only
                 partially, reclaim the unfilled remainder of your stake afterward.
               </div>
             )}
@@ -523,7 +559,7 @@ export function BetModal({
           </label>
           <div className="row" style={{ justifyContent: 'space-between', gap: 12 }}>
             <button className="btn" onClick={closeSafely}>Cancel</button>
-            <button className="btn btn-primary" onClick={() => void submit()} disabled={!amountMicro || amountMicro <= 0n || belowMinBet || exceedsBalance}>
+            <button className="btn btn-primary" onClick={() => void submit()} disabled={!amountMicro || amountMicro <= 0n || belowMinBet || exceedsBalance || belowMinShares}>
               Confirm Bet
             </button>
           </div>
@@ -561,7 +597,7 @@ export function BetModal({
           </div>
           <div className="panel" style={{ padding: 16 }}>
             <KV l="Market" v={marketName} />
-            <KV l="Side" v={side} />
+            <KV l="Side" v={sideLabel ?? side} />
             <KV l="Amount" v={`$${formatUsdc(amountMicro ?? 0n)} USDC`} />
             <KV l="Auto-settle" v={autoSettle ? 'Enabled' : 'Disabled'} />
             <KV l="Tx" v={txHash ? `${txHash.slice(0, 10)}…${txHash.slice(-8)}` : '—'} />

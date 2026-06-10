@@ -16,6 +16,8 @@ jest.mock("../config", () => ({
     vaultContractAddress: "0x" + "b".repeat(40),
     signingLayerOperatorAddress: "0x" + "c".repeat(40),
     pusdAddress: "0x" + "d".repeat(40),
+    usdcAddress: "0x" + "f".repeat(40),
+    onrampAddress: "0x" + "a".repeat(40),
     depositWalletAddress: "0x" + "e".repeat(40),
     polyWsUrl: "ws://localhost:3001/ws/user",
   },
@@ -125,6 +127,27 @@ describe("submitFAKOrder (mock CLOB path)", () => {
     );
   });
 
+  // BUG-1 regression: the REAL Polymarket CLOB returns matched amounts as decimal strings
+  // (takingAmount = shares, makingAmount = USDC) — NOT filledShares/size_matched. Parsing must
+  // pick those up; otherwise a real partial fill reads as 0 → FAILED → false full reclaim → loss.
+  it("real-CLOB makingAmount/takingAmount partial → PARTIAL (not FAILED)", async () => {
+    resp = { success: true, status: "matched", orderID: "0xo", takingAmount: "47.75", makingAmount: "3.3425" };
+    await run();
+    expect(store.signAndStoreAttestation).toHaveBeenCalledWith(
+      expect.anything(), expect.anything(),
+      { nullifierOfBet: event.nullifier, reportType: ReportType.PARTIAL, amountA: 47_750_000n, amountB: 3_342_500n },
+    );
+  });
+
+  it("real-CLOB makingAmount/takingAmount full fill → FILLED", async () => {
+    resp = { success: true, status: "matched", orderID: "0xo", takingAmount: "200", makingAmount: "100" };
+    await run();
+    expect(store.signAndStoreAttestation).toHaveBeenCalledWith(
+      expect.anything(), expect.anything(),
+      { nullifierOfBet: event.nullifier, reportType: ReportType.FILLED, amountA: 0n, amountB: 0n },
+    );
+  });
+
   it("single-write: a second matched run does not re-sign", async () => {
     resp = { success: true, status: "MATCHED", filledShares: 200_000_000, spentAmount: 100_000_000, orderID: "0xo" };
     await run();
@@ -139,5 +162,34 @@ describe("submitFAKOrder (mock CLOB path)", () => {
     await run();
     expect(global.fetch).not.toHaveBeenCalled();
     expect(store.signAndStoreAttestation).not.toHaveBeenCalled();
+  });
+});
+
+// Bug 2 (CLOB taker fee): the user pays Polymarket's fee out of their stake — it is GONE, never
+// refunded. budgetedBuyOrder reserves the fee in the submitted size, so spent must record the whole
+// stake on a full fill (refund 0) and only the unfilled remainder on a genuine partial.
+describe("marketSpentWithFee (CLOB-fee-inclusive spent)", () => {
+  const STAKE = 100_000_000n;     // $100 (1e6-scaled)
+  const SIZED = 99_000_000n;      // 99 shares — fee-reserved size budgetedBuyOrder submitted
+
+  it("full fill of the fee-reserved size → whole stake spent (refund 0)", async () => {
+    const { marketSpentWithFee } = await import("../orderBuilder");
+    expect(marketSpentWithFee(STAKE, SIZED, SIZED)).toBe(STAKE);
+  });
+
+  it("fill within dust of the submitted size → treated as full", async () => {
+    const { marketSpentWithFee } = await import("../orderBuilder");
+    expect(marketSpentWithFee(STAKE, SIZED - 5_000n, SIZED)).toBe(STAKE);
+  });
+
+  it("genuine partial → proportional spend (refunds only the unfilled stake, keeps the fee)", async () => {
+    const { marketSpentWithFee } = await import("../orderBuilder");
+    // Half the fee-reserved size filled → half the stake spent → half refunds.
+    expect(marketSpentWithFee(STAKE, SIZED / 2n, SIZED)).toBe(STAKE / 2n);
+  });
+
+  it("never reports more than the stake", async () => {
+    const { marketSpentWithFee } = await import("../orderBuilder");
+    expect(marketSpentWithFee(STAKE, SIZED * 2n, SIZED)).toBe(STAKE);
   });
 });

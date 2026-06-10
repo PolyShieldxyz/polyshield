@@ -1,0 +1,4 @@
+# Never commit real config/secrets — only the *.example templates.
+.env
+env/*.env
+!env/*.env.example

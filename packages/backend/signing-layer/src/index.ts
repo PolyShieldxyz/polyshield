@@ -9,14 +9,29 @@ import { startSettlementResolver } from "./settlementResolver";
 import { startAutoSettlementServer } from "./autoSettlement";
 import { signingLayerNonceManager } from "./nonceManager";
 import { sendHeartbeat } from "./orderBuilder";
-import { getDepositWalletExecutor } from "./depositWalletExecutor";
+import { getDepositWalletExecutor, deriveDepositWalletAddress } from "./depositWalletExecutor";
 import { setAttestationDomainParams } from "./attestationStore";
 import { startFillTracker, stopFillTracker } from "./wsFillTracker";
+import { startMarketRegistrySync } from "./marketRegistry";
+import { startBufferManager, stopBufferManager } from "./bufferManager";
+import { RetryingJsonRpcProvider } from "./logScan";
 
 const logger = pino({ name: "signing-layer" });
 
-// EOA private key comes from env only — never logged, never sent anywhere except Polygon RPC
-const provider = new ethers.JsonRpcProvider(config.polygonRpcUrl);
+// Last-resort crash guard. A metered RPC (Alchemy) returns 429s under load; an uncaught 429 in any
+// async chain used to kill the whole process (and `restart: on-failure:2` then left it DOWN). Log and
+// keep running instead. The deliberate dead-man circuit breaker still halts via its own process.exit.
+process.on("unhandledRejection", (reason) => {
+  logger.error({ reason: reason instanceof Error ? reason.message : String(reason) }, "unhandledRejection — logged, NOT crashing (likely a transient RPC error)");
+});
+process.on("uncaughtException", (err) => {
+  logger.error({ err: err instanceof Error ? err.message : String(err) }, "uncaughtException — logged, NOT crashing");
+});
+
+// EOA private key comes from env only — never logged, never sent anywhere except Polygon RPC.
+// RetryingJsonRpcProvider transparently retries 429 rate-limits on every RPC method (tx send, receipt
+// wait, eth_call, getLogs) so a metered RPC can't crash signing or abort a settlement mid-flight.
+const provider = new RetryingJsonRpcProvider(config.polygonRpcUrl);
 const wallet = new ethers.Wallet(config.vaultEoaPrivateKey, provider);
 
 logger.info({ address: wallet.address }, "Signing layer started");
@@ -66,6 +81,33 @@ async function ensureDepositWalletApprovals(): Promise<void> {
   }
 }
 
+/**
+ * Production guard: the on-chain Vault.depositWallet is set once in initialize() and is
+ * IMMUTABLE. Derive the deposit wallet address from the operator EOA via the relayer and assert
+ * it equals DEPOSIT_WALLET_ADDRESS. A mismatch means JIT funding sends pUSD to one wallet while
+ * orders/redeems use another (funds stranded, zero fills) — so surface it loudly. Non-fatal but
+ * impossible to miss. Skipped in mock mode and when the relayer/address aren't configured.
+ */
+async function assertDepositWalletMatches(): Promise<void> {
+  const clobHost = process.env.POLY_API_URL ?? "https://clob.polymarket.com";
+  const isMock = clobHost.includes("localhost") || clobHost.includes("127.0.0.1");
+  if (isMock || !config.polyRelayerUrl || !config.depositWalletAddress) return;
+  try {
+    const derived = await deriveDepositWalletAddress();
+    if (derived.toLowerCase() !== config.depositWalletAddress.toLowerCase()) {
+      logger.error(
+        { derived, configured: config.depositWalletAddress },
+        "DEPOSIT WALLET MISMATCH — relayer-derived address != DEPOSIT_WALLET_ADDRESS (immutable in the Vault). " +
+          "JIT funding and redemptions will target the wrong wallet. Fix DEPOSIT_WALLET_ADDRESS / redeploy.",
+      );
+    } else {
+      logger.info({ depositWallet: derived }, "deposit-wallet derive-and-assert OK");
+    }
+  } catch (err) {
+    logger.warn({ err }, "deposit-wallet derive-and-assert check failed (non-fatal)");
+  }
+}
+
 // Heartbeat: maintains the Polymarket CLOB session alive.
 // API-010: real best-effort heartbeat. sendHeartbeat pings the CLOB (mock or
 // production) and routes the response through circuitBreaker.checkResponse, so a
@@ -105,7 +147,17 @@ async function bootstrap(): Promise<void> {
     );
   }
 
+  void assertDepositWalletMatches();
   void ensureDepositWalletApprovals();
+  // Mirror the Polymarket market universe so the event listener can resolve each bet's
+  // (market_id, outcome_side) → real CLOB tokenId before placing the order. Production-only;
+  // no-op in mock mode. Started before the listener so the registry begins populating first.
+  startMarketRegistrySync();
+  // FC-6 / Option 4: proactively maintain a pUSD base buffer on the deposit wallet so most bets
+  // spend already-indexed buying power (no per-bet wrap → no Polymarket indexing lag). Disabled by
+  // default (BUFFER_LOW_WATER_USDC unset); JIT remains the overflow path. Started before the
+  // listener so the buffer is warming as bets arrive.
+  startBufferManager(provider, wallet);
   startEventListener(provider, wallet);
   // FC-4: connect the user-channel websocket fill tracker and resume any resting orders
   // that were still open (and un-attested) before this process started. Must be up
@@ -125,6 +177,7 @@ process.on("SIGTERM", () => {
   logger.info("SIGTERM received — shutting down");
   stopHeartbeat();
   stopFillTracker();
+  stopBufferManager();
   process.exit(0);
 });
 
@@ -132,5 +185,6 @@ process.on("SIGINT", () => {
   logger.info("SIGINT received — shutting down");
   stopHeartbeat();
   stopFillTracker();
+  stopBufferManager();
   process.exit(0);
 });

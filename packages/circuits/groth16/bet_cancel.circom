@@ -11,6 +11,7 @@ template BetCancel() {
     signal input merkle_path[32];
     signal input merkle_path_indices[32];
     signal input owner_address;
+    signal input bet_nonce; // private: nonce of the note the bet was made from (nullifier_of_bet = Poseidon2(secret, bet_nonce))
 
     signal input merkle_root;
     signal input nullifier;
@@ -59,14 +60,21 @@ template BetCancel() {
     nextCommitment.owner_address <== owner_address;
     nextCommitment.out === new_commitment;
 
-    // SEC-002: require nonce >= 1 so `nonce - 1` cannot underflow to the field modulus (p-1).
-    component nonceNZ = AssertLessThan(64);
-    nonceNZ.lhs <== 0;
-    nonceNZ.rhs <== nonce;
+    // Decoupled reclaim: the bet was made from the note at `bet_nonce`; we spend the CURRENT
+    // note (`nonce`), which may be several actions later — so a subsequent action that consumed
+    // the immediate post-bet note no longer orphans the reclaim. `bet_nonce` is a private witness;
+    // the Vault still binds `nullifier_of_bet` to a real, uncredited bet record (double-credit
+    // guard + bet_amount injection). Require bet_nonce < nonce (the bet predates the current note;
+    // this also guarantees nonce >= 1, replacing the old SEC-002 nonce>=1 check).
+    component betNonceBits = AssertBits(64);
+    betNonceBits.in <== bet_nonce;
+    component betBeforeCurrent = AssertLessThan(64);
+    betBeforeCurrent.lhs <== bet_nonce;
+    betBeforeCurrent.rhs <== nonce;
 
     component preBetNullifier = NullifierHash();
     preBetNullifier.secret <== secret;
-    preBetNullifier.nonce <== nonce - 1;
+    preBetNullifier.nonce <== bet_nonce;
     preBetNullifier.out === nullifier_of_bet;
 }
 

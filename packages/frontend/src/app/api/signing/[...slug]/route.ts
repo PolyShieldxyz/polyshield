@@ -64,12 +64,15 @@ export async function POST(
 // GET /api/signing/attestation/:nullifier (FC-9) — proxies the operator's public
 // attestation read endpoint. The nullifier is already public on-chain; no body.
 export async function GET(
-  _req: NextRequest,
+  req: NextRequest,
   { params }: { params: Promise<{ slug: string[] }> },
 ): Promise<NextResponse> {
   const { slug } = await params
   const action = slug.join('/')
-  const target = `${SIGNING_URL}/${action}`
+  // Forward the query string — e.g. /attestation/:nullifier?reportType=4 selects the SOLD slot.
+  // Dropping it made the endpoint fall back to the bet-OUTCOME attestation (FILLED), so a position
+  // close polling for SOLD (reportType 4) never matched and timed out ("close has not filled yet").
+  const target = `${SIGNING_URL}/${action}${req.nextUrl.search}`
 
   console.log(`[api/signing] → GET ${target}`)
 

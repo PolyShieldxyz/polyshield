@@ -57,11 +57,36 @@ function safeError(logger: pino.Logger, context: string, err: unknown): { error:
 let _provider: ethers.JsonRpcProvider | null = null;
 let _treeAddress: string | null = null;
 let _vaultAddress: string | null = null;
+let _treeDeployBlock = 0; // start block for merkle-path log scans (tree deploy block)
+let _merkleCache: { proofFor: (commitment: string) => unknown } | null = null;
 
-export function initMerkle(provider: ethers.JsonRpcProvider, treeAddress: string, vaultAddress?: string): void {
+/** Register the backend Merkle read-cache. The /merkle-path route serves from it (O(depth), no chain
+ * call) and falls back to on-the-fly computation on a cache miss / inconsistency. */
+export function setMerkleCache(cache: { proofFor: (commitment: string) => unknown }): void {
+  _merkleCache = cache;
+}
+
+interface EventIndexLike {
+  isReady: () => boolean;
+  recoveryData: (depositor: string) => { deposits: unknown[]; spends: unknown[] };
+  blockTimestamps: (blocks: number[]) => Record<number, number>;
+  allEvents: (limit?: number) => Array<{ type: string; blockNumber: number; logIndex: number; txHash: string; blockTs: number | null; args: Record<string, unknown> }>;
+}
+let _eventIndex: EventIndexLike | null = null;
+export function setEventIndex(idx: EventIndexLike): void {
+  _eventIndex = idx;
+}
+
+export function initMerkle(
+  provider: ethers.JsonRpcProvider,
+  treeAddress: string,
+  vaultAddress?: string,
+  treeDeployBlock?: number,
+): void {
   _provider = provider;
   _treeAddress = treeAddress;
   if (vaultAddress) _vaultAddress = vaultAddress;
+  if (treeDeployBlock && treeDeployBlock > 0) _treeDeployBlock = treeDeployBlock;
 }
 
 const BET_RECORDS_ABI = [
@@ -363,17 +388,78 @@ export function createApp(): express.Application {
       return;
     }
     try {
-      const proof = await computeMerkleProof(_treeAddress, commitment, _provider);
+      // Fast path: serve from the backend cache (O(depth) in-memory, no chain query). Returns null on
+      // a cache miss (leaf not yet ingested / cache not ready / diverged) → fall back to the
+      // authoritative on-the-fly reconstruction below.
+      const cached = _merkleCache?.proofFor(commitment) as
+        | { path: string[]; pathIndices: number[]; root: string; leafIndex: number }
+        | null
+        | undefined;
+      if (cached) {
+        logger.info({ commitment, leafIndex: cached.leafIndex, source: "cache" }, "merkle-path served");
+        res.json(cached);
+        return;
+      }
+      const proof = await computeMerkleProof(_treeAddress, commitment, _provider, {
+        fromBlock: _treeDeployBlock,
+      });
       if (!proof) {
         res.status(404).json({ error: "commitment not found in tree" });
         return;
       }
-      logger.info({ commitment, leafIndex: proof.leafIndex }, "merkle-path served");
+      logger.info({ commitment, leafIndex: proof.leafIndex, source: "chain" }, "merkle-path served");
       res.json(proof);
     } catch (err) {
       logger.error({ err, commitment }, "merkle-path error");
       res.status(500).json({ error: "merkle path computation failed" });
     }
+  });
+
+  // GET /recovery-data/:depositor
+  // Returns the PUBLIC on-chain data the frontend needs to rebuild a wallet's notes WITHOUT scanning
+  // the chain through its own RPC: the wallet's Deposited events + all anonymous spend events + the
+  // referenced block timestamps + feeConfig + currentRoot. The client does the secret-based matching
+  // locally — we never see secrets and cannot link spends to a wallet (privacy preserved).
+  app.get("/recovery-data/:depositor", async (req, res) => {
+    const { depositor } = req.params;
+    if (!/^0x[0-9a-fA-F]{40}$/.test(depositor)) {
+      res.status(400).json({ error: "depositor must be a 0x-prefixed 20-byte address" });
+      return;
+    }
+    if (!_eventIndex || !_eventIndex.isReady() || !_provider || !_treeAddress || !_vaultAddress) {
+      res.status(503).json({ error: "recovery index not ready" });
+      return;
+    }
+    try {
+      const { deposits, spends } = _eventIndex.recoveryData(depositor);
+      const blocks = [...new Set([...deposits, ...spends].map((e) => (e as { blockNumber: number }).blockNumber))];
+      const blockTimestamps = _eventIndex.blockTimestamps(blocks);
+
+      // feeConfig (betFeeBps, relayGasFeeUSDC) + currentRoot — cheap on-chain state reads.
+      const vault = new ethers.Contract(_vaultAddress, [
+        "function feeConfig() view returns (uint16 betFeeBps, uint64 relayGasFeeUSDC, uint64 minBet, uint64 withdrawalFeeUSDC, uint64 minWithdrawal, address feeRecipient)",
+      ], _provider);
+      const tree = new ethers.Contract(_treeAddress, ["function currentRoot() view returns (bytes32)"], _provider);
+      let betFeeBps = "0", relayGasFeeUSDC = "0", currentRoot = "0x";
+      try { const fc = await vault.feeConfig(); betFeeBps = fc[0].toString(); relayGasFeeUSDC = fc[1].toString(); } catch { /* older vault */ }
+      try { currentRoot = await tree.currentRoot(); } catch { /* leave */ }
+
+      res.json({ deposits, spends, blockTimestamps, feeConfig: { betFeeBps, relayGasFeeUSDC }, currentRoot, deployBlock: _treeDeployBlock });
+    } catch (err) {
+      logger.error({ err, depositor }, "recovery-data error");
+      res.status(500).json({ error: "recovery data fetch failed" });
+    }
+  });
+
+  // GET /events?limit=N — all indexed Vault events (anonymous, public) for the Explorer, served from
+  // the backend index so the browser doesn't scan the chain itself.
+  app.get("/events", (req, res) => {
+    if (!_eventIndex || !_eventIndex.isReady()) {
+      res.status(503).json({ error: "event index not ready" });
+      return;
+    }
+    const limit = Math.min(Math.max(parseInt(String(req.query.limit ?? "1000"), 10) || 1000, 1), 5000);
+    res.json({ events: _eventIndex.allEvents(limit) });
   });
 
   return app;

@@ -3,6 +3,8 @@ import pino from "pino";
 import { config } from "./config";
 import { signingLayerNonceManager } from "./nonceManager";
 import { getDepositWalletExecutor, DepositWalletExecutor, WalletCall } from "./depositWalletExecutor";
+import { toFieldSafe } from "./marketRegistry";
+import { queryFilterChunked, DEPLOY_BLOCK } from "./logScan";
 
 const logger = pino({ name: "redemption-pipeline" });
 
@@ -32,9 +34,13 @@ function sameMarket(eventMarketId: string, conditionId: string): boolean {
  */
 async function betsForMarket(
   vault: ethers.Contract,
+  provider: ethers.JsonRpcProvider,
   conditionId: string,
 ): Promise<ethers.LogDescription[]> {
-  const logs = await vault.queryFilter(vault.filters.BetAuthorized(), 0, "latest");
+  // Page from the deploy block (NOT 0 — a from-0 scan over millions of blocks is rejected / costly)
+  // with the rate-limit-aware chunker so a metered RPC's 429 doesn't abort the redemption.
+  const latest = await provider.getBlockNumber();
+  const logs = await queryFilterChunked(vault, vault.filters.BetAuthorized(), DEPLOY_BLOCK, latest);
   const out: ethers.LogDescription[] = [];
   for (const log of logs) {
     const parsed = vault.interface.parseLog({ topics: log.topics as string[], data: log.data });
@@ -45,7 +51,11 @@ async function betsForMarket(
 
 const CTF_ABI = [
   "event ConditionResolution(bytes32 indexed conditionId, address indexed oracle, bytes32 indexed questionId, uint256 outcomeSlotCount, uint256[] payoutNumerators)",
-  "function payoutNumerators(bytes32 conditionId) view returns (uint256[])",
+  // Real Gnosis CTF: payoutNumerators is a mapping(bytes32 => uint256[]) — the on-chain getter is
+  // the element accessor (conditionId, index), NOT a (conditionId) -> uint256[] array getter (that
+  // only existed on MockCTF and reverts against mainnet CTF). Read element-by-index via readNumerators.
+  "function payoutNumerators(bytes32 conditionId, uint256 index) view returns (uint256)",
+  "function getOutcomeSlotCount(bytes32 conditionId) view returns (uint256)",
   "function payoutDenominator(bytes32 conditionId) view returns (uint256)",
   "function balanceOf(address account, uint256 id) view returns (uint256)",
   "function redeemPositions(address collateralToken, bytes32 parentCollectionId, bytes32 conditionId, uint256[] indexSets)",
@@ -61,6 +71,21 @@ const VAULT_ABI = [
 ];
 
 const VAULT_ABI_RESOLVED = ["function marketResolvedAt(bytes32) view returns (uint64)"];
+
+/**
+ * Read all payout numerators for a condition from the real Gnosis CTF, which exposes them only as
+ * an element accessor `payoutNumerators(conditionId, index)` (no array getter exists on-chain). The
+ * loop is bounded by `getOutcomeSlotCount`. The `ctf` contract must be bound to a CTF_ABI that
+ * includes both. Returns [] for an unprepared condition (slot count 0).
+ */
+export async function readNumerators(ctf: ethers.Contract, conditionId: string): Promise<bigint[]> {
+  const slotCount: bigint = await ctf.getOutcomeSlotCount(conditionId);
+  const out: bigint[] = [];
+  for (let i = 0n; i < slotCount; i++) {
+    out.push(await ctf.payoutNumerators(conditionId, i));
+  }
+  return out;
+}
 
 const ERC20_ABI = [
   "function balanceOf(address) view returns (uint256)",
@@ -90,7 +115,7 @@ async function collectPositionIds(
 ): Promise<string[]> {
   const vault = new ethers.Contract(vaultAddress, VAULT_ABI, provider);
   const ids = new Set<string>();
-  for (const parsed of await betsForMarket(vault, conditionId)) {
+  for (const parsed of await betsForMarket(vault, provider, conditionId)) {
     ids.add(parsed.args.position_id as string);
   }
   return [...ids];
@@ -161,8 +186,14 @@ async function redeemViaExecutor(
 }
 
 /**
- * Full B1 pipeline: redeem CTF → offramp pUSD → resolveMarket.
- * Idempotent via Vault.marketResolvedAt guard.
+ * Settlement pipeline. STEP 1 (critical): call Vault.resolveMarket so users can settle their notes.
+ * STEP 2 (best-effort): redeem winning CTF shares → offramp pUSD → acknowledge returned capital.
+ *
+ * resolveMarket only READS CTF payouts and is independent of the redemption, so a relayer/redeem
+ * failure must NOT prevent it — otherwise a resolved, winning market would never become settleable
+ * for users (the symptom that motivated this ordering). STEP 2 runs in its own try/catch and never
+ * undoes STEP 1. Idempotent: resolveMarket is skipped if already resolved; redemption is guarded by
+ * the deposit wallet's CTF share balance.
  */
 export async function runRedemptionPipeline(
   provider: ethers.JsonRpcProvider,
@@ -175,13 +206,13 @@ export async function runRedemptionPipeline(
   const usdcRo = new ethers.Contract(config.usdcAddress, ERC20_ABI, provider);
 
   const vaultResolved = new ethers.Contract(config.vaultContractAddress, VAULT_ABI_RESOLVED, provider);
-  const resolvedAt: bigint = await vaultResolved.marketResolvedAt(conditionId);
-  if (resolvedAt > 0n) {
-    logger.info({ conditionId }, "Market already resolved in Vault — skipping pipeline");
-    return;
-  }
+  // marketResolvedAt is keyed by the BN254-reduced circuit_key (see Vault._circuitKey), NOT the
+  // raw conditionId. Querying with the raw conditionId reads an empty slot and the guard never
+  // fires, so the pipeline would redeem again and bounce off resolveMarket's MarketAlreadyResolved
+  // revert on every call. Reduce to the circuit_key before the lookup.
+  const resolvedAt: bigint = await vaultResolved.marketResolvedAt(toFieldSafe(conditionId));
 
-  const numerators: bigint[] = await ctf.payoutNumerators(conditionId);
+  const numerators: bigint[] = await readNumerators(ctf, conditionId);
   const denominator: bigint = await ctf.payoutDenominator(conditionId);
   if (denominator === 0n) {
     logger.warn({ conditionId }, "CTF condition not finalized — skipping");
@@ -192,6 +223,28 @@ export async function runRedemptionPipeline(
     return;
   }
 
+  // STEP 1 (critical path): resolve on-chain so users can settle. Idempotent via marketResolvedAt;
+  // tolerate a MarketAlreadyResolved race with the event/poll paths.
+  if (resolvedAt > 0n) {
+    logger.info({ conditionId }, "market already resolved on-chain — skipping resolveMarket");
+  } else {
+    try {
+      logger.info({ conditionId }, "Calling Vault.resolveMarket");
+      const tx = await signingLayerNonceManager.send(provider, operatorWallet, (nonce) =>
+        vault.resolveMarket(conditionId, { nonce }),
+      );
+      const receipt = await tx.wait(1);
+      logger.info({ conditionId, txHash: receipt?.hash }, "Vault.resolveMarket confirmed");
+    } catch (err) {
+      // A genuine resolveMarket failure blocks settlement — surface it loudly, but still fall
+      // through to attempt collateral redemption (independent concern).
+      logger.error({ err, conditionId }, "Vault.resolveMarket failed");
+    }
+  }
+
+  // STEP 2 (best-effort): redeem winning CTF shares → offramp pUSD → acknowledge returned capital.
+  // A failure here leaves the market RESOLVED (users can still settle their notes); the vault may
+  // temporarily lack the USDC to pay a withdrawal until redemption is retried. Log, never throw.
   const executor = getDepositWalletExecutor(provider);
   const usdcBefore: bigint = await usdcRo.balanceOf(config.vaultContractAddress);
   const positionIds = await collectPositionIds(provider, config.vaultContractAddress, conditionId);
@@ -255,15 +308,12 @@ export async function runRedemptionPipeline(
         logger.info({ ack: ack.toString() }, "acknowledgePolymarketReturn confirmed");
       }
     }
-
-    logger.info({ conditionId }, "Calling Vault.resolveMarket");
-    const tx = await signingLayerNonceManager.send(provider, operatorWallet, (nonce) =>
-      vault.resolveMarket(conditionId, { nonce }),
-    );
-    const receipt = await tx.wait(1);
-    logger.info({ conditionId, txHash: receipt?.hash }, "Vault.resolveMarket confirmed");
   } catch (err) {
-    logger.error({ err, conditionId }, "Redemption pipeline failed — halting (no silent retry)");
-    throw err;
+    // Collateral redemption failed — the market is already resolved on-chain (STEP 1), so users can
+    // still settle. The vault may lack USDC to fund a withdrawal until redemption is retried.
+    logger.error(
+      { err, conditionId },
+      "collateral redemption failed (market resolved on-chain — users can settle; retry redemption to fund withdrawals)",
+    );
   }
 }

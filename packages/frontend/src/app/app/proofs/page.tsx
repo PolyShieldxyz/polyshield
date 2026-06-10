@@ -7,7 +7,7 @@ const PROOFS = [
   { id: 'prf_0x77ce…be11', type: 'SETTLE_CRED', market: 'GPT5-RELEASE', side: 'YES', amount: 18720, status: 'CREDITED', age: '32m ago', nullifier: '0x77ce…be11', tx: '0xb291…12aa' },
   { id: 'prf_0x91a3…0fc2', type: 'DEPOSIT', market: '—', side: '—', amount: 25000, status: 'CONFIRMED', age: '2h ago', nullifier: '—', tx: '0xc410…9001' },
   { id: 'prf_0x2310…44a1', type: 'DEPOSIT', market: '—', side: '—', amount: 50000, status: 'CONFIRMED', age: '5h ago', nullifier: '—', tx: '0xd112…f820' },
-  { id: 'prf_0xa811…3301', type: 'BET_AUTH', market: 'BTC above $150k Dec 31?', side: 'NO', amount: 1000, status: 'FOK_FAILED', age: '3d ago', nullifier: '0xa811…3301', tx: '0xe201…3abc' },
+  { id: 'prf_0xa811…3301', type: 'BET_AUTH', market: 'BTC above $150k Dec 31?', side: 'NO', amount: 1000, status: 'UNFILLED', age: '3d ago', nullifier: '0xa811…3301', tx: '0xe201…3abc' },
   { id: 'prf_0xc210…f9aa', type: 'CANCEL_CRED', market: 'BTC above $150k Dec 31?', side: 'NO', amount: 1000, status: 'CREDITED', age: '3d ago', nullifier: '0xc210…f9aa', tx: '0xf311…8811' },
   { id: 'prf_0x4404…f9e2', type: 'WITHDRAW', market: '—', side: '—', amount: 5000, status: 'DELIVERED', age: '4d ago', nullifier: '0x4404…f9e2', tx: '0x0120…cc01' },
 ]
@@ -26,7 +26,7 @@ const STATUS_COLOR: Record<string, string> = {
   CREDITED: 'var(--green)',
   DELIVERED: 'var(--green)',
   ACTIVE: 'var(--cyan)',
-  FOK_FAILED: 'var(--red)',
+  UNFILLED: 'var(--red)',
 }
 
 const TYPES = ['ALL', 'DEPOSIT', 'BET_AUTH', 'SETTLE_CRED', 'CANCEL_CRED', 'WITHDRAW']
@@ -39,7 +39,7 @@ export default function ProofsPage() {
     { label: 'Total proofs', value: PROOFS.length },
     { label: 'Bets authorized', value: PROOFS.filter((p) => p.type === 'BET_AUTH').length },
     { label: 'Settlements', value: PROOFS.filter((p) => p.type === 'SETTLE_CRED').length },
-    { label: 'FOK failures', value: PROOFS.filter((p) => p.status === 'FOK_FAILED').length },
+    { label: 'Unfilled orders', value: PROOFS.filter((p) => p.status === 'UNFILLED').length },
   ]
 
   return (

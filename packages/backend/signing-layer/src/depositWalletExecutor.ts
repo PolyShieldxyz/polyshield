@@ -1,8 +1,14 @@
 import { ethers } from "ethers";
 import pino from "pino";
+import { RelayClient, type DepositWalletCall } from "@polymarket/builder-relayer-client";
 import { config } from "./config";
+import { getViemWallet, getRelayerBuilderConfig, POLYGON_CHAIN_ID } from "./builderConfig";
 
 const logger = pino({ name: "deposit-wallet-executor" });
+
+// Window (seconds) for the relayer Batch EIP-712 deadline — long enough to tolerate
+// signer/relayer clock skew and submission latency, short enough to bound replay.
+const RELAY_DEADLINE_SECONDS = 300;
 
 /**
  * Deposit-wallet execution abstraction.
@@ -25,7 +31,7 @@ export interface DepositWalletExecutor {
   execute(call: WalletCall): Promise<void>;
   /** Execute a batch of calls as the deposit wallet (atomic where supported). */
   executeBatch(calls: WalletCall[]): Promise<void>;
-  /** Idempotent one-time approvals from the deposit wallet (pUSD → CTF exchange, pUSD → offramp). H3. */
+  /** Idempotent one-time approvals from the deposit wallet (USDC→onramp, pUSD→exchange, CTF→exchange). H3. */
   ensureApprovals(): Promise<void>;
   /** Human-readable name for logging. */
   readonly kind: string;
@@ -35,21 +41,81 @@ const ERC20_IFACE = new ethers.Interface([
   "function approve(address spender, uint256 amount) returns (bool)",
 ]);
 
-/** Build the one-time pUSD approval batch from the deposit wallet (H3). */
+const ERC1155_IFACE = new ethers.Interface([
+  "function setApprovalForAll(address operator, bool approved)",
+]);
+
+/**
+ * Build the one-time Polymarket trading-enablement batch for the deposit wallet (H3).
+ *
+ * Polymarket settles in pUSD ("Polymarket USD"), and the vault funds the deposit wallet in
+ * USDC.e (the vault can't hold pUSD — minting pUSD to a non-Polymarket account reverts, which
+ * is why Vault.onramp.deposit failed). So the deposit wallet itself wraps USDC→pUSD via the
+ * onramp, then trades in pUSD. The standing approvals it needs (all MaxUint256, set once):
+ *   (a) USDC.e → onramp   — so `onramp.deposit(amount)` can pull USDC to mint pUSD.
+ *   (b) pUSD   → exchange — so the CLOB exchange can pull pUSD collateral on a fill.
+ *   (c) CTF setApprovalForAll → exchange — so positions can be sold / redeemed.
+ * Without these the platform forces a manual "enable trading" signature. NOTE: neg-risk
+ * (multi-outcome) markets also need the neg-risk exchange/adapter approved — add here if traded.
+ */
 function approvalCalls(): WalletCall[] {
   const calls: WalletCall[] = [];
-  if (!config.pusdAddress) return calls;
-  const spenders = [config.ctfAddress, config.offrampAddress].filter(
-    (s): s is string => Boolean(s) && s !== ethers.ZeroAddress,
-  );
-  for (const spender of spenders) {
+  const exchange = config.ctfExchangeV2Address;
+
+  // NOTE: the USDC→onramp approval is done per-wrap inside wrapUsdcToPusd (matching the
+  // frontend batch), so it's not a standing approval here.
+  // (b) pUSD → exchange (trading collateral).
+  if (config.pusdAddress && exchange && exchange !== ethers.ZeroAddress) {
     calls.push({
       target: config.pusdAddress,
       value: 0n,
-      data: ERC20_IFACE.encodeFunctionData("approve", [spender, ethers.MaxUint256]),
+      data: ERC20_IFACE.encodeFunctionData("approve", [exchange, ethers.MaxUint256]),
+    });
+  }
+  // (c) CTF setApprovalForAll → exchange (SELL / closePosition / redeem).
+  if (config.ctfAddress && exchange && exchange !== ethers.ZeroAddress) {
+    calls.push({
+      target: config.ctfAddress,
+      value: 0n,
+      data: ERC1155_IFACE.encodeFunctionData("setApprovalForAll", [exchange, true]),
     });
   }
   return calls;
+}
+
+// The onramp's USDC→pUSD entrypoint, decoded from the live Polymarket "confirm deposit" batch
+// (selector 0x62355638): wrap(token, account, amount) — pulls `amount` of `token` from `account`
+// (via the approval below) and mints pUSD to it. NOT `deposit(uint256)`.
+const ONRAMP_IFACE = new ethers.Interface([
+  "function wrap(address token, address account, uint256 amount)",
+]);
+
+/**
+ * Wrap `amount` (6dp USDC, already present in the deposit wallet) into pUSD, replicating the
+ * exact 2-call batch the Polymarket frontend's "confirm deposit" signs:
+ *   1. USDC.approve(onramp, amount)
+ *   2. onramp.wrap(USDC, depositWallet, amount)   // mints pUSD to the deposit wallet
+ * Submitted as one atomic WALLET batch via the relayer, signed by the deposit wallet's owner.
+ * Only succeeds for a Polymarket-registered proxy (the deposit wallet), not the vault.
+ */
+export async function wrapUsdcToPusd(executor: DepositWalletExecutor, amount: bigint): Promise<void> {
+  if (!config.onrampAddress || config.onrampAddress === ethers.ZeroAddress) {
+    throw new Error("wrapUsdcToPusd: ONRAMP_ADDRESS not configured");
+  }
+  if (!config.usdcAddress) throw new Error("wrapUsdcToPusd: USDC_ADDRESS not configured");
+  if (!config.depositWalletAddress) throw new Error("wrapUsdcToPusd: DEPOSIT_WALLET_ADDRESS not configured");
+  await executor.executeBatch([
+    {
+      target: config.usdcAddress,
+      value: 0n,
+      data: ERC20_IFACE.encodeFunctionData("approve", [config.onrampAddress, amount]),
+    },
+    {
+      target: config.onrampAddress,
+      value: 0n,
+      data: ONRAMP_IFACE.encodeFunctionData("wrap", [config.usdcAddress, config.depositWalletAddress, amount]),
+    },
+  ]);
 }
 
 /**
@@ -88,7 +154,7 @@ class MockRelayerExecutor implements DepositWalletExecutor {
   async ensureApprovals(): Promise<void> {
     const calls = approvalCalls();
     if (calls.length === 0) {
-      logger.warn("ensureApprovals: no pUSD/spender config — skipping");
+      logger.warn("ensureApprovals: no exchange/USDC config — skipping");
       return;
     }
     await this.executeBatch(calls);
@@ -97,34 +163,132 @@ class MockRelayerExecutor implements DepositWalletExecutor {
 }
 
 /**
- * Production Polymarket relayer executor (deferred — see FC-4 / collateral-flow-audit H2).
- * Wraps @polymarket/builder-relayer-client WALLET batches. Intentionally a thin,
- * clearly-marked placeholder pending live-API validation; throws if invoked so the
- * gap is loud rather than silent.
+ * Production Polymarket relayer executor. Wraps @polymarket/builder-relayer-client
+ * `RelayClient` so deposit-wallet calls (redeemPositions, offramp, approvals) are submitted
+ * as gas-free WALLET batches signed by the operator EOA (the deposit wallet's owner) and
+ * mined by the Polymarket builder relayer. Closes audit H2/H3. The RelayClient + viem wallet
+ * are cached at module scope (one authenticated client per process).
  */
 class PolymarketRelayerExecutor implements DepositWalletExecutor {
   readonly kind = "polymarket-relayer";
   constructor(private readonly relayerUrl: string) {}
 
-  private notWired(): never {
-    throw new Error(
-      "PolymarketRelayerExecutor not yet wired — integrate @polymarket/builder-relayer-client " +
-        `WALLET batches against ${this.relayerUrl} before mainnet (collateral-flow-audit.md H2/H3).`,
+  private client(): RelayClient {
+    return getRelayClient(this.relayerUrl);
+  }
+
+  private deadline(): string {
+    return String(Math.floor(Date.now() / 1000) + RELAY_DEADLINE_SECONDS);
+  }
+
+  /** bigint `value` → string `value`; target/data pass through. */
+  private toDepositWalletCalls(calls: WalletCall[]): DepositWalletCall[] {
+    return calls.map((c) => ({
+      target: c.target,
+      value: (c.value ?? 0n).toString(),
+      data: c.data,
+    }));
+  }
+
+  async execute(call: WalletCall): Promise<void> {
+    await this.executeBatch([call]);
+  }
+
+  async executeBatch(calls: WalletCall[]): Promise<void> {
+    if (calls.length === 0) return;
+    if (!config.depositWalletAddress) {
+      throw new Error("PolymarketRelayerExecutor: DEPOSIT_WALLET_ADDRESS not set");
+    }
+    const resp = await this.client().executeDepositWalletBatch(
+      this.toDepositWalletCalls(calls),
+      config.depositWalletAddress,
+      this.deadline(),
+    );
+    // wait() resolves to the mined RelayerTransaction, or undefined if the relayer tx hit
+    // its fail state / timed out. Treat undefined as a hard failure and THROW — callers
+    // (redemptionPipeline) depend on a throw to halt; a silent no-throw would let the
+    // post-batch pUSD balance-delta read compute 0 and skip the offramp (lost funds).
+    const mined = await resp.wait();
+    if (!mined) {
+      throw new Error(
+        `polymarket relayer WALLET batch failed or timed out (txId=${resp.transactionID}, state=${resp.state})`,
+      );
+    }
+    logger.info(
+      { calls: calls.length, txId: mined.transactionID, txHash: mined.transactionHash, state: mined.state },
+      "polymarket relayer: WALLET batch mined",
     );
   }
 
-  async execute(): Promise<void> {
-    this.notWired();
-  }
-  async executeBatch(): Promise<void> {
-    this.notWired();
-  }
   async ensureApprovals(): Promise<void> {
-    logger.warn(
-      { depositWallet: config.depositWalletAddress },
-      "H3: production deposit-wallet pUSD approval not yet automated — set it via the Polymarket relayer before the first order",
-    );
+    if (!config.depositWalletAddress) {
+      logger.warn("ensureApprovals: DEPOSIT_WALLET_ADDRESS not set — skipping");
+      return;
+    }
+    const client = this.client();
+
+    // (a) Deploy the deposit wallet (WALLET-CREATE) if it isn't yet. Gas-free and idempotent;
+    //     a WALLET batch / POLY_1271 order against an undeployed proxy would fail.
+    try {
+      const deployed = await client.getDeployed(config.depositWalletAddress, "WALLET");
+      if (!deployed) {
+        logger.info(
+          { depositWallet: config.depositWalletAddress },
+          "deposit wallet not deployed — deploying via relayer (WALLET-CREATE)",
+        );
+        const tx = await client.deployDepositWallet();
+        await tx.wait();
+        logger.info("deposit wallet deployed");
+      }
+    } catch (err) {
+      // getDeployed may be eventually-consistent and a redundant deploy reverts; log and
+      // continue — the approval batch below reverts loudly if the wallet is truly undeployed.
+      logger.warn({ err }, "ensureApprovals: deploy check/deploy step failed (continuing)");
+    }
+
+    // (b) Trading enablement: USDC.e allowance + CTF setApprovalForAll → exchange (see approvalCalls).
+    const calls = approvalCalls();
+    if (calls.length === 0) {
+      logger.warn("ensureApprovals: no approval calls to submit — skipping");
+      return;
+    }
+    await this.executeBatch(calls);
+    logger.info({ count: calls.length }, "ensureApprovals: deposit-wallet approvals set via Polymarket relayer (H3)");
   }
+}
+
+// Cached RelayClient — one authenticated builder-relayer client per process. The viem wallet
+// (operator EOA) and BuilderConfig are themselves cached in builderConfig.ts. signing-layer and
+// builder-relayer-client both resolve viem@2.50.4, so the WalletClient type matches directly.
+let _relayClient: RelayClient | null = null;
+function getRelayClient(relayerUrl: string): RelayClient {
+  if (_relayClient) return _relayClient;
+  _relayClient = new RelayClient(
+    relayerUrl,
+    POLYGON_CHAIN_ID,
+    getViemWallet(),
+    getRelayerBuilderConfig(),
+  );
+  return _relayClient;
+}
+
+/**
+ * Predict the deposit wallet address (CREATE2) for the operator EOA via the builder relayer.
+ * Requires POLY_RELAYER_URL. Used by the startup derive-and-assert guard and the setup CLI.
+ */
+export async function deriveDepositWalletAddress(): Promise<string> {
+  if (!config.polyRelayerUrl) {
+    throw new Error("deriveDepositWalletAddress requires POLY_RELAYER_URL to be set");
+  }
+  return getRelayClient(config.polyRelayerUrl).deriveDepositWalletAddress();
+}
+
+/** The cached production RelayClient (requires POLY_RELAYER_URL). Exposed for the setup CLI. */
+export function getProductionRelayClient(): RelayClient {
+  if (!config.polyRelayerUrl) {
+    throw new Error("getProductionRelayClient requires POLY_RELAYER_URL to be set");
+  }
+  return getRelayClient(config.polyRelayerUrl);
 }
 
 /**
@@ -158,10 +322,38 @@ class EoaExecutor implements DepositWalletExecutor {
 }
 
 /**
+ * Last-resort executor when nothing is configured — throws loudly on any deposit-wallet
+ * action instead of constructing a RelayClient against an empty URL. Surfaces the
+ * misconfiguration at the call site rather than at relayer-client construction.
+ */
+class UnconfiguredExecutor implements DepositWalletExecutor {
+  readonly kind = "unconfigured";
+  private fail(): never {
+    throw new Error(
+      "No deposit-wallet executor configured — set MOCK_RELAYER_URL (dev) or POLY_RELAYER_URL " +
+        "(prod) or DEPOSIT_WALLET_KEY (legacy). Deposit-wallet actions cannot run.",
+    );
+  }
+  async execute(): Promise<void> {
+    this.fail();
+  }
+  async executeBatch(): Promise<void> {
+    this.fail();
+  }
+  async ensureApprovals(): Promise<void> {
+    logger.error(
+      "No deposit-wallet executor configured (set MOCK_RELAYER_URL, POLY_RELAYER_URL, or DEPOSIT_WALLET_KEY). " +
+        "Settlement/redemption deposit-wallet actions will fail.",
+    );
+  }
+}
+
+/**
  * Choose the executor from config:
  *   MOCK_RELAYER_URL set            → MockRelayerExecutor (local proxy + mock relayer)
- *   POLY_RELAYER_URL set            → PolymarketRelayerExecutor (production, deferred)
+ *   POLY_RELAYER_URL set            → PolymarketRelayerExecutor (production builder relayer)
  *   DEPOSIT_WALLET_KEY set (legacy) → EoaExecutor
+ *   otherwise                       → UnconfiguredExecutor (throws on use)
  */
 export function getDepositWalletExecutor(
   provider: ethers.JsonRpcProvider,
@@ -171,10 +363,5 @@ export function getDepositWalletExecutor(
   if (config.depositWalletKey) {
     return new EoaExecutor(provider, new ethers.Wallet(config.depositWalletKey, provider));
   }
-  // No execution path configured — surface a clear no-op that logs loudly.
-  logger.error(
-    "No deposit-wallet executor configured (set MOCK_RELAYER_URL, POLY_RELAYER_URL, or DEPOSIT_WALLET_KEY). " +
-      "Settlement/redemption deposit-wallet actions will fail.",
-  );
-  return new PolymarketRelayerExecutor(config.polyRelayerUrl || "");
+  return new UnconfiguredExecutor();
 }

@@ -12,8 +12,14 @@ interface ICTF {
         uint256[] payoutNumerators
     );
 
-    function payoutNumerators(bytes32 conditionId) external view returns (uint256[] memory);
+    /// @dev The real Gnosis CTF exposes `payoutNumerators` as a `mapping(bytes32 => uint256[])`,
+    /// whose Solidity getter is the element accessor `payoutNumerators(conditionId, index)` — there
+    /// is NO `payoutNumerators(conditionId) -> uint256[]` array getter on-chain (that signature only
+    /// existed on the old MockCTF and reverted against mainnet CTF). Read element-by-index, bounding
+    /// the loop with `getOutcomeSlotCount`.
+    function payoutNumerators(bytes32 conditionId, uint256 index) external view returns (uint256);
     function payoutDenominator(bytes32 conditionId) external view returns (uint256);
+    function getOutcomeSlotCount(bytes32 conditionId) external view returns (uint256);
     function balanceOf(address account, uint256 id) external view returns (uint256);
     function redeemPositions(
         address collateralToken,

@@ -18,11 +18,23 @@ export function middleware(request: NextRequest) {
 
   // app.polyshield.xyz/foo → internally serve /app/foo
   if (isAppSubdomain) {
-    if (
-      !pathname.startsWith('/app') &&
-      !pathname.startsWith('/_next') &&
-      !pathname.startsWith('/api')
-    ) {
+    // Do NOT rewrite app routes, framework paths, or STATIC ASSETS. Rewriting public
+    // assets (e.g. /circuits/deposit.wasm, /zkeys/*.zkey) to /app/... 404s them and breaks
+    // ALL proof generation on the subdomain. Skip anything with a file extension, plus the
+    // ZK asset dirs explicitly.
+    // Shared top-level pages (not under /app) must serve as-is on the subdomain too —
+    // otherwise e.g. /explorer rewrites to /app/explorer (404). These exist only at the root.
+    const SHARED_TOP_LEVEL = ['/explorer', '/docs', '/how', '/roadmap', '/careers', '/testnet']
+    const isShared = SHARED_TOP_LEVEL.some((r) => pathname === r || pathname.startsWith(r + '/'))
+    const skip =
+      isShared ||
+      pathname.startsWith('/app') ||
+      pathname.startsWith('/_next') ||
+      pathname.startsWith('/api') ||
+      pathname.startsWith('/circuits') ||
+      pathname.startsWith('/zkeys') ||
+      /\.[a-zA-Z0-9]+$/.test(pathname)
+    if (!skip) {
       const url = request.nextUrl.clone()
       url.pathname = `/app${pathname === '/' ? '/markets' : pathname}`
       return NextResponse.rewrite(url)
@@ -34,6 +46,7 @@ export function middleware(request: NextRequest) {
   if (pathname.startsWith('/app')) {
     const url = request.nextUrl.clone()
     url.hostname = `app.${hostname.replace(/^www\./, '')}`
+    url.port = ''  // behind a TLS proxy: don't leak Next's internal :3000 into the redirect
     url.pathname = pathname.slice(4) || '/'  // strip leading /app
     return NextResponse.redirect(url, 301)
   }

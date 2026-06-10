@@ -39,14 +39,23 @@ describe("attestTerminal mapping", () => {
     await attestTerminal(wallet, bet, status, filled, spent);
   };
 
-  it("matched → FILLED (0,0)", async () => {
-    await run("matched", 0n, 0n);
+  // L3: classification is by the ACTUAL fill vs the committed expected_shares, not the status
+  // string. A full fill (filled >= expected_shares − DUST) → FILLED (0,0).
+  it("full fill (>= expected) → FILLED (0,0)", async () => {
+    await run("matched", 200_000_000n, 100_000_000n);
     expect(store.__calls).toEqual([{ reportType: ReportType.FILLED, amountA: 0n, amountB: 0n }]);
   });
 
-  it("filled (alias) → FILLED (0,0)", async () => {
-    await run("filled", 0n, 0n);
+  it("full fill regardless of status string → FILLED", async () => {
+    await run("filled", 200_000_000n, 100_000_000n);
     expect(store.__calls[0].reportType).toBe(ReportType.FILLED);
+  });
+
+  // L3: zero actual fill is FAILED even when the CLOB status says "matched" (e.g. a status-only
+  // mapping would wrongly attest FILLED for a downsized/short FOK).
+  it("matched status but ZERO fill → FAILED (L3)", async () => {
+    await run("matched", 0n, 0n);
+    expect(store.__calls[0].reportType).toBe(ReportType.FAILED);
   });
 
   it("strict partial → PARTIAL with filled/spent", async () => {
@@ -72,5 +81,33 @@ describe("attestTerminal mapping", () => {
   it("unmatched → FAILED", async () => {
     await run("unmatched", 0n, 0n);
     expect(store.__calls[0].reportType).toBe(ReportType.FAILED);
+  });
+
+  // L3: a fill within DUST (0.01 share = 1e4) of expected_shares is treated as a full fill, so a
+  // sub-share tick/rounding difference doesn't force a needless PARTIAL.
+  it("fill within DUST of expected → FILLED", async () => {
+    await run("matched", 199_995_000n, 100_000_000n); // expected − 5_000 (< DUST)
+    expect(store.__calls).toEqual([{ reportType: ReportType.FILLED, amountA: 0n, amountB: 0n }]);
+  });
+
+  // L3 (the core FOK divergence case): a "matched" FOK that budgetedBuyOrder downsized below the
+  // committed expected_shares (beyond DUST) must attest PARTIAL, not FILLED.
+  it("matched but downsized beyond DUST → PARTIAL", async () => {
+    await run("matched", 180_000_000n, 90_000_000n); // 180e6 << 200e6
+    expect(store.__calls).toEqual([{ reportType: ReportType.PARTIAL, amountA: 180_000_000n, amountB: 90_000_000n }]);
+  });
+
+  // L3 (B-relax): a short fill that spent the WHOLE budget (spent == bet, filled < expected) still
+  // attests PARTIAL — amountB clamps to bet_amount; the Vault accepts spent == bet (refund 0).
+  it("short fill, full budget spent (spent == bet) → PARTIAL amountB == bet", async () => {
+    await run("matched", 120_000_000n, 100_000_000n); // spent == bet_amount
+    expect(store.__calls).toEqual([{ reportType: ReportType.PARTIAL, amountA: 120_000_000n, amountB: 100_000_000n }]);
+  });
+
+  // spent over-reported above bet_amount is clamped to bet_amount (pool-safe; the Vault would also
+  // reject spent > bet).
+  it("short fill, spent over-reported > bet → clamped to bet", async () => {
+    await run("matched", 120_000_000n, 150_000_000n); // spent > bet_amount
+    expect(store.__calls).toEqual([{ reportType: ReportType.PARTIAL, amountA: 120_000_000n, amountB: 100_000_000n }]);
   });
 });

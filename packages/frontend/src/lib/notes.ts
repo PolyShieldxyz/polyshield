@@ -43,7 +43,7 @@ export interface Note {
   expectedShares?: bigint
   /** Nullifier of the note spent at bet auth (Vault betRecords key). */
   nullifier_of_bet?: `0x${string}`
-  /** CTF position/token id for the bet (FC-1: needed to submit a FOK SELL to close). */
+  /** CTF position/token id for the bet (FC-1: needed to submit a market SELL to close). */
   position_id?: `0x${string}`
   /** CTF conditionId reduced to BN254 field — the circuit_key used by the Vault. */
   condition_id?: `0x${string}`
@@ -358,6 +358,12 @@ const betCancelEvent = parseAbiItem(
 const naCancelEvent = parseAbiItem(
   'event NACancellationCredited(bytes32 indexed nullifier, bytes32 nullifier_of_bet, bytes32 new_commitment)',
 )
+// FC-4/L3: partial-fill credit (refund of the unfilled remainder of a downsized market order or a
+// partially-filled limit order). Same signature as the cancel events; the event carries no
+// amount, so recovery derives the refund from the (post-normalization) on-chain betRecord.
+const partialFillCreditedEvent = parseAbiItem(
+  'event PartialFillCredited(bytes32 indexed nullifier, bytes32 nullifier_of_bet, bytes32 new_commitment)',
+)
 const withdrawnEvent = parseAbiItem(
   'event Withdrawn(bytes32 indexed nullifier, address recipient, uint256 amount, bytes32 new_commitment)',
 )
@@ -397,6 +403,34 @@ export function byBlockThenLogIndex(
 /**
  * Reconstruct notes by scanning on-chain Vault events and replaying state per deposit index.
  */
+/**
+ * Fetch logs over [fromBlock, toBlock] in chunks via `fetchRange`, halving the window on any
+ * range/result-limit error (public RPCs cap eth_getLogs at ~10000 blocks). Generic over the
+ * log type so each caller keeps viem's inferred return type. Gives up only if a single-block
+ * window still fails (a real RPC error, not a cap).
+ */
+async function getLogsPaged<T>(
+  fetchRange: (from: bigint, to: bigint) => Promise<T[]>,
+  fromBlock: bigint,
+  toBlock: bigint,
+  chunk = 9000n,
+): Promise<T[]> {
+  const out: T[] = []
+  let from = fromBlock
+  let span = chunk
+  while (from <= toBlock) {
+    const to = from + span - 1n > toBlock ? toBlock : from + span - 1n
+    try {
+      out.push(...(await fetchRange(from, to)))
+      from = to + 1n
+    } catch (err) {
+      if (to === from) throw err
+      span = span / 2n > 0n ? span / 2n : 1n
+    }
+  }
+  return out
+}
+
 export async function recoverNotes(
   address: `0x${string}`,
   signMessageAsync: (args: { message: string }) => Promise<`0x${string}`>,
@@ -405,7 +439,75 @@ export async function recoverNotes(
   gapLimit = 5,
 ): Promise<Note[]> {
   const client = createPublicClient({ transport: http(rpcUrl) })
-  return recoverNotesWithClient(address, signMessageAsync, client, vaultAddress, gapLimit)
+  // Start the log scan at the vault's deploy block, not genesis. A public Polygon RPC
+  // (e.g. publicnode) rejects a fromBlock:0→latest getLogs over ~88M blocks ("could not
+  // coalesce error"), which made recovery throw and the portfolio render empty.
+  const fromBlock = BigInt(process.env.NEXT_PUBLIC_VAULT_DEPLOY_BLOCK ?? '0')
+  return recoverNotesWithClient(address, signMessageAsync, client, vaultAddress, gapLimit, 1000, fromBlock)
+}
+
+// Fields that arrive from /recovery-data as decimal strings and must be bigints for the replay.
+const RECOVERY_BIGINT_FIELDS: Record<string, string[]> = {
+  Deposited: ['amount'],
+  BetAuthorized: ['expected_shares', 'bet_amount', 'price'],
+  Withdrawn: ['amount'],
+  BetSold: ['sold_shares', 'proceeds'],
+}
+
+type BackendEvent = { type: string; blockNumber: number; logIndex: number; txHash: string; args: Record<string, unknown> }
+
+function mapBackendEvent(e: BackendEvent) {
+  const args: Record<string, unknown> = { ...e.args }
+  for (const f of RECOVERY_BIGINT_FIELDS[e.type] ?? []) if (args[f] != null) args[f] = BigInt(args[f] as string)
+  if (e.type === 'BetAuthorized' && args.outcome_side != null) args.outcome_side = Number(args.outcome_side)
+  return { _name: e.type, args, blockNumber: BigInt(e.blockNumber), transactionHash: e.txHash as `0x${string}`, logIndex: e.logIndex }
+}
+
+/**
+ * Recover notes by fetching PUBLIC event data from the BACKEND (/recovery-data) instead of scanning
+ * the chain through the user's RPC (slow + Alchemy-free's 10-block getLogs cap). Privacy-preserving:
+ * the backend serves only public events; the secret-based matching runs HERE (client-side) via the
+ * SAME replay (recoverNotesWithClient) fed through a shim client. Only the heavy getLogs are served
+ * from the backend; the few cheap state reads (pendingCredit / betRecords / feeConfig) still go to
+ * the real RPC. A malicious backend can at worst cause INCOMPLETE recovery (omitting events) — it
+ * cannot forge notes, since the replay only acts on events whose nullifier matches the wallet's own
+ * derived nullifier.
+ */
+export async function recoverNotesViaBackend(
+  address: `0x${string}`,
+  signMessageAsync: (args: { message: string }) => Promise<`0x${string}`>,
+  vaultAddress: `0x${string}`,
+  rpcUrl = process.env.NEXT_PUBLIC_CHAIN_RPC ?? 'http://127.0.0.1:8545',
+  recoveryBase = '/api/recovery-data',
+  gapLimit = 5,
+): Promise<Note[]> {
+  const res = await fetch(`${recoveryBase}/${address}`, { cache: 'no-store' })
+  if (!res.ok) throw new Error(`recovery-data HTTP ${res.status}`)
+  const data = (await res.json()) as { deposits: BackendEvent[]; spends: BackendEvent[]; blockTimestamps: Record<string, number> }
+  const all = [...(data.deposits ?? []), ...(data.spends ?? [])].map(mapBackendEvent)
+  const real = createPublicClient({ transport: http(rpcUrl) })
+
+  // Shim: serve getLogs from the backend events (filtered by event name + block range so the replay's
+  // paging reassembles them once); getBlock timestamps from the payload; delegate the rest to the RPC.
+  const shim = {
+    getBlockNumber: () => real.getBlockNumber(),
+    readContract: (p: unknown) => real.readContract(p as never),
+    getLogs: async (p: { event?: { name?: string }; fromBlock?: bigint; toBlock?: bigint }) => {
+      const name = p?.event?.name
+      let evs = all.filter((e) => e._name === name)
+      if (p?.fromBlock != null) evs = evs.filter((e) => e.blockNumber >= p.fromBlock!)
+      if (p?.toBlock != null) evs = evs.filter((e) => e.blockNumber <= p.toBlock!)
+      return evs
+    },
+    getBlock: async (p: { blockNumber?: bigint }) => {
+      const ts = p?.blockNumber != null ? data.blockTimestamps?.[String(Number(p.blockNumber))] : undefined
+      if (ts != null) return { timestamp: BigInt(ts) }
+      return real.getBlock(p as Parameters<typeof real.getBlock>[0])
+    },
+  } as unknown as PublicClient
+
+  const fromBlock = BigInt(process.env.NEXT_PUBLIC_VAULT_DEPLOY_BLOCK ?? '0')
+  return recoverNotesWithClient(address, signMessageAsync, shim, vaultAddress, gapLimit, 1000, fromBlock)
 }
 
 export async function recoverNotesWithClient(
@@ -417,19 +519,27 @@ export async function recoverNotesWithClient(
   // deposit, rather than a fixed cap. `hardCap` bounds the scan defensively.
   gapLimit = 5,
   hardCap = 1000,
+  fromBlock: bigint = 0n,
 ): Promise<Note[]> {
-  const fromBlock = 0n
-  const [deposits, bets, settlements, betCancels, naCancels, withdrawals, betSolds, positionCloseds, consolidations] =
+  // Public Polygon RPCs (e.g. publicnode) cap eth_getLogs at 10000 blocks, so page each scan
+  // in <=9000-block windows (auto-halving on any range/result-limit error). A single
+  // fromBlock→latest scan once the vault has >10k blocks of history is rejected outright.
+  const toBlock = await client.getBlockNumber()
+  const paged = <T>(fetchRange: (from: bigint, to: bigint) => Promise<T[]>): Promise<T[]> =>
+    getLogsPaged(fetchRange, fromBlock, toBlock)
+
+  const [deposits, bets, settlements, betCancels, naCancels, partials, withdrawals, betSolds, positionCloseds, consolidations] =
     await Promise.all([
-      client.getLogs({ address: vaultAddress, event: depositedEvent, args: { depositor: address }, fromBlock }),
-      client.getLogs({ address: vaultAddress, event: betAuthorizedEvent, fromBlock }),
-      client.getLogs({ address: vaultAddress, event: settlementCreditedEvent, fromBlock }),
-      client.getLogs({ address: vaultAddress, event: betCancelEvent, fromBlock }),
-      client.getLogs({ address: vaultAddress, event: naCancelEvent, fromBlock }),
-      client.getLogs({ address: vaultAddress, event: withdrawnEvent, fromBlock }),
-      client.getLogs({ address: vaultAddress, event: betSoldEvent, fromBlock }),
-      client.getLogs({ address: vaultAddress, event: positionClosedEvent, fromBlock }),
-      client.getLogs({ address: vaultAddress, event: consolidatedEvent, fromBlock }),
+      paged((f, t) => client.getLogs({ address: vaultAddress, event: depositedEvent, args: { depositor: address }, fromBlock: f, toBlock: t })),
+      paged((f, t) => client.getLogs({ address: vaultAddress, event: betAuthorizedEvent, fromBlock: f, toBlock: t })),
+      paged((f, t) => client.getLogs({ address: vaultAddress, event: settlementCreditedEvent, fromBlock: f, toBlock: t })),
+      paged((f, t) => client.getLogs({ address: vaultAddress, event: betCancelEvent, fromBlock: f, toBlock: t })),
+      paged((f, t) => client.getLogs({ address: vaultAddress, event: naCancelEvent, fromBlock: f, toBlock: t })),
+      paged((f, t) => client.getLogs({ address: vaultAddress, event: partialFillCreditedEvent, fromBlock: f, toBlock: t })),
+      paged((f, t) => client.getLogs({ address: vaultAddress, event: withdrawnEvent, fromBlock: f, toBlock: t })),
+      paged((f, t) => client.getLogs({ address: vaultAddress, event: betSoldEvent, fromBlock: f, toBlock: t })),
+      paged((f, t) => client.getLogs({ address: vaultAddress, event: positionClosedEvent, fromBlock: f, toBlock: t })),
+      paged((f, t) => client.getLogs({ address: vaultAddress, event: consolidatedEvent, fromBlock: f, toBlock: t })),
     ])
 
   // FEE: read the current governance fee once so the replay reproduces each post-bet balance
@@ -452,7 +562,7 @@ export async function recoverNotesWithClient(
   // FC-5 gap 4: real timestamps. Prefetch the block timestamp for every referenced
   // block once, so recovered notes/activity carry true on-chain times (not Date.now()).
   const blockNums = new Set<bigint>()
-  for (const e of [...deposits, ...bets, ...settlements, ...betCancels, ...naCancels, ...withdrawals, ...positionCloseds, ...consolidations]) {
+  for (const e of [...deposits, ...bets, ...settlements, ...betCancels, ...naCancels, ...partials, ...withdrawals, ...positionCloseds, ...consolidations]) {
     if (e.blockNumber != null) blockNums.add(e.blockNumber)
   }
   const tsByBlock = new Map<bigint, number>()
@@ -549,6 +659,7 @@ export async function recoverNotesWithClient(
       ...settlements.map((e) => ({ type: 'settle' as const, block: e.blockNumber!, idx: e.logIndex, tx: e.transactionHash, args: e.args })),
       ...betCancels.map((e) => ({ type: 'betCancel' as const, block: e.blockNumber!, idx: e.logIndex, tx: e.transactionHash, args: e.args })),
       ...naCancels.map((e) => ({ type: 'naCancel' as const, block: e.blockNumber!, idx: e.logIndex, tx: e.transactionHash, args: e.args })),
+      ...partials.map((e) => ({ type: 'partial' as const, block: e.blockNumber!, idx: e.logIndex, tx: e.transactionHash, args: e.args })),
       ...positionCloseds.map((e) => ({ type: 'close' as const, block: e.blockNumber!, idx: e.logIndex, tx: e.transactionHash, args: e.args })),
       ...consolidations.map((e) => ({ type: 'consolidate' as const, block: e.blockNumber!, idx: e.logIndex, tx: e.transactionHash, args: e.args })),
       ...withdrawals
@@ -688,6 +799,92 @@ export async function recoverNotesWithClient(
           commitment: newCommitment,
           nullifier: computeNullifier(secret, newNonce),
           kind: ev.type === 'settle' ? 'SETTLE_CREDIT' : 'CANCEL_CREDIT',
+          spent: false,
+          createdAt: evTs,
+        }
+      } else if (ev.type === 'partial') {
+        // FC-4/L3: partial-fill credit. Spends the current free note and credits the unfilled
+        // remainder. The event carries no amount, but after partialFillCredit the on-chain record
+        // is NORMALIZED (expected_shares := filled, bet_amount := spent), so we read it back and
+        // derive refund = committed bet (the BetAuthorized amount on the receipt) − spent. Chain-
+        // only — no off-chain attestation. The receipt is normalized but stays OPEN (the filled
+        // position settles/closes later); it is NOT marked spent.
+        const spentNull = ev.args.nullifier! as `0x${string}`
+        if (spentNull.toLowerCase() !== state.nullifier.toLowerCase() || state.spent) continue
+
+        const betNull = ev.args.nullifier_of_bet! as string
+        const receipt = receiptByBetNullifier.get(betNull.toLowerCase())
+
+        let normFilled: bigint | undefined
+        let normSpent: bigint | undefined
+        try {
+          // betRecords getter tuple: [market_id, condition_id, position_id, expected_shares(3),
+          // bet_amount(4), outcome_side, status, sell_proceeds, sold_shares, filled_shares, spent_amount].
+          const rec = (await client.readContract({
+            address: vaultAddress,
+            abi: [{
+              type: 'function', name: 'betRecords', stateMutability: 'view',
+              inputs: [{ type: 'bytes32' }],
+              outputs: [
+                { type: 'bytes32' }, { type: 'bytes32' }, { type: 'bytes32' },
+                { type: 'uint64' }, { type: 'uint64' }, { type: 'uint8' }, { type: 'uint8' },
+                { type: 'uint64' }, { type: 'uint64' }, { type: 'uint64' }, { type: 'uint64' },
+              ],
+            }],
+            functionName: 'betRecords',
+            args: [betNull as `0x${string}`],
+          })) as readonly unknown[]
+          normFilled = BigInt(rec[3] as bigint)
+          normSpent = BigInt(rec[4] as bigint)
+        } catch {
+          /* leave undefined → fall back to commitment inference below */
+        }
+
+        const committed = receipt?.bet_amount ?? 0n
+        const oldBalance = state.balance
+        state.spent = true
+        pushFree(state, ev.tx)
+
+        const newNonce = state.nonce + 1n
+        const newCommitment = ev.args.new_commitment! as `0x${string}`
+        let refund = normSpent != null && committed > normSpent ? committed - normSpent : 0n
+        let newBalance = oldBalance + refund
+        if (normSpent == null) {
+          // betRecords unreadable — back the refund out of the on-chain commitment if possible.
+          const inferred = inferBalanceFromCommitment(secret, newNonce, address, newCommitment)
+          if (inferred != null) {
+            newBalance = inferred
+            refund = inferred > oldBalance ? inferred - oldBalance : 0n
+          }
+        }
+
+        // Normalize the receipt to the actual fill — it stays OPEN for later settle/close.
+        if (receipt) {
+          if (normFilled != null) receipt.expectedShares = normFilled
+          if (normSpent != null) receipt.bet_amount = normSpent
+        }
+
+        activity.push({
+          id: `partial-${ev.tx}-${betNull}`,
+          wallet: address,
+          kind: 'refund',
+          amount: refund,
+          createdAt: evTs,
+          txHash: ev.tx,
+          marketId: receipt?.marketId as `0x${string}` | undefined,
+          receiptId: receipt?.id,
+          receiptNullifier: betNull as `0x${string}`,
+          payout: refund,
+        })
+
+        state = {
+          secret,
+          depositIndex: index,
+          balance: newBalance,
+          nonce: newNonce,
+          commitment: newCommitment,
+          nullifier: computeNullifier(secret, newNonce),
+          kind: 'CANCEL_CREDIT',
           spent: false,
           createdAt: evTs,
         }

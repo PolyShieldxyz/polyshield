@@ -17,9 +17,16 @@ export type MarketEntry = {
   liq: number
   traders: number
   resolves: string
+  endTs?: number // endDate as epoch ms (live markets); used for "Resolves soon" sort
   trend: number[]
   desc?: string
   sources?: string[]
+  // Live Polymarket fields (populated by lib/polymarket.ts; absent for fixtures).
+  yesTokenId?: string
+  noTokenId?: string
+  outcomeLabels?: [string, string] // real outcome names (e.g. ["Up","Down"]); YES=side 0
+  acceptingOrders?: boolean
+  source?: 'live' | 'fixture'
 }
 
 const cid = (label: string) => keccak256(toBytes(label)) as `0x${string}`

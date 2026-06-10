@@ -1,0 +1,9 @@
+node_modules
+.next
+.git
+.env
+.env.*
+logs
+*.log
+# NOTE: do NOT ignore public/ — public/circuits/*.wasm and public/zkeys/*.zkey
+# (~93 MB of ZK artifacts) MUST be in the image.

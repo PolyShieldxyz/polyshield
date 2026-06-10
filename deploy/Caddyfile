@@ -1,0 +1,50 @@
+# Polyshield reverse proxy + automatic TLS.
+# {$SSLIP_HOST} is injected from deploy/.env (e.g. 84-32-231-156.sslip.io).
+# Caddy obtains and renews a real Let's Encrypt certificate for that hostname automatically
+# (needs inbound :80 for the HTTP-01 challenge and :443 for serving). A bare IP cannot get a
+# publicly-trusted cert — that is why a hostname (free sslip.io or a real domain) is required.
+
+# Apex host = marketing site; app.<host> = the dApp (see frontend src/middleware.ts).
+# Caddy serves BOTH and proxies to the same Next server, which routes by subdomain.
+# `app.{$SSLIP_HOST}` is a literal text substitution → app.84-32-231-156.sslip.io.
+{$SSLIP_HOST}, app.{$SSLIP_HOST} {
+	encode zstd gzip
+
+	# The Next.js server (server-side API routes proxy to the private backend over the
+	# compose network, so the backend is never exposed to the internet).
+	reverse_proxy frontend:3000
+
+	# --- Baseline security headers (safe defaults) -------------------------------------
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "DENY"
+		Referrer-Policy "strict-origin-when-cross-origin"
+		# Remove the server banner.
+		-Server
+	}
+
+	# --- Content-Security-Policy (DISABLED by default) ---------------------------------
+	# A wallet dApp with snarkjs WASM proving needs a carefully-tuned CSP. An over-tight
+	# policy WILL break WalletConnect and proof generation, and you cannot easily debug it
+	# remotely. Tune the directives below to your exact RPC + WalletConnect origins, test
+	# every flow (connect wallet, deposit, prove a bet, withdraw), THEN uncomment.
+	#
+	# header Content-Security-Policy "
+	#   default-src 'self';
+	#   script-src 'self' 'wasm-unsafe-eval' 'unsafe-inline';
+	#   style-src 'self' 'unsafe-inline';
+	#   img-src 'self' data: blob: https:;
+	#   font-src 'self' data:;
+	#   connect-src 'self'
+	#     https://polygon-rpc.com
+	#     https://clob.polymarket.com
+	#     wss://ws-subscriptions-clob.polymarket.com
+	#     wss://relay.walletconnect.com
+	#     https://*.walletconnect.com https://*.walletconnect.org;
+	#   worker-src 'self' blob:;
+	#   frame-src 'self' https://*.walletconnect.com https://*.walletconnect.org;
+	#   base-uri 'self';
+	#   object-src 'none';
+	# "
+}

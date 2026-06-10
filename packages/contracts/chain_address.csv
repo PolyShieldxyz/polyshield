@@ -1,0 +1,53 @@
+contract,role,chain_id,address,note
+# Polyshield deployment address book. Network: Polygon mainnet (chain 137).
+# Verified on-chain 2026-06-07 via EIP-1967 impl slots, Vault.verifiers(uint8), and adapter base().
+# USE THE 'proxy' ROW for every config var (NEXT_PUBLIC_VAULT_ADDRESS, VAULT_CONTRACT_ADDRESS, TREE_ADDRESS,
+# verifier slots, etc). 'impl' rows are upgrade targets only; 'base' rows are the raw Groth16 VK behind each verifier adapter.
+#
+# --- Roles (EOA) ---
+Deployer (test),eoa,137,0xb68cE80bB9ad1Dbbd0E8c6C9eFB982763b765F48,owner == deployer == signing layer (test config)
+Owner (test),eoa,137,0xb68cE80bB9ad1Dbbd0E8c6C9eFB982763b765F48,Vault.owner()
+Signing layer (test),eoa,137,0xb68cE80bB9ad1Dbbd0E8c6C9eFB982763b765F48,operator EOA
+#
+# --- Linked libraries (plain, not upgradeable) ---
+VaultInputs,library,137,0x9Cd17Ff3dfc2B23D1DDD16e9472C452ec592b0F8,DELEGATECALL-linked into Vault (EIP-170 split)
+PoseidonT3,library,137,0x4502897573A76FB3A77C1b009F6dB81672b44Aa7,poseidon-solidity library linked into PoseidonT3Hasher
+#
+# --- Core contracts (UUPS: use proxy) ---
+Vault,proxy,137,0xE2Ab841979518784781D05cdE961F5c8bBb26aD2,NEXT_PUBLIC_VAULT_ADDRESS / VAULT_CONTRACT_ADDRESS
+Vault,impl,137,0x56e0fdf95A5BeE42ad2676B2aaC38BEF1992D0fF,implementation behind Vault proxy
+CommitmentMerkleTree,proxy,137,0x99896D59AF6fE68F96E69C5246F2A95c56F5045F,TREE_ADDRESS
+CommitmentMerkleTree,impl,137,0xE34dEB592e79a1AaB27c5440A3C1cC2938507d4f,implementation behind Tree proxy
+NullifierRegistry,proxy,137,0xd983F51E7102A2c5CA0C3618fAe0B8B477940f11,Vault.nullifiers()
+NullifierRegistry,impl,137,0xe459258a8609A59155d96C917610841De87Ac945,implementation behind Registry proxy
+PoseidonT3Hasher,proxy,137,0xACF4bd2fe91233Faf51AE1878792aeEE5cb222CD,POSEIDON_T3_ADDRESS
+PoseidonT3Hasher,impl,137,0xDEAB6B9553783F6e9D79EF4989d278D866C5Ec2f,implementation behind Poseidon proxy
+#
+# --- Verifier adapters (UUPS proxy -> adapter impl -> Groth16 base VK). slot = Vault.verifiers(uint8) ---
+BetAuthVerifier,proxy,137,0x51D7420D6C7509321fD7c1eAfB0487D6602E100b,verifiers(0) BET_AUTH
+BetAuthVerifier,impl,137,0xf38A9976E4F68A903792b7837BD2A8A98E605E63,adapter implementation
+BetAuthVerifier,base,137,0x7c8a77d11C6d537B12343c7cE85eAA542AB8d905,Groth16 base VK (adapter.base())
+SettlementCreditVerifier,proxy,137,0xcA202DDb6A02d336c8Eb84C3499E3649EE5576A5,verifiers(1) SETTLEMENT_CREDIT
+SettlementCreditVerifier,impl,137,0x526BffeEFDcf9580412519E7d9120e97ae6480D8,adapter implementation
+SettlementCreditVerifier,base,137,0x282d134Da91e232F61e9a98249BaEfa307e3Ec4e,Groth16 base VK (adapter.base())
+WithdrawalVerifier,proxy,137,0xfCA08773d41CBf87737b16AB4152C1c3294F8Bd6,verifiers(2) WITHDRAWAL
+WithdrawalVerifier,impl,137,0x932550c2029B2d0c9475f487F0D764AB263c2Ba3,adapter implementation
+WithdrawalVerifier,base,137,0x9221234977B956eA12706A5BEa878857c264d0de,Groth16 base VK (adapter.base())
+BetCancelVerifier,proxy,137,0xF3C989b1135b7338DBEba912F3fE8dB0D6cC7ac2,verifiers(3) BET_CANCEL
+BetCancelVerifier,impl,137,0xd81cB2C7f07a523DA970117FdA523Cf92f91aEE0,adapter implementation
+BetCancelVerifier,base,137,0xe7aC58558423f61d7AB668512bac3b52215847bC,Groth16 base VK (adapter.base())
+CancelCreditVerifier,proxy,137,0x63E22A29e3d887B186d2ab97a14832dAB2689970,verifiers(4) CANCEL_CREDIT
+CancelCreditVerifier,impl,137,0x2811611904265804d6832bf3d382a1b518f4f7e1,adapter implementation
+CancelCreditVerifier,base,137,0xD553f1d0A5Cec6a846f035139724B584136A861B,Groth16 base VK (adapter.base())
+DepositVerifier,proxy,137,0xFFd3415322a2a6eD16E5bA9D2c1FD14e24594c3b,verifiers(5) DEPOSIT
+DepositVerifier,impl,137,0xaFca9f81922418F5Cc805B045A2c3d60A3bfa98d,adapter implementation
+DepositVerifier,base,137,0x641D29E80f72C03227C7b6BE2B6dbCADa8aF4A15,Groth16 base VK (adapter.base())
+PositionCloseVerifier,proxy,137,0x4F0700b2D78FAD313c9465a7E0Ad6cA73C36C29e,verifiers(6) POSITION_CLOSE
+PositionCloseVerifier,impl,137,0xd71646DF95aec888d606e23EF4FcEe3BAb02e736,adapter implementation
+PositionCloseVerifier,base,137,0xA8C8C21cF532Ee5FF95D4626BAC5D516EE24bC0D,Groth16 base VK (adapter.base())
+PartialCreditVerifier,proxy,137,0x79225a0baD117c8076043eF747C5d2dF6Ec7676D,verifiers(7) PARTIAL_CREDIT
+PartialCreditVerifier,impl,137,0x45f7D4b7Df11F868d0851C5Ad64f590f64eBDA79,adapter implementation
+PartialCreditVerifier,base,137,0x6bDeb10e02BbC65E501B44f43bFf3bff88BAFcAD,Groth16 base VK (adapter.base())
+ConsolidateVerifier,proxy,137,0x99510509b290C686066D635a04b295d4743e8EDB,verifiers(8) CONSOLIDATE
+ConsolidateVerifier,impl,137,0x87a8C9e49c1890eBceECbbA0058282f0DB6bfa90,adapter implementation
+ConsolidateVerifier,base,137,0xF4Fcf4e329DF13Bf12cFd82CEF322C77eEA0733D,Groth16 base VK (adapter.base())

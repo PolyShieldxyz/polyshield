@@ -2,6 +2,7 @@ import { ethers } from "ethers";
 import pino from "pino";
 import { config } from "./config";
 import { signingLayerNonceManager } from "./nonceManager";
+import { getDepositWalletExecutor, wrapUsdcToPusd } from "./depositWalletExecutor";
 
 const logger = pino({ name: "jit-funding" });
 
@@ -33,15 +34,25 @@ const VAULT_ABI = ["function fundPolymarketWallet(uint256 amount) external"];
 // previous one; on-chain nonce safety is handled by signingLayerNonceManager.
 let fundingChain: Promise<unknown> = Promise.resolve();
 
+/**
+ * Run `fn` serialized on the shared funding mutex. BOTH per-bet JIT funding
+ * (ensureDepositWalletFunded) and the proactive buffer manager (bufferManager.ts) enqueue here, so
+ * a buffer top-up and a JIT top-up can never interleave — otherwise two near-simultaneous reads of
+ * the deposit-wallet balance would both see a shortfall and double-fund (or reuse a nonce). The
+ * mutex is never poisoned: a rejecting `fn` still advances the queue for the next caller.
+ */
+export async function runOnFundingChain<T>(fn: () => Promise<T>): Promise<T> {
+  const run = fundingChain.then(fn);
+  fundingChain = run.catch(() => undefined);
+  return run;
+}
+
 export async function ensureDepositWalletFunded(
   provider: ethers.JsonRpcProvider,
   operatorWallet: ethers.Wallet,
   betAmount: bigint,
 ): Promise<boolean> {
-  const run = fundingChain.then(() => fundOnce(provider, operatorWallet, betAmount));
-  // Keep the chain alive regardless of this call's outcome (never poison the mutex).
-  fundingChain = run.catch(() => undefined);
-  return run.catch((err) => {
+  return runOnFundingChain(() => fundOnce(provider, operatorWallet, betAmount)).catch((err) => {
     logger.error({ err: String(err) }, "JIT funding: unexpected error — treating as unfunded");
     return false;
   });
@@ -52,27 +63,31 @@ async function fundOnce(
   operatorWallet: ethers.Wallet,
   betAmount: bigint,
 ): Promise<boolean> {
-  if (!config.pusdAddress || !config.depositWalletAddress) {
-    logger.error("JIT funding: PUSD_ADDRESS / DEPOSIT_WALLET_ADDRESS not set — cannot fund");
+  if (!config.pusdAddress || !config.depositWalletAddress || !config.onrampAddress) {
+    logger.error("JIT funding: PUSD_ADDRESS / DEPOSIT_WALLET_ADDRESS / ONRAMP_ADDRESS not set — cannot fund");
     return false;
   }
   try {
+    // Polymarket trades in pUSD, so the deposit wallet's buying power is its pUSD balance.
+    // The vault funds in USDC (it can't hold pUSD), then the deposit wallet wraps USDC→pUSD
+    // via the onramp. The residual buffer is therefore pUSD left from a prior no-fill.
     const pusd = new ethers.Contract(config.pusdAddress, ERC20_ABI, provider);
     const balance = (await pusd.balanceOf(config.depositWalletAddress)) as bigint;
 
     if (balance >= betAmount) {
       logger.info(
         { balance: balance.toString(), betAmount: betAmount.toString() },
-        "JIT funding: residual buffer already covers bet — reusing (no onramp)",
+        "JIT funding: residual pUSD buffer already covers bet — reusing (no top-up)",
       );
       return true;
     }
 
     const shortfall = betAmount - balance;
+    // (1) Move the USDC shortfall vault → deposit wallet (USDC, since the vault can't hold pUSD).
     const vault = new ethers.Contract(config.vaultContractAddress, VAULT_ABI, operatorWallet);
     logger.info(
-      { balance: balance.toString(), betAmount: betAmount.toString(), shortfall: shortfall.toString() },
-      "JIT funding: topping up deposit wallet via fundPolymarketWallet",
+      { pusdBalance: balance.toString(), betAmount: betAmount.toString(), shortfall: shortfall.toString() },
+      "JIT funding: topping up deposit wallet via fundPolymarketWallet (USDC)",
     );
     const tx = await signingLayerNonceManager.send(provider, operatorWallet, (nonce) =>
       (vault as ethers.Contract & {
@@ -80,7 +95,12 @@ async function fundOnce(
       }).fundPolymarketWallet(shortfall, { nonce }),
     );
     await tx.wait(1);
-    logger.info({ shortfall: shortfall.toString(), txHash: tx.hash }, "JIT funding: fundPolymarketWallet confirmed");
+    logger.info({ shortfall: shortfall.toString(), txHash: tx.hash }, "JIT funding: fundPolymarketWallet confirmed (USDC in deposit wallet)");
+
+    // (2) Deposit wallet wraps the USDC shortfall → pUSD via the onramp (mints pUSD to itself).
+    const executor = getDepositWalletExecutor(provider);
+    await wrapUsdcToPusd(executor, shortfall);
+    logger.info({ shortfall: shortfall.toString() }, "JIT funding: USDC→pUSD wrapped in deposit wallet");
     return true;
   } catch (err) {
     // DeployCapExceeded / InsufficientVaultLiquidity / any revert: never throw and

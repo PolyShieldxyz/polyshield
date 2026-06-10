@@ -70,6 +70,25 @@ const order = {
   price: 50_000_000n,
   orderType: "GTC" as const,
   expiration: 0,
+  side: "BUY" as const,
+  sellLimitPrice: 0n,
+  takerFeeUsd: 0n,
+};
+
+// FC-1: a resting SELL close (side: SELL) of the same position at a 0.60 limit.
+const sellOrder = {
+  nullifier: "0x" + "1".repeat(64),
+  orderID: "0xsell1",
+  conditionId: "0x" + "2".repeat(64),
+  tokenId: "0x" + "3".repeat(64),
+  expected_shares: 200_000_000n, // target sell size
+  bet_amount: 0n,
+  price: 0n,
+  orderType: "GTC" as const,
+  expiration: 0,
+  side: "SELL" as const,
+  sellLimitPrice: 600_000n, // 0.60 (1e6-scaled)
+  takerFeeUsd: 0n,
 };
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -160,6 +179,105 @@ describe("wsFillTracker", () => {
     expect((store as { signAndStoreAttestation: jest.Mock }).signAndStoreAttestation).toHaveBeenCalledWith(
       expect.anything(), expect.anything(),
       { nullifierOfBet: order.nullifier, reportType: ReportType.FILLED, amountA: 0n, amountB: 0n },
+    );
+    tracker.stopFillTracker();
+  });
+
+  // ── FC-1: resting SELL (position close) ──────────────────────────────────────
+  it("resting SELL partial fill → SOLD (filled, proceeds at the sell limit)", async () => {
+    const { tracker, store, ws } = await load();
+    tracker.startFillTracker(wallet);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const inst: any = ws.instances[ws.instances.length - 1];
+    inst.emit("open");
+    tracker.trackOrder(sellOrder);
+    // 120 of 200 shares matched; proceeds = 120 × 0.60 = 72 USDC (derived from sellLimitPrice).
+    inst.emit("message", JSON.stringify({ event_type: "order", orderID: sellOrder.orderID, status: "partial", size_matched: 120 }));
+    await flush();
+    expect((store as { signAndStoreAttestation: jest.Mock }).signAndStoreAttestation).toHaveBeenCalledWith(
+      expect.anything(), expect.anything(),
+      { nullifierOfBet: sellOrder.nullifier, reportType: ReportType.SOLD, amountA: 120_000_000n, amountB: 72_000_000n },
+    );
+    tracker.stopFillTracker();
+  });
+
+  it("resting SELL full fill → SOLD with amountA snapped to expected (within DUST)", async () => {
+    const { tracker, store, ws } = await load();
+    tracker.startFillTracker(wallet);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const inst: any = ws.instances[ws.instances.length - 1];
+    inst.emit("open");
+    tracker.trackOrder(sellOrder);
+    inst.emit("message", JSON.stringify({ event_type: "order", orderID: sellOrder.orderID, status: "matched", size_matched: 200 }));
+    await flush();
+    expect((store as { signAndStoreAttestation: jest.Mock }).signAndStoreAttestation).toHaveBeenCalledWith(
+      expect.anything(), expect.anything(),
+      { nullifierOfBet: sellOrder.nullifier, reportType: ReportType.SOLD, amountA: 200_000_000n, amountB: 120_000_000n },
+    );
+    tracker.stopFillTracker();
+  });
+
+  it("resting SELL zero fill → NO attestation (position unchanged, not FAILED)", async () => {
+    const { tracker, store, ws } = await load();
+    tracker.startFillTracker(wallet);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const inst: any = ws.instances[ws.instances.length - 1];
+    inst.emit("open");
+    tracker.trackOrder(sellOrder);
+    inst.emit("message", JSON.stringify({ event_type: "order", orderID: sellOrder.orderID, status: "cancelled", filledShares: 0, spentAmount: 0 }));
+    await flush();
+    expect((store as { signAndStoreAttestation: jest.Mock }).signAndStoreAttestation).not.toHaveBeenCalled();
+    expect((store as { __signCount: { n: number } }).__signCount.n).toBe(0);
+    tracker.stopFillTracker();
+  });
+
+  // BUG-6: a SELL close rests on an already-FILLED bet. trackOrder/resume must anti-join against the
+  // SOLD slot, NOT the bet's FILLED outcome — else the resting close is dropped. (trackOrder and the
+  // restart resume share the same `alreadyAttested` helper.)
+  it("trackOrder keeps a SELL close even when the bet already has a FILLED outcome", async () => {
+    const { tracker, store } = await load();
+    (store as { getAttestation: jest.Mock }).getAttestation.mockImplementation(
+      (_n: string, rt?: number) => (rt === undefined ? { reportType: ReportType.FILLED } : null),
+    );
+    tracker.startFillTracker(wallet);
+    tracker.trackOrder(sellOrder);
+    expect(tracker.isOrderTracked(sellOrder.nullifier)).toBe(true); // not skipped despite the FILLED outcome
+    tracker.stopFillTracker();
+  });
+
+  // FC fee hole (a): a crossing limit BUY took liquidity (taker) → its crossed-portion fee is carried
+  // on the tracked order and ADDED to spent at terminal, so it is NOT refunded.
+  it("BUY takerFeeUsd is added to spent (crossing-limit fee not refunded)", async () => {
+    const { tracker, store, ws } = await load();
+    tracker.startFillTracker(wallet);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const inst: any = ws.instances[ws.instances.length - 1];
+    inst.emit("open");
+    tracker.trackOrder({ ...order, takerFeeUsd: 5_000_000n }); // $5 crossed-portion fee
+    // Partial fill: 120 of 200 shares, $60 on shares; spent must include the $5 fee → $65.
+    inst.emit("message", JSON.stringify({ event_type: "order", orderID: order.orderID, status: "partial", filledShares: 120_000_000, spentAmount: 60_000_000 }));
+    await flush();
+    expect((store as { signAndStoreAttestation: jest.Mock }).signAndStoreAttestation).toHaveBeenCalledWith(
+      expect.anything(), expect.anything(),
+      { nullifierOfBet: order.nullifier, reportType: ReportType.PARTIAL, amountA: 120_000_000n, amountB: 65_000_000n },
+    );
+    tracker.stopFillTracker();
+  });
+
+  // FC fee hole (b): a crossing limit SELL → its crossed-portion fee is SUBTRACTED from proceeds.
+  it("SELL takerFeeUsd is subtracted from proceeds", async () => {
+    const { tracker, store, ws } = await load();
+    tracker.startFillTracker(wallet);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const inst: any = ws.instances[ws.instances.length - 1];
+    inst.emit("open");
+    tracker.trackOrder({ ...sellOrder, takerFeeUsd: 2_000_000n }); // $2 crossed-portion fee
+    // 120 of 200 shares sold at 0.60 → $72 gross proceeds; net of the $2 fee → $70.
+    inst.emit("message", JSON.stringify({ event_type: "order", orderID: sellOrder.orderID, status: "partial", size_matched: 120 }));
+    await flush();
+    expect((store as { signAndStoreAttestation: jest.Mock }).signAndStoreAttestation).toHaveBeenCalledWith(
+      expect.anything(), expect.anything(),
+      { nullifierOfBet: sellOrder.nullifier, reportType: ReportType.SOLD, amountA: 120_000_000n, amountB: 70_000_000n },
     );
     tracker.stopFillTracker();
   });

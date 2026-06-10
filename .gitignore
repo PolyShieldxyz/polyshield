@@ -1,4 +1,5 @@
 .claude/
+.devcontainer/
 # Private working docs at repo root (tracked versions live in docs/)
 /architecture.md
 /open-questions.md
@@ -18,19 +19,39 @@ packages/.env.test
 .env.test.local
 .env.production.local
 
+
+# Mainnet deploy secrets (live private keys — NEVER commit; the .env.mainnet.example template IS tracked)
+.env.mainnet
+/deploy/.env
+/deploy/env/common.env
+/deploy/env/frontend.env
+/deploy/env/proof-relay.env
+/deploy/env/signing-layer.env
+
 # Dependencies
 node_modules/
 .pnpm-store/
 
 # Noir build artifacts
 packages/circuits/**/target/
+packages/circuits/bet_auth
+packages/circuits/bet_cancel
+packages/circuits/cancel_credit
+packages/circuits/settlement_credit
+packages/circuits/withdrawal
+packages/circuits/lib
+
 
 # Foundry artifacts
 packages/contracts/out/
 packages/contracts/cache/
+packages/contracts/MockAcceptVerifier.s.sol
+packages/contracts/MockDeploy.s.sol
 
 # TypeScript build
 packages/backend/**/dist/
+packages/backend/mock-clob-server
+packages/backend/mock-env
 
 # Next.js build cache
 packages/frontend/.next/

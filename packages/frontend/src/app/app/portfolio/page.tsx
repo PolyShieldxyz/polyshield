@@ -2,7 +2,7 @@
 
 import Link from 'next/link'
 import { Suspense, useEffect, useMemo, useState } from 'react'
-import { useAccount } from 'wagmi'
+import { useAccount, useSignMessage } from 'wagmi'
 import { useRouter, useSearchParams } from 'next/navigation'
 import { SettlementModal } from '@/components/app/SettlementModal'
 import { ClosePositionModal } from '@/components/app/ClosePositionModal'
@@ -10,8 +10,8 @@ import { PartialFillCreditModal } from '@/components/app/PartialFillCreditModal'
 import { BetCancelRefundModal } from '@/components/app/BetCancelRefundModal'
 import { Icon, ICONS } from '@/components/ui/Icon'
 import { log } from '@/lib/logger'
-import { formatUsdc, type Note } from '@/lib/notes'
-import { BET_STATUS, fetchAttestation, fetchBetStatus } from '@/lib/api'
+import { addNote, getNotes, recoverNotes, recoverNotesViaBackend, formatUsdc, type Note } from '@/lib/notes'
+import { BET_STATUS, fetchAttestation, fetchBetStatus, cancelPendingBet } from '@/lib/api'
 
 // FC-9 attestation reportType (off-chain operator fill report): 1=FILLED, 2=FAILED, 3=PARTIAL.
 const REPORT_FILLED = 1
@@ -21,6 +21,13 @@ import { portfolioSummaryRows, usePortfolioState } from '@/lib/accountState'
 
 const VAULT_ADDRESS = (process.env.NEXT_PUBLIC_VAULT_ADDRESS ??
   '0x0000000000000000000000000000000000000000') as `0x${string}`
+
+// Share counts are stored 1e6-scaled (like the on-chain order size); divide for display.
+function fmtShares(scaled?: bigint): string {
+  if (scaled === undefined || scaled === null) return '—'
+  const n = Number(scaled) / 1e6
+  return n.toLocaleString(undefined, { maximumFractionDigits: 2 })
+}
 
 function formatDate(timestamp: number): string {
   return new Date(timestamp).toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' })
@@ -48,11 +55,79 @@ function PortfolioContent() {
   // receipt.id → on-chain BetStatus.
   const [betStatuses, setBetStatuses] = useState<Record<string, number>>({})
   // FC-9: receipt.id → the operator's off-chain bet-OUTCOME attestation reportType
-  // (1=FILLED, 2=FAILED, 3=PARTIAL, or 0=none yet). A resting GTC/GTD bet is ACTIVE on-chain
+  // (1=FILLED, 2=FAILED, 3=PARTIAL, or 0=none yet). A resting limit order is ACTIVE on-chain
   // either way, so this off-chain outcome — not the on-chain status — tells filled vs
   // resting vs expired apart, and drives the per-row label and action.
   const [betOutcomes, setBetOutcomes] = useState<Record<string, number>>({})
+  // L3: receipt.id → the ACTUAL fill from a PARTIAL attestation (filled_shares, spent_amount,
+  // both 1e6-scaled). Drives the per-row "Fill %" and the held-shares display so a downsized
+  // market order shows what truly executed rather than the committed (now upper-bound) estimate.
+  const [betFills, setBetFills] = useState<Record<string, { filled: bigint; spent: bigint }>>({})
   const { state, loading, refresh } = usePortfolioState(address)
+  const { signMessageAsync } = useSignMessage()
+  const [recovering, setRecovering] = useState(false)
+  const [recoverMsg, setRecoverMsg] = useState<string | null>(null)
+  const [cancelling, setCancelling] = useState<string | null>(null)
+
+  // Cancel/recover a stuck pending bet (order never reached Polymarket, or a resting order to
+  // abandon). The operator attests FAILED if there's no live order (→ reclaimable here), or
+  // cancels the resting order on the CLOB and the fill tracker finalizes it (FAILED/PARTIAL).
+  const handleCancelBet = async (receipt: Note) => {
+    const n = (receipt.nullifier_of_bet ?? receipt.nullifier) as string
+    if (!n || cancelling) return
+    setCancelling(receipt.id)
+    try {
+      const r = await cancelPendingBet(n)
+      setRecoverMsg(
+        r.outcome === 'failed' || r.outcome === 'already-finalized'
+          ? 'Bet cancelled — you can now reclaim your stake below.'
+          : 'Cancellation requested — the resting order is being cancelled; the reclaim/refund action will appear shortly.',
+      )
+      await refresh()
+    } catch (e) {
+      setRecoverMsg(`Cancel failed: ${e instanceof Error ? e.message : String(e)}`)
+    } finally {
+      setCancelling(null)
+    }
+  }
+
+  // Rebuild the local note cache from on-chain events (P3+ wallet-derived recovery). Needed
+  // after clearing the browser cache or switching devices — the secret is never persisted,
+  // so notes are re-derived from the wallet signature per deposit index and matched against
+  // chain events. Prompts the wallet to sign once per deposit index scanned.
+  const handleRecover = async () => {
+    if (!address || recovering) return
+    setRecovering(true)
+    setRecoverMsg(null)
+    try {
+      const rpcUrl = process.env.NEXT_PUBLIC_CHAIN_RPC || process.env.NEXT_PUBLIC_POLYGON_RPC || undefined
+      // Prefer the backend recovery data (events served from the proof-relay's index — fast, no
+      // client RPC scan). Fall back to the direct on-chain scan if the backend endpoint is
+      // unavailable (e.g. index not yet ready). The secret-based matching is identical either way.
+      let recovered: Note[]
+      try {
+        recovered = await recoverNotesViaBackend(address, signMessageAsync, VAULT_ADDRESS, rpcUrl)
+      } catch (backendErr) {
+        console.warn('[recover] backend recovery-data unavailable, falling back to chain scan:', backendErr)
+        recovered = await recoverNotes(address, signMessageAsync, VAULT_ADDRESS, rpcUrl)
+      }
+      const existing = new Set(getNotes().map((n) => n.id))
+      let added = 0
+      for (const n of recovered) {
+        if (!existing.has(n.id)) { addNote(n); added++ }
+      }
+      setRecoverMsg(
+        recovered.length === 0
+          ? 'No notes found on-chain for this wallet.'
+          : `Restored ${recovered.length} note(s) from chain (${added} new).`,
+      )
+      await refresh()
+    } catch (e) {
+      setRecoverMsg(`Restore failed: ${e instanceof Error ? e.message : String(e)}`)
+    } finally {
+      setRecovering(false)
+    }
+  }
 
   useEffect(() => {
     log('page_view', { route: '/app/portfolio' })
@@ -80,6 +155,8 @@ function PortfolioContent() {
           const n = (r.nullifier_of_bet ?? r.nullifier) as `0x${string}`
           let status = -1
           let outcome = 0
+          let filled = 0n
+          let spent = 0n
           try { status = await fetchBetStatus(VAULT_ADDRESS, n) } catch { /* leave -1 */ }
           // FC-9: read the operator's bet-OUTCOME attestation. While the bet is still
           // open on-chain (ACTIVE/RESTING — not yet credited), this distinguishes a filled
@@ -88,13 +165,20 @@ function PortfolioContent() {
           if (status === BET_STATUS.ACTIVE || status === BET_STATUS.RESTING) {
             const att = await fetchAttestation(n)
             outcome = att ? att.reportType : 0
+            // L3: a PARTIAL attestation carries the ACTUAL fill (amountA=filled_shares,
+            // amountB=spent_amount) — surface it for the Fill % and held-shares display.
+            if (att && att.reportType === REPORT_PARTIAL) {
+              filled = BigInt(att.amountA)
+              spent = BigInt(att.amountB)
+            }
           }
-          return [r.id, status, outcome] as const
+          return { id: r.id, status, outcome, filled, spent }
         }),
       )
       if (!cancelled) {
-        setBetStatuses(Object.fromEntries(entries.map((e) => [e[0], e[1]])))
-        setBetOutcomes(Object.fromEntries(entries.map((e) => [e[0], e[2]])))
+        setBetStatuses(Object.fromEntries(entries.map((e) => [e.id, e.status])))
+        setBetOutcomes(Object.fromEntries(entries.map((e) => [e.id, e.outcome])))
+        setBetFills(Object.fromEntries(entries.map((e) => [e.id, { filled: e.filled, spent: e.spent }])))
       }
     })()
     return () => { cancelled = true }
@@ -125,9 +209,13 @@ function PortfolioContent() {
   const classify = (receipt: Note) => {
     const ready = readyByReceiptId.has(receipt.id)
     const outcome = betOutcomes[receipt.id] ?? 0
-    const isPartial = outcome === REPORT_PARTIAL
+    // On-chain FILLED is authoritative: a partial-fill credit normalizes the record to FILLED, so
+    // such a bet is a held position even before its market resolves (and its PARTIAL attestation
+    // is no longer the live state). Without this it fell through to "PENDING" in OPEN ORDERS.
+    const onchainFilled = (betStatuses[receipt.id] ?? -1) === BET_STATUS.FILLED
+    const isPartial = outcome === REPORT_PARTIAL && !onchainFilled
     const isFailed = outcome === REPORT_FAILED
-    const isFilled = outcome === REPORT_FILLED
+    const isFilled = outcome === REPORT_FILLED || onchainFilled
     return { ready, isPartial, isFailed, isFilled, isPosition: ready || isFilled || isPartial }
   }
   const visibleReceipts = (state?.openReceipts ?? []).filter((r) => !lostBetIds.has(r.id))
@@ -142,12 +230,26 @@ function PortfolioContent() {
       : isFilled ? 'FILLED'
       : 'PENDING'
     const pillClass = ready ? 'pill-green' : isPartial ? 'pill-amber' : isFailed ? 'pill-red' : 'pill-soft'
+    // L3: show the ACTUAL fill. A partial fill holds `filled` shares (operator PARTIAL attestation);
+    // a full fill holds the committed expected_shares. Fill % is vs the committed order size, so the
+    // user sees how much of their order executed.
+    const expected = receipt.expectedShares ?? 0n
+    const fill = betFills[receipt.id]
+    const heldShares = isPartial && fill && fill.filled > 0n ? fill.filled : expected
+    const fillLabel = isFilled
+      ? '100%'
+      : isFailed
+        ? '0%'
+        : isPartial && fill && expected > 0n
+          ? `${(Number((fill.filled * 1000n) / expected) / 10).toFixed(1)}%`
+          : '—'
     return (
       <tr key={receipt.id}>
         <td>{receipt.marketId ?? receipt.id}</td>
         <td>{receipt.side ?? '—'}</td>
         <td className="num" style={{ textAlign: 'right' }}>${formatUsdc(receipt.bet_amount ?? receipt.balance)}</td>
-        <td className="num" style={{ textAlign: 'right' }}>{receipt.expectedShares?.toString() ?? '—'}</td>
+        <td className="num" style={{ textAlign: 'right' }}>{fmtShares(heldShares)}</td>
+        <td className="num" style={{ textAlign: 'right' }}>{fillLabel}</td>
         <td>
           <span className={`pill ${pillClass}`} style={{ fontSize: 10 }}>{label}</span>
         </td>
@@ -162,9 +264,21 @@ function PortfolioContent() {
             // Close is only meaningful once the bet actually filled (there are shares to sell).
             <button className="btn btn-sm" onClick={() => setCloseReceipt(receipt)}>Close</button>
           ) : (
-            <span className="small" style={{ fontSize: 10, color: 'var(--text-3)' }}>
-              {isFilled ? '—' : 'Waiting for fill…'}
-            </span>
+            <div className="row gap-2" style={{ justifyContent: 'flex-end', alignItems: 'center' }}>
+              <span className="small" style={{ fontSize: 10, color: 'var(--text-3)' }}>
+                {isFilled ? '—' : 'Waiting for fill…'}
+              </span>
+              {!isFilled && (
+                <button
+                  className="btn btn-sm"
+                  disabled={cancelling === receipt.id}
+                  title="Cancel this bet (e.g. its order never reached Polymarket) and reclaim your stake"
+                  onClick={() => void handleCancelBet(receipt)}
+                >
+                  {cancelling === receipt.id ? 'Cancelling…' : 'Cancel'}
+                </button>
+              )}
+            </div>
           )}
         </td>
       </tr>
@@ -191,6 +305,14 @@ function PortfolioContent() {
           </span>
         </div>
         <div className="row gap-2">
+          <button
+            onClick={() => void handleRecover()}
+            disabled={!address || recovering}
+            className="btn btn-sm"
+            title="Re-derive your notes from on-chain events (after a cache clear or new device). Prompts a wallet signature per deposit index."
+          >
+            <Icon d={ICONS.search} size={12} /> {recovering ? 'Restoring…' : 'Restore from chain'}
+          </button>
           <Link href="/app/deposit" className="btn btn-sm" style={{ textDecoration: 'none' }}>
             <Icon d={ICONS.arrowDown} size={12} /> Deposit
           </Link>
@@ -199,6 +321,9 @@ function PortfolioContent() {
           </Link>
         </div>
       </div>
+      {recoverMsg && (
+        <div className="row" style={{ padding: '8px 24px', fontSize: 12, color: 'var(--text-2)' }}>{recoverMsg}</div>
+      )}
 
       <div style={{ padding: 24 }}>
         {loading && (
@@ -232,6 +357,7 @@ function PortfolioContent() {
                     <th>Side</th>
                     <th style={{ textAlign: 'right' }}>Amount</th>
                     <th style={{ textAlign: 'right' }}>Shares</th>
+                    <th style={{ textAlign: 'right' }}>Fill</th>
                     <th>Status</th>
                     <th></th>
                   </tr>
@@ -239,7 +365,7 @@ function PortfolioContent() {
                 <tbody>
                   {openPositions.length === 0 && (
                     <tr>
-                      <td colSpan={6} style={{ textAlign: 'center', color: 'var(--text-3)', padding: 24, fontSize: 12 }}>
+                      <td colSpan={7} style={{ textAlign: 'center', color: 'var(--text-3)', padding: 24, fontSize: 12 }}>
                         No open positions yet.
                       </td>
                     </tr>
@@ -262,6 +388,7 @@ function PortfolioContent() {
                     <th>Side</th>
                     <th style={{ textAlign: 'right' }}>Amount</th>
                     <th style={{ textAlign: 'right' }}>Order shares</th>
+                    <th style={{ textAlign: 'right' }}>Fill</th>
                     <th>Status</th>
                     <th></th>
                   </tr>
@@ -269,7 +396,7 @@ function PortfolioContent() {
                 <tbody>
                   {openOrders.length === 0 && (
                     <tr>
-                      <td colSpan={6} style={{ textAlign: 'center', color: 'var(--text-3)', padding: 24, fontSize: 12 }}>
+                      <td colSpan={7} style={{ textAlign: 'center', color: 'var(--text-3)', padding: 24, fontSize: 12 }}>
                         No open orders.
                       </td>
                     </tr>

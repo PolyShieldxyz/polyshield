@@ -10,7 +10,7 @@ import {
   computeNullifier,
   deriveSecret,
   formatUsdc,
-  getSpendableNotes,
+  getFreeNoteForDeposit,
   markBetReceiptSpent,
   markNoteSpent,
   recordWalletActivity,
@@ -26,8 +26,8 @@ import {
 } from '@/lib/api'
 import { generateProofInWorker } from '@/lib/prover'
 
-// FC-9 operator report types. A FOK-failed / GTD-expired order is attested FAILED;
-// the depositor reclaims their FULL stake via betCancellationCredit.
+// FC-9 operator report types. A market order that didn't fill, or an expired limit order, is
+// attested FAILED; the depositor reclaims their FULL stake via betCancellationCredit.
 const REPORT_FAILED = 2
 
 type Phase = 'input' | 'proving' | 'done' | 'error'
@@ -35,15 +35,15 @@ type Phase = 'input' | 'proving' | 'done' | 'error'
 interface BetCancelRefundModalProps {
   open: boolean
   address: `0x${string}`
-  receipt: Note // a BET_RECEIPT note the operator reported FAILED (FOK no-fill or GTD expiry)
+  receipt: Note // a BET_RECEIPT note the operator reported FAILED (market no-fill or limit expiry)
   vaultAddress: string
   onClose: () => void
   onComplete: () => Promise<void> | void
 }
 
 /**
- * Reclaim the full stake of a bet whose order never filled — a FOK that missed, or a
- * GTD limit order that expired on the book. The operator signs a FAILED attestation; the
+ * Reclaim the full stake of a bet whose order never filled — a market order that missed, or a
+ * limit order that expired on the book. The operator signs a FAILED attestation; the
  * Vault's betCancellationCredit injects the original bet_amount and credits it back to a
  * fresh note. Mirrors PartialFillCreditModal but refunds the WHOLE stake and retires the
  * receipt (there is no remaining position).
@@ -75,7 +75,7 @@ export function BetCancelRefundModal({
       try {
         const att = await fetchAttestation(nullifierOfBet, REPORT_FAILED)
         if (!att || att.reportType !== REPORT_FAILED) {
-          setError('No failure attestation is available for this bet yet. The operator signs it once the order misses (FOK) or the limit order expires (GTD).')
+          setError('No failure attestation is available for this bet yet. The operator signs it once the market order misses or the limit order expires.')
           setPhase('error')
           return
         }
@@ -101,15 +101,14 @@ export function BetCancelRefundModal({
   const run = async () => {
     setError(null)
     try {
-      // bet_cancel spends the immediate post-bet note (nonce = receipt.nonce + 1): the
-      // circuit derives nullifier_of_bet = Poseidon2(secret, nonce - 1). Not an arbitrary note.
-      const outputNote = getSpendableNotes(address).find(
-        (n) => n.depositIndex === receipt.depositIndex && n.nonce === receipt.nonce + 1n,
-      )
-      if (!outputNote) {
+      // Decoupled reclaim: spend the CURRENT note in this bet's deposit lineage and bind the bet
+      // via bet_nonce = receipt.nonce (the circuit derives nullifier_of_bet = Poseidon2(secret,
+      // bet_nonce)). This no longer requires the immediate post-bet note, so a later action that
+      // consumed it doesn't orphan the reclaim.
+      const freeNote = getFreeNoteForDeposit(address, receipt.depositIndex)
+      if (!freeNote) {
         throw new Error(
-          'The post-bet note for this bet is unavailable (already spent on a later action). ' +
-          'Reclaim requires the original post-bet note.',
+          'No spendable note found for this bet. Recover your notes from chain (Portfolio → Restore) and retry.',
         )
       }
       if (betAmount <= 0n) {
@@ -117,10 +116,10 @@ export function BetCancelRefundModal({
       }
 
       setPhase('proving')
-      const secret = await deriveSecret(signMessageAsync, address, outputNote.depositIndex)
-      const merkle = await fetchMerklePath(outputNote.commitment)
-      const newNonce = outputNote.nonce + 1n
-      const newBalance = outputNote.balance + betAmount
+      const secret = await deriveSecret(signMessageAsync, address, freeNote.depositIndex)
+      const merkle = await fetchMerklePath(freeNote.commitment)
+      const newNonce = freeNote.nonce + 1n
+      const newBalance = freeNote.balance + betAmount
       const newCommitment = computeCommitment(secret, newBalance, newNonce, address)
       const newNullifier = computeNullifier(secret, newNonce)
 
@@ -128,13 +127,14 @@ export function BetCancelRefundModal({
         type: 'bet_cancel',
         inputs: {
           secret,
-          current_balance: outputNote.balance,
-          nonce: outputNote.nonce,
+          current_balance: freeNote.balance,
+          nonce: freeNote.nonce,
           merkle_path: merkle.path,
           merkle_path_indices: merkle.pathIndices,
           owner_address: address,
+          bet_nonce: receipt.nonce, // nonce of the note the bet was made from
           merkle_root: merkle.root,
-          nullifier: outputNote.nullifier,
+          nullifier: freeNote.nullifier,
           new_commitment: newCommitment,
           nullifier_of_bet: nullifierOfBet,
           bet_amount: betAmount, // Vault-injected; must match rec.bet_amount
@@ -143,19 +143,19 @@ export function BetCancelRefundModal({
 
       const { txHash } = await relayBetCancel(proof, {
         merkle_root: merkle.root,
-        nullifier: outputNote.nullifier,
+        nullifier: freeNote.nullifier,
         new_commitment: newCommitment,
         nullifier_of_bet: nullifierOfBet,
       }, attestation ?? undefined)
       await waitForTransactionConfirmation(txHash as `0x${string}`)
 
-      markNoteSpent(outputNote.commitment)
+      markNoteSpent(freeNote.commitment)
       markBetReceiptSpent(nullifierOfBet)
       addNote({
         id: newCommitment,
         kind: 'CANCEL_CREDIT',
         owner_address: address,
-        depositIndex: outputNote.depositIndex,
+        depositIndex: freeNote.depositIndex,
         balance: newBalance,
         nonce: newNonce,
         commitment: newCommitment,
@@ -191,7 +191,7 @@ export function BetCancelRefundModal({
       {phase === 'input' && (
         <div className="col gap-4">
           <p className="body" style={{ margin: 0 }}>
-            This order never filled — a fill-or-kill that missed, or a limit order that expired
+            This order never filled — a market order that missed, or a limit order that expired
             on the book. Reclaim your full stake back to your private balance.
           </p>
           <div className="panel" style={{ padding: 16 }}>

@@ -1,22 +1,19 @@
 'use client'
 
 import Link from 'next/link'
-import { Suspense, useEffect, useMemo, useState } from 'react'
+import { Suspense, useEffect, useState } from 'react'
 import { useParams, useRouter, useSearchParams } from 'next/navigation'
 import { Icon, ICONS } from '@/components/ui/Icon'
 import { BetModal } from '@/components/app/BetModal'
 import { MARKETS, type MarketEntry } from '@/lib/marketsData'
+import { marketBuyCeilingFromBook, roundToTick, type BookLevel } from '@/lib/pricing'
+import { type OrderKind, ORDER_KIND_LABEL } from '@/lib/orderType'
 
-// Order types are selected here on the market page (not in the bet-auth popup) so the
-// user picks how the order rests before generating a proof. FOK/FAK are market orders;
-// GTC/GTD are limit orders that rest at the user's limit price.
-type OrderType = 'FOK' | 'FAK' | 'GTC' | 'GTD'
-const ORDER_TYPE_LABEL: Record<OrderType, string> = {
-  FOK: 'Fill-or-kill',
-  FAK: 'Fill-and-kill',
-  GTC: 'Limit (GTC)',
-  GTD: 'Limit (GTD)',
-}
+// Order type is selected here on the market page (not in the bet-auth popup) so the user picks how
+// the order executes before generating a proof. Two user-facing types (matching Polymarket): a
+// Market order fills now at a price ceiling and refunds any unfilled remainder; a Limit order rests
+// at the user's price (optionally with an expiry). The mapping to CLOB primitives lives in the
+// signing layer — order type never reaches the chain.
 
 type MarketPayload = {
   market: MarketEntry
@@ -25,6 +22,9 @@ type MarketPayload = {
     bids?: Array<{ price: string; size: string }>
     asks?: Array<{ price: string; size: string }>
   }
+  // L1: CLOB minimum tick size for the YES token (default 0.001). The bet price is snapped to it
+  // at proof time so the committed price matches what the CLOB executes on.
+  tickSize?: number
 }
 
 function fmtVol(v: number) {
@@ -33,53 +33,112 @@ function fmtVol(v: number) {
   return `$${v}`
 }
 
-function FullChart({ trend }: { trend: number[] }) {
+const CHART_RANGES = ['1H', '6H', '1D', '1W', '1M', 'ALL'] as const
+type ChartRange = (typeof CHART_RANGES)[number]
+
+// Real price-history chart. Replaces the old synthetic-noise placeholder: it fetches the
+// YES token's actual Polymarket price series for the selected range, auto-scales the Y axis
+// to the data (so stable markets still show shape instead of a flat line), and re-polls
+// every 10s. Range buttons are wired (they used to be decorative).
+function PriceChart({ tokenId, fallback }: { tokenId?: string; fallback: number }) {
+  const [range, setRange] = useState<ChartRange>('1D')
+  const [pts, setPts] = useState<number[]>([])
+  const [stale, setStale] = useState(false)
+
+  useEffect(() => {
+    if (!tokenId) {
+      setPts([])
+      return
+    }
+    let cancelled = false
+    const load = async () => {
+      try {
+        const res = await fetch(`/api/markets/history?token=${encodeURIComponent(tokenId)}&range=${range}`, { cache: 'no-store' })
+        if (!res.ok) {
+          if (!cancelled) setStale(true)
+          return
+        }
+        const data = (await res.json()) as { history: Array<{ t: number; p: number }> }
+        if (!cancelled) {
+          setPts((data.history ?? []).map((h) => h.p))
+          setStale(false)
+        }
+      } catch {
+        if (!cancelled) setStale(true)
+      }
+    }
+    void load()
+    const id = window.setInterval(() => void load(), 10_000) // live refresh every 10s
+    return () => {
+      cancelled = true
+      window.clearInterval(id)
+    }
+  }, [tokenId, range])
+
   const w = 680
   const h = 280
-  const data = useMemo(() => {
-    // Deterministic seeded jitter (mulberry32). Math.random() here produced different values
-    // on the server vs the client, so the SSR-rendered SVG path attributes didn't match on
-    // hydration (React hydration error). A stable seed keeps the decorative chart identical on
-    // both renders. Seed off the trend so distinct markets still look distinct.
-    let seed = 0x9e3779b9
-    for (const v of trend) seed = (seed ^ Math.round((v ?? 0.5) * 1e6)) >>> 0
-    const rand = () => {
-      seed = (seed + 0x6d2b79f5) >>> 0
-      let t = seed
-      t = Math.imul(t ^ (t >>> 15), t | 1)
-      t ^= t + Math.imul(t ^ (t >>> 7), t | 61)
-      return ((t ^ (t >>> 14)) >>> 0) / 4294967296
-    }
-    const pts: number[] = []
-    let p = trend[0] ?? 0.5
-    for (let i = 0; i < 120; i++) {
-      p += (Math.sin(i * 0.3) + (rand() - 0.5)) * 0.008
-      p = Math.max(0.05, Math.min(0.98, p))
-      pts.push(p)
-    }
-    trend.forEach((v) => pts.push(v))
-    return pts
-  }, [trend])
-
-  const xs = (i: number) => 48 + (i / (data.length - 1)) * (w - 72)
-  const ys = (v: number) => h - 28 - v * (h - 56)
-  const line = data.map((v, i) => `${xs(i)},${ys(v)}`).join(' ')
-  const area = `M${xs(0)},${h - 28} L${line.split(' ').join(' L')} L${xs(data.length - 1)},${h - 28} Z`
+  const padL = 48
+  const padR = 24
+  const padT = 16
+  const padB = 28
+  const hasData = pts.length >= 2
+  const series = hasData ? pts : [fallback, fallback]
+  const lo = Math.min(...series)
+  const hi = Math.max(...series)
+  const span = Math.max(hi - lo, 0.02)
+  const yMin = Math.max(0, lo - span * 0.15)
+  const yMax = Math.min(1, hi + span * 0.15)
+  const xs = (i: number) => padL + (i / (series.length - 1)) * (w - padL - padR)
+  const ys = (v: number) => padT + (1 - (v - yMin) / (yMax - yMin || 1)) * (h - padT - padB)
+  const line = series.map((v, i) => `${xs(i).toFixed(1)},${ys(v).toFixed(1)}`).join(' ')
+  const area = `M${xs(0).toFixed(1)},${h - padB} L${series.map((v, i) => `${xs(i).toFixed(1)},${ys(v).toFixed(1)}`).join(' L')} L${xs(series.length - 1).toFixed(1)},${h - padB} Z`
+  const up = series[series.length - 1] >= series[0]
+  const stroke = up ? 'oklch(0.78 0.16 152)' : 'oklch(0.70 0.18 25)'
+  const fill = up ? 'oklch(0.78 0.16 152 / 0.08)' : 'oklch(0.70 0.18 25 / 0.08)'
+  const gridVals = [0, 0.25, 0.5, 0.75, 1].map((f) => yMin + f * (yMax - yMin))
 
   return (
-    <svg viewBox={`0 0 ${w} ${h}`} width="100%" height="280">
-      {[0.2, 0.4, 0.6, 0.8].map((v) => (
-        <g key={v}>
-          <line x1="48" y1={ys(v)} x2={w - 24} y2={ys(v)} stroke="rgba(255,255,255,0.05)" />
-          <text x="40" y={ys(v) + 3} textAnchor="end" fontFamily="JetBrains Mono" fontSize="9" fill="rgba(255,255,255,0.4)">
-            {v.toFixed(2)}
-          </text>
-        </g>
-      ))}
-      <path d={area} fill="oklch(0.82 0.13 210 / 0.07)" />
-      <polyline points={line} fill="none" stroke="oklch(0.82 0.13 210)" strokeWidth="1.5" />
-      <circle cx={xs(data.length - 1)} cy={ys(data[data.length - 1])} r="4" fill="oklch(0.82 0.13 210)" />
-    </svg>
+    <div>
+      <div className="row" style={{ marginBottom: 8, justifyContent: 'space-between', alignItems: 'center' }}>
+        <div className="row gap-1">
+          {CHART_RANGES.map((r) => (
+            <button
+              key={r}
+              onClick={() => setRange(r)}
+              className={`btn btn-sm ${r === range ? 'btn-cyan' : 'btn-ghost'}`}
+              style={{ padding: '4px 8px', fontSize: 11 }}
+            >
+              {r}
+            </button>
+          ))}
+        </div>
+        {tokenId && (
+          <span className="pill pill-soft" style={{ fontSize: 9 }}>
+            <span className="dot" style={{ background: stale ? 'var(--amber)' : 'var(--green)' }} />&nbsp;{stale ? 'STALE' : 'LIVE'}
+          </span>
+        )}
+      </div>
+      <div className="panel" style={{ padding: 0, overflow: 'hidden' }}>
+        <svg viewBox={`0 0 ${w} ${h}`} width="100%" height="280">
+          {gridVals.map((v, i) => (
+            <g key={i}>
+              <line x1={padL} y1={ys(v)} x2={w - padR} y2={ys(v)} stroke="rgba(255,255,255,0.05)" />
+              <text x={padL - 8} y={ys(v) + 3} textAnchor="end" fontFamily="JetBrains Mono" fontSize="9" fill="rgba(255,255,255,0.4)">
+                {v.toFixed(2)}
+              </text>
+            </g>
+          ))}
+          {hasData && <path d={area} fill={fill} />}
+          <polyline points={line} fill="none" stroke={stroke} strokeWidth="1.5" />
+          <circle cx={xs(series.length - 1)} cy={ys(series[series.length - 1])} r="4" fill={stroke} />
+          {!hasData && (
+            <text x={w / 2} y={h / 2} textAnchor="middle" fontFamily="JetBrains Mono" fontSize="11" fill="rgba(255,255,255,0.35)">
+              {tokenId ? 'No price history for this range yet' : 'Live price history unavailable'}
+            </text>
+          )}
+        </svg>
+      </div>
+    </div>
   )
 }
 
@@ -104,9 +163,10 @@ function MarketDetailContent() {
   const [side, setSide] = useState<'YES' | 'NO'>('YES')
   const [amount, setAmount] = useState(1000)
   const [modalOpen, setModalOpen] = useState(false)
-  // FC-4 advanced order types, selected on the market page and passed into the bet modal.
-  const [orderType, setOrderType] = useState<OrderType>('FOK')
+  // Order type (Market/Limit + optional expiry), selected here and passed into the bet modal.
+  const [orderKind, setOrderKind] = useState<OrderKind>('MARKET')
   const [limitCents, setLimitCents] = useState(50)
+  const [expiryEnabled, setExpiryEnabled] = useState(false)
   const [gtdMinutes, setGtdMinutes] = useState(60)
 
   useEffect(() => {
@@ -117,30 +177,64 @@ function MarketDetailContent() {
 
   useEffect(() => {
     let cancelled = false
-    void (async () => {
+    const load = async () => {
       const res = await fetch(`/api/markets/${encodeURIComponent(id)}`, { cache: 'no-store' })
       if (!res.ok) return
       const data = await res.json() as MarketPayload
       if (!cancelled) setPayload(data)
-    })()
+    }
+    void load()
+    // Refresh order book, YES/NO percentage, volume etc. every 10s.
+    const poll = window.setInterval(() => void load(), 10_000)
     return () => {
       cancelled = true
+      window.clearInterval(poll)
     }
   }, [id])
 
   const market = payload?.market ?? MARKETS.find((entry) => entry.id === id) ?? MARKETS[0]
   const book = payload?.book
+  // Up/Down markets display "UP"/"DOWN"; everything else "YES"/"NO". The internal `side`
+  // state stays 'YES'|'NO' (it drives the circuit's outcome_side 0/1) — only the label changes.
+  const [yesLabel, noLabel] = market.outcomeLabels
+    ? [market.outcomeLabels[0].toUpperCase(), market.outcomeLabels[1].toUpperCase()]
+    : ['YES', 'NO']
+  const sideLabel = side === 'YES' ? yesLabel : noLabel
   const price = side === 'YES' ? market.yes : 1 - market.yes
-  // FOK/FAK fill at the live market price; GTC/GTD rest at the user's limit price.
-  const isLimit = orderType === 'GTC' || orderType === 'GTD'
-  const effectivePrice = isLimit ? limitCents / 100 : price
+  // L1: snap the bet price to the market tick at proof time. tickSize comes from the CLOB via the
+  // market payload (default 0.001). bestAsk is the best executable ask for the SELECTED side — YES
+  // → lowest ask; NO → 1 − highest YES bid (complementary binary) — falling back to the side's
+  // market price when the book side is empty.
+  const tickSize = payload?.tickSize ?? 0.001
+  const askPrices = (book?.asks ?? []).map((a) => Number(a.price)).filter((p) => Number.isFinite(p) && p > 0)
+  const bidPrices = (book?.bids ?? []).map((b) => Number(b.price)).filter((p) => Number.isFinite(p) && p > 0)
+  const bestAsk =
+    side === 'YES'
+      ? (askPrices.length ? Math.min(...askPrices) : price)
+      : (bidPrices.length ? 1 - Math.max(...bidPrices) : price)
+  // Executable ask ladder for the selected side (ascending by price). YES → the YES asks; NO → the
+  // binary complement of the YES bids (a YES bid at p is NO liquidity at 1−p), matching how bestAsk
+  // is derived above. Fed to the walk-the-book market ceiling.
+  const sideLevels: BookLevel[] =
+    side === 'YES'
+      ? (book?.asks ?? []).map((a) => ({ price: Number(a.price), size: Number(a.size) }))
+      : (book?.bids ?? []).map((b) => ({ price: 1 - Number(b.price), size: Number(b.size) }))
+  // A Market BUY commits a tick-snapped CEILING from walking the book (worst price the stake would
+  // touch + slippage pad) so the fill is at-or-better and the committed shares are a guaranteed
+  // MINIMUM (surplus → pool, FC-4 Q4). A Limit order rests at the user's (tick-snapped) limit price.
+  const isLimit = orderKind === 'LIMIT'
+  const effectivePrice = isLimit
+    ? roundToTick(limitCents / 100, tickSize)
+    : marketBuyCeilingFromBook(sideLevels, amount, tickSize, bestAsk)
   const shares = effectivePrice > 0 ? Math.floor(amount / effectivePrice) : 0
 
-  // Default the limit price to the current side's market price; resets when the side
-  // flips (price value changes). The user can override below.
+  // Default the limit price to the current side's market price. Keyed on `side` only — not
+  // `price` — so the user's manual limit edits aren't clobbered every 10s when the polled
+  // market price drifts. Reads the latest price at the moment the side flips.
   useEffect(() => {
     setLimitCents(Math.max(1, Math.min(99, Math.round(price * 100))))
-  }, [price])
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [side])
 
   const closeModal = () => {
     setModalOpen(false)
@@ -170,7 +264,7 @@ function MarketDetailContent() {
         <div className="hairline-r" style={{ padding: 24 }}>
           <div className="row gap-6 mb-4" style={{ marginBottom: 16 }}>
             <div>
-              <div className="micro">YES probability</div>
+              <div className="micro">{yesLabel} probability</div>
               <div className="num" style={{ fontSize: 48, lineHeight: 1 }}>{market.yes.toFixed(2)}</div>
             </div>
             <div style={{ flex: 1 }}>
@@ -178,8 +272,8 @@ function MarketDetailContent() {
                 <div style={{ height: 4, width: `${market.yes * 100}%`, background: 'var(--green)', borderRadius: 2 }} />
               </div>
               <div className="row mt-2" style={{ justifyContent: 'space-between', fontSize: 12, fontFamily: 'var(--mono)' }}>
-                <span style={{ color: 'var(--green)' }}>YES {market.yes.toFixed(2)}</span>
-                <span style={{ color: 'var(--red)' }}>NO {(1 - market.yes).toFixed(2)}</span>
+                <span style={{ color: 'var(--green)' }}>{yesLabel} {market.yes.toFixed(2)}</span>
+                <span style={{ color: 'var(--red)' }}>{noLabel} {(1 - market.yes).toFixed(2)}</span>
               </div>
             </div>
             <div className="col gap-1">
@@ -192,17 +286,7 @@ function MarketDetailContent() {
             </div>
           </div>
 
-          <div className="row gap-2" style={{ marginBottom: 8 }}>
-            {['1H', '6H', '1D', '1W', '1M', 'ALL'].map((label) => (
-              <button key={label} className={`btn btn-sm ${label === '1M' ? 'btn-cyan' : 'btn-ghost'}`} style={{ padding: '4px 8px', fontSize: 11 }}>
-                {label}
-              </button>
-            ))}
-          </div>
-
-          <div className="panel" style={{ padding: 0, overflow: 'hidden' }}>
-            <FullChart trend={market.trend} />
-          </div>
+          <PriceChart tokenId={market.yesTokenId} fallback={market.yes} />
 
           <div className="row hairline-b mt-4" style={{ gap: 0, marginTop: 24 }}>
             {[
@@ -274,7 +358,7 @@ function MarketDetailContent() {
                   ].map((fill, index) => (
                     <tr key={index}>
                       <td className="mono" style={{ fontSize: 11 }}>{fill.time}</td>
-                      <td><span className={`pill ${fill.side === 'YES' ? 'pill-green' : 'pill-red'}`} style={{ fontSize: 9 }}>{fill.side}</span></td>
+                      <td><span className={`pill ${fill.side === 'YES' ? 'pill-green' : 'pill-red'}`} style={{ fontSize: 9 }}>{fill.side === 'YES' ? yesLabel : noLabel}</span></td>
                       <td className="num">{fill.price.toFixed(3)}</td>
                       <td style={{ textAlign: 'right' }} className="num">${fill.size.toLocaleString()}</td>
                       <td><span className="pill pill-soft" style={{ fontSize: 9 }}>{fill.vault ? 'VAULT' : 'MARKET'}</span></td>
@@ -325,7 +409,7 @@ function MarketDetailContent() {
                       fontWeight: 500,
                     }}
                   >
-                    {choice} · {choice === 'YES' ? market.yes.toFixed(2) : (1 - market.yes).toFixed(2)}
+                    {choice === 'YES' ? yesLabel : noLabel} · {choice === 'YES' ? market.yes.toFixed(2) : (1 - market.yes).toFixed(2)}
                   </button>
                 ))}
               </div>
@@ -338,6 +422,9 @@ function MarketDetailContent() {
                   <input
                     type="number"
                     value={amount}
+                    min={0}
+                    step={0.01}
+                    inputMode="decimal"
                     onChange={(e) => setAmount(Math.max(0, +e.target.value || 0))}
                     aria-label="Bet amount in USDC"
                     style={{ background: 'transparent', border: 'none', color: 'var(--text)', fontFamily: 'var(--mono)', fontSize: 22, padding: '10px 0', width: '100%' }}
@@ -361,22 +448,21 @@ function MarketDetailContent() {
               <div className="hairline-t mt-4" style={{ paddingTop: 12 }}>
                 <div className="row gap-2" style={{ alignItems: 'center' }}>
                   <div className="micro">ORDER TYPE</div>
-                  <span className="pill pill-soft" style={{ fontSize: 9 }}>ADVANCED</span>
                 </div>
                 <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 6, marginTop: 8 }}>
-                  {(['FOK', 'FAK', 'GTC', 'GTD'] as OrderType[]).map((t) => (
+                  {(['MARKET', 'LIMIT'] as OrderKind[]).map((k) => (
                     <button
-                      key={t}
+                      key={k}
                       type="button"
-                      onClick={() => setOrderType(t)}
-                      className={`btn btn-sm ${orderType === t ? 'btn-cyan' : 'btn-ghost'}`}
+                      onClick={() => setOrderKind(k)}
+                      className={`btn btn-sm ${orderKind === k ? 'btn-cyan' : 'btn-ghost'}`}
                       style={{ justifyContent: 'center', fontSize: 11 }}
                     >
-                      {ORDER_TYPE_LABEL[t]}
+                      {ORDER_KIND_LABEL[k]}
                     </button>
                   ))}
                 </div>
-                {isLimit && (
+                {isLimit ? (
                   <div className="mt-3">
                     <div className="micro">LIMIT PRICE (¢ / share, 1–99)</div>
                     <input
@@ -385,7 +471,16 @@ function MarketDetailContent() {
                       aria-label="Limit price in cents per share"
                       style={{ width: '100%', background: 'var(--bg-1)', border: '1px solid var(--line-strong)', borderRadius: 6, padding: '8px 12px', marginTop: 6, color: 'var(--text)', fontFamily: 'var(--mono)', fontSize: 14 }}
                     />
-                    {orderType === 'GTD' && (
+                    <label className="row gap-2" style={{ alignItems: 'center', marginTop: 10, cursor: 'pointer' }}>
+                      <input
+                        type="checkbox"
+                        checked={expiryEnabled}
+                        onChange={(e) => setExpiryEnabled(e.target.checked)}
+                        aria-label="Set an expiration for this limit order"
+                      />
+                      <span className="micro">SET EXPIRATION</span>
+                    </label>
+                    {expiryEnabled && (
                       <>
                         <div className="micro" style={{ marginTop: 10 }}>EXPIRES IN (MINUTES)</div>
                         <input
@@ -397,13 +492,12 @@ function MarketDetailContent() {
                       </>
                     )}
                     <div className="small mt-2" style={{ fontSize: 11, color: 'var(--text-3)' }}>
-                      Rests on the book; the full stake is held until it fills, expires, or partially fills (then reclaim the remainder).
+                      Rests on the book at your limit price; the full stake is held until it fills, {expiryEnabled ? 'expires,' : 'you cancel,'} or partially fills (then reclaim the remainder).
                     </div>
                   </div>
-                )}
-                {orderType === 'FAK' && (
+                ) : (
                   <div className="small mt-2" style={{ fontSize: 11, color: 'var(--text-3)' }}>
-                    Fills immediately at the market price for whatever size is available and kills the rest; reclaim any unfilled remainder afterward.
+                    Fills immediately at the best available price for whatever size the book offers now; any unfilled remainder of your stake is reclaimable afterward.
                   </div>
                 )}
               </div>
@@ -411,10 +505,10 @@ function MarketDetailContent() {
               <div className="hairline-t mt-4" style={{ paddingTop: 12 }}>
                 {/* FINDING: FUNC-001 — honest proof time (Groth16 in-browser proving is 30s–2min, not ~2s). */}
                 {([
-                  ['Price', effectivePrice.toFixed(3)],
-                  ['Expected shares', shares.toLocaleString()],
-                  ['Time in force', orderType],
-                  ...(orderType === 'GTD' ? [['Expires in', `${gtdMinutes} min`] as [string, string]] : []),
+                  [isLimit ? 'Limit price' : 'Max price (ceiling)', effectivePrice.toFixed(3)],
+                  [isLimit ? 'Expected shares' : 'Minimum shares', shares.toLocaleString()],
+                  ['Order type', ORDER_KIND_LABEL[orderKind]],
+                  ...(isLimit && expiryEnabled ? [['Expires in', `${gtdMinutes} min`] as [string, string]] : []),
                   ['Proof time', '30s–2min'],
                 ] as [string, string][]).map(([label, value]) => (
                   <div key={label} className="row" style={{ justifyContent: 'space-between', padding: '6px 0', borderBottom: '1px solid var(--line)' }}>
@@ -454,10 +548,15 @@ function MarketDetailContent() {
           marketName={market.name}
           conditionId={market.conditionId}
           side={side}
+          sideLabel={sideLabel}
           initialAmount={amount}
           price={price}
-          orderType={orderType}
+          tickSize={tickSize}
+          bestAsk={bestAsk}
+          levels={sideLevels}
+          orderKind={orderKind}
           limitCents={limitCents}
+          expiryEnabled={expiryEnabled}
           gtdMinutes={gtdMinutes}
           onClose={closeModal}
           onSuccess={async () => {

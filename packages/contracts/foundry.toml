@@ -22,3 +22,10 @@ runs = 1000
 [rpc_endpoints]
 polygon = "${POLYGON_RPC_URL}"
 amoy = "${POLYGON_AMOY_RPC_URL}"
+
+# Contract verification. Polygonscan migrated to the Etherscan v2 unified API, so a
+# single Etherscan API key verifies on both Polygon mainnet (137) and Amoy (80002);
+# forge resolves the verifier URL from the chain id. Set ETHERSCAN_API_KEY in the env.
+[etherscan]
+polygon = { key = "${ETHERSCAN_API_KEY}", chain = 137 }
+amoy = { key = "${ETHERSCAN_API_KEY}", chain = 80002 }

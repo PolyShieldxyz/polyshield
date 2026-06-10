@@ -59,12 +59,28 @@ function makeClient(
   blockTs: Record<string, number>,
   pendingCredit = 0n,
   feeConfig: FeeConfig = NO_FEE,
+  // FC-4 partial-fill recovery reads the POST-normalization betRecord (expected_shares=filled,
+  // bet_amount=spent) to derive the refund. Keyed by nullifier_of_bet (lowercase).
+  betRecords: Record<string, { expectedShares: bigint; betAmount: bigint }> = {},
 ) {
   return {
+    // recoverNotesWithClient now pages getLogs over [fromBlock, getBlockNumber()] in ≤9000-block
+    // windows. The getLogs mock ignores the range, so return a tip well within ONE window (test
+    // logs sit at blocks 1–11) — a larger value would split into multiple windows and replay the
+    // canned logs more than once.
+    getBlockNumber: async () => 100n,
     getLogs: async ({ event }: { event: { name: string } }) => logsByEvent[event.name] ?? [],
     getBlock: async ({ blockNumber }: { blockNumber: bigint }) => ({ timestamp: BigInt(blockTs[String(blockNumber)] ?? 0) }),
-    readContract: async ({ functionName }: { functionName: string }) =>
-      functionName === 'feeConfig' ? feeConfig : pendingCredit,
+    readContract: async ({ functionName, args }: { functionName: string; args?: readonly unknown[] }) => {
+      if (functionName === 'feeConfig') return feeConfig
+      if (functionName === 'betRecords') {
+        const r = betRecords[String(args?.[0] ?? '').toLowerCase()] ?? { expectedShares: 0n, betAmount: 0n }
+        // getter tuple: [market_id, condition_id, position_id, expected_shares(3), bet_amount(4),
+        // outcome_side, status, sell_proceeds, sold_shares, filled_shares, spent_amount].
+        return [ZERO, ZERO, ZERO, r.expectedShares, r.betAmount, 0, 1, 0n, 0n, 0n, 0n]
+      }
+      return pendingCredit
+    },
   } as unknown as Parameters<typeof recoverNotesWithClient>[2]
 }
 
@@ -121,6 +137,52 @@ describe('FC-5 recovery', () => {
     const settle = activity.find((a) => a.kind === 'settlement')
     expect(settle?.amount).toBe(proceeds)
     expect(settle?.receiptId).toBe(receipt.id)
+  })
+
+  it('FC-4/L3: partial-fill credit refunds the unfilled remainder and keeps the receipt open (normalized)', async () => {
+    const secret0 = await deriveSecret(sign, WALLET, 0)
+    const depositAmt = 1_000_000_000n // $1000
+    const betAmt = 100_000_000n       // $100 committed stake
+    const shares = 200_000_000n       // 200 committed (max) shares
+    const filled = 120_000_000n       // 120 actually filled (normalized expected_shares)
+    const spent = 60_000_000n         // $60 actually spent (normalized bet_amount)
+    const refund = betAmt - spent     // $40 unfilled remainder → refunded
+    const positionId = b32(0x1234n)
+
+    const depositC = computeCommitment(secret0, depositAmt, 0n, WALLET)
+    const betNull = computeNullifier(secret0, 0n)
+    const betOutC = computeCommitment(secret0, depositAmt - betAmt, 1n, WALLET) // after −$100
+    // partial credit spends the post-bet free note (balance depositAmt−betAmt, nonce 1) + adds refund
+    const partialSpentNull = computeNullifier(secret0, 1n)
+    const partialNewC = computeCommitment(secret0, depositAmt - betAmt + refund, 2n, WALLET)
+
+    const logs: Record<string, Log[]> = {
+      Deposited: [{ blockNumber: 10n, transactionHash: '0xdep', args: { depositor: WALLET, commitment: depositC, amount: depositAmt } }],
+      BetAuthorized: [{ blockNumber: 11n, transactionHash: '0xbet', args: { nullifier: betNull, market_id: b32(7n), position_id: positionId, expected_shares: shares, bet_amount: betAmt, price: 50_000_000n, outcome_side: 0, new_commitment: betOutC } }],
+      PartialFillCredited: [{ blockNumber: 12n, transactionHash: '0xpartial', args: { nullifier: partialSpentNull, nullifier_of_bet: betNull, new_commitment: partialNewC } }],
+      BetSold: [], PositionClosed: [], SettlementCredited: [], BetCancellationCredited: [], NACancellationCredited: [], Withdrawn: [],
+    }
+    const blockTs = { '10': 1_700_000_000, '11': 1_700_000_100, '12': 1_700_000_200 }
+    // The POST-normalization on-chain record: expected_shares=filled, bet_amount=spent.
+    const betRecords = { [betNull.toLowerCase()]: { expectedShares: filled, betAmount: spent } }
+
+    const notes = await recoverNotesWithClient(WALLET, sign, makeClient(logs, blockTs, 0n, NO_FEE, betRecords), VAULT)
+
+    // Cash note = 1000 − 100 + 40 refund = 940.
+    const spendable = getSpendableNotes(WALLET).filter((n) => !n.spent)
+    const cash = spendable.reduce((m, n) => (n.balance > m.balance ? n : m), spendable[0])
+    expect(cash.balance).toBe(depositAmt - betAmt + refund)
+
+    // Receipt stays OPEN (filled position settles/closes later), normalized to the actual fill.
+    const receipt = notes.find((n) => n.kind === 'BET_RECEIPT')!
+    expect(receipt.spent).toBe(false)
+    expect(receipt.expectedShares).toBe(filled)
+    expect(receipt.bet_amount).toBe(spent)
+
+    // Refund recorded as a capital-return activity (amount = the unfilled remainder).
+    const refundEv = getWalletActivity(WALLET).find((a) => a.kind === 'refund')
+    expect(refundEv?.amount).toBe(refund)
+    expect(refundEv?.receiptId).toBe(receipt.id)
   })
 
   it('FEE: reconstructs the post-bet balance net of the Vault-injected bet fee', async () => {

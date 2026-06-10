@@ -6,16 +6,22 @@
   "scripts": {
     "build": "tsc",
     "dev": "ts-node src/index.ts",
+    "setup:deposit-wallet": "ts-node src/scripts/depositWalletSetup.ts",
+    "attest-sold": "ts-node src/scripts/attestSold.ts",
+    "report-close-sells": "ts-node src/scripts/reportCloseSells.ts",
     "test": "jest --passWithNoTests"
   },
   "dependencies": {
-    "@polymarket/clob-client-v2": "latest",
+    "@polymarket/builder-relayer-client": "0.0.10",
+    "@polymarket/builder-signing-sdk": "0.0.8",
+    "@polymarket/clob-client-v2": "1.0.6",
     "better-sqlite3": "^12.10.0",
     "bottleneck": "^2.19.5",
     "dotenv": "^16.4.5",
     "ethers": "^6.13.0",
     "express": "^4.19.2",
     "pino": "^9.2.0",
+    "viem": "2.50.4",
     "ws": "^8.18.0",
     "zod": "^3.23.8"
   },
@@ -33,9 +39,16 @@
   "jest": {
     "testEnvironment": "node",
     "transform": {
-      "^.+\\.tsx?$": ["ts-jest", {
-        "tsconfig": { "module": "CommonJS", "moduleResolution": "Node", "isolatedModules": true }
-      }]
+      "^.+\\.tsx?$": [
+        "ts-jest",
+        {
+          "tsconfig": {
+            "module": "CommonJS",
+            "moduleResolution": "Node",
+            "isolatedModules": true
+          }
+        }
+      ]
     },
     "moduleNameMapper": {
       "^(\\.{1,2}/.*)\\.js$": "$1"

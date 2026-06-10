@@ -84,6 +84,7 @@ export interface BetCancelInputs {
   merkle_path: string[]
   merkle_path_indices: number[]
   owner_address: string
+  bet_nonce: bigint // private: nonce of the note the bet was made from
   // public
   merkle_root: string
   nullifier: string
@@ -99,6 +100,7 @@ export interface CancelCreditInputs {
   merkle_path: string[]
   merkle_path_indices: number[]
   owner_address: string
+  bet_nonce: bigint // private: nonce of the note the bet was made from
   // public
   merkle_root: string
   nullifier: string
@@ -117,6 +119,7 @@ export interface PartialCreditInputs {
   merkle_path: string[]
   merkle_path_indices: number[]
   owner_address: string
+  bet_nonce: bigint // private: nonce of the note the bet was made from
   // public
   merkle_root: string
   nullifier: string
@@ -200,9 +203,17 @@ async function fetchAsset(url: string): Promise<Uint8Array> {
   }
 }
 
+// Cache-buster for the circuit artifacts. In production the .wasm/.zkey are served `immutable`
+// at a FIXED url, so the browser never revalidates them — after a circuit change (e.g. the
+// bet_nonce reclaim redesign) it would keep serving the STALE wasm, causing
+// "Signal <name> not found" / proof failures. BUMP this whenever the circuits are recompiled so
+// the query string changes and the browser re-fetches. (Overridable via env for ad-hoc busting.)
+const CIRCUITS_VERSION = process.env.NEXT_PUBLIC_CIRCUITS_VERSION ?? '2-betnonce'
+
 function ensurePreloaded(name: CircuitName): void {
-  if (!wasmCache.has(name)) wasmCache.set(name, fetchAsset(`/circuits/${name}.wasm`))
-  if (!zkeyCache.has(name)) zkeyCache.set(name, fetchAsset(`/zkeys/${name}.zkey`))
+  const v = encodeURIComponent(CIRCUITS_VERSION)
+  if (!wasmCache.has(name)) wasmCache.set(name, fetchAsset(`/circuits/${name}.wasm?v=${v}`))
+  if (!zkeyCache.has(name)) zkeyCache.set(name, fetchAsset(`/zkeys/${name}.zkey?v=${v}`))
 }
 
 // ABI-encode Groth16 proof as 256-byte hex string matching abi.decode in the Solidity adapter.
@@ -358,6 +369,7 @@ export async function generateBetCancelProof(inputs: BetCancelInputs): Promise<P
     merkle_path:          inputs.merkle_path,
     merkle_path_indices:  inputs.merkle_path_indices.map(String),
     owner_address:        inputs.owner_address,
+    bet_nonce:            inputs.bet_nonce.toString(),
     merkle_root:          inputs.merkle_root,
     nullifier:            inputs.nullifier,
     new_commitment:       inputs.new_commitment,
@@ -374,6 +386,7 @@ export async function generateCancelCreditProof(inputs: CancelCreditInputs): Pro
     merkle_path:          inputs.merkle_path,
     merkle_path_indices:  inputs.merkle_path_indices.map(String),
     owner_address:        inputs.owner_address,
+    bet_nonce:            inputs.bet_nonce.toString(),
     merkle_root:          inputs.merkle_root,
     nullifier:            inputs.nullifier,
     new_commitment:       inputs.new_commitment,
@@ -417,6 +430,7 @@ export async function generatePartialCreditProof(inputs: PartialCreditInputs): P
     merkle_path:          inputs.merkle_path,
     merkle_path_indices:  inputs.merkle_path_indices.map(String),
     owner_address:        inputs.owner_address,
+    bet_nonce:            inputs.bet_nonce.toString(),
     merkle_root:          inputs.merkle_root,
     nullifier:            inputs.nullifier,
     new_commitment:       inputs.new_commitment,

@@ -17,6 +17,8 @@ jest.mock("../config", () => ({
     vaultContractAddress: "0x" + "b".repeat(40),
     signingLayerOperatorAddress: "0x" + "c".repeat(40),
     pusdAddress: "0x" + "d".repeat(40),
+    usdcAddress: "0x" + "f".repeat(40),
+    onrampAddress: "0x" + "a".repeat(40),
     depositWalletAddress: "0x" + "e".repeat(40),
     polyWsUrl: "ws://localhost:3001/ws/user",
   },

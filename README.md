@@ -2,7 +2,7 @@
 
 A zero-knowledge privacy vault for [Polymarket](https://polymarket.com). Deposit USDC into a shared vault, authorize bets via ZK proofs, and withdraw — without your wallet address ever appearing in a Polymarket transaction.
 
-**Status:** Private beta · Polygon Amoy testnet · [Apply for access →](https://polyshield.xyz/testnet)
+**Status:** Core protocol live on Polygon mainnet (limited test phase) — full deposit → bet → settle → withdraw verified end-to-end with real funds. [Roadmap →](https://polyshield.xyz/roadmap)
 
 ---
 
@@ -20,46 +20,64 @@ The vault holds one Polymarket signing account (EOA) shared by all depositors. W
 ## Architecture
 
 ```
-User wallet
-  │  deposit() only — one public tx per deposit
-  │
-  ├── Browser WASM Prover
-  │     Generates ZK proofs client-side. Secret never leaves browser.
-  │     Proof types: BET_AUTH · SETTLE_CRED · WITHDRAW · BET_CANCEL · CANCEL_CRED
-  │
-  ├── Proof Relay  (port 3002)
-  │     Stateless Express service. Submits proofs to Vault on user's behalf.
-  │     Relay's own EOA pays gas. User wallet never touches bet-related txs.
-  │
-  └── Vault.sol  (Polygon / Amoy)
-        Verifies ZK proofs · Merkle tree · Nullifier registry · USDC custody
-        │
-        ├── CommitmentMerkleTree.sol  — Poseidon depth-32 append-only tree
-        ├── NullifierRegistry.sol     — spent nullifier deduplication
-        └── 5× Groth16 Verifiers      — one per proof type (snarkjs / BN254)
-              │
-              └── Signing Layer  (Node.js, centralized v1)
-                    Listens for BetAuthorized events.
-                    Signs and submits FOK orders to Polymarket CLOB.
-                    v2: AWS Nitro Enclave (planned P3).
+ ┌─ USER BROWSER (Next.js) ───────────────────────────────────────────────────────────┐
+ │  Wallet-derived SECRET — never leaves the browser. Generates ALL ZK proofs (WASM).  │
+ │  Proofs: BET_AUTH · SETTLE_CRED · WITHDRAW · BET_CANCEL · CANCEL_CRED · DEPOSIT ·    │
+ │          POSITION_CLOSE · PARTIAL_CREDIT · CONSOLIDATE  (9 circuits)                 │
+ └───┬───────────────────────────────────┬───────────────────────────────────────────┘
+     │ deposit() ONLY                     │ proofs + reads (merkle-path / recovery-data /
+     │ (the only tx from the user wallet) │  events) — the browser NEVER scans the chain
+     ▼                                    ▼
+ ┌─────────────┐   ┌──────────────────────────────────────────────────────────────────┐
+ │ Polygon RPC │   │ PROOF RELAY (3002)  — stateless; relayer EOA pays gas, user wallet │
+ │ archive /   │◄──┤ never = tx.from. ALSO the backend index/cache (SQLite merkle.db): │
+ │ full node;  │   │   • CachedMerkleTree → /merkle-path  (O(32), no chain scan)        │
+ │ NO 10-block │   │   • VaultEventIndex  → /recovery-data , /events                    │
+ │ getLogs cap │   │   mirrors public on-chain state so clients never re-scan the chain │
+ └──────┬──────┘   └──────────────────────────────────┬───────────────────────────────┘
+        │ reads/relays                                 │ scans events once, then incremental
+        ▼                                              ▼
+ ┌──────────────────────────────────────────────────────────────────────────────────────┐
+ │ POLYGON (on-chain, UUPS proxies)                                                        │
+ │  Vault.sol — verifies proofs · USDC custody · betRecords · pendingCredit · feeConfig    │
+ │    ├── CommitmentMerkleTree.sol — Poseidon depth-32 append-only, 1024-root window       │
+ │    ├── NullifierRegistry.sol    — spent-nullifier dedup                                 │
+ │    └── 9× Groth16 verifier adapters (snarkjs / BN254, UUPS behind proxies)              │
+ └──────┬──────────────────────────────────────────────────────────────────▲──────────────┘
+        │ vault EOA owns ↓                       operator-only: resolveMarket │ / credit / fund
+        ▼                                                                     │
+ ┌──────────────────────┐   ┌────────────────────────────────────────────────────────────┐
+ │ Polymarket CLOB + CTF │◄──┤ SIGNING LAYER (Node.js, centralized v1; vault EOA key)        │
+ │ + builder Relayer     │   │  • event-listener: BetAuthorized → FAK / GTC / GTD order      │
+ │ (Deposit Wallet holds │   │  • settlement-resolver: CTF resolved → resolveMarket + redeem │
+ │  pUSD + CTF shares)   │   │  • JIT collateral funding · FC-9 signed operator attestations │
+ └──────────────────────┘   │  v2: AWS Nitro TEE (planned)                                  │
+                            └────────────────────────────────────────────────────────────┘
+   indexer (3003): mirrors CTF ConditionResolution → settlement records (supplementary)
 ```
 
-**Chain:** Polygon mainnet (production) / Polygon Amoy (testnet)
+**Chain:** Polygon mainnet (production) / Polygon Amoy (testnet).
 **Collateral:** USDC only. pUSD conversion is internal to the Vault.
+**RPC:** requires a full/archive node with a usable `eth_getLogs` range — Alchemy's free tier (10-block cap) and pruned public nodes do **not** work in production. See [`docs/architecture.md` §2.5](docs/architecture.md).
+**Privacy:** the secret and the wallet↔bet link live only in the browser; every backend service sees only public, anonymous on-chain data.
 
 ---
 
 ## ZK Circuits
 
-Five Circom circuits compiled with Groth16 (snarkjs, BN254). Proofs are generated client-side in the browser via WASM and verified on-chain by Groth16 adapter contracts:
+Nine Circom circuits compiled with Groth16 (snarkjs, BN254). Proofs are generated client-side in the browser via WASM and verified on-chain by Groth16 adapter contracts (verifier slot in parentheses):
 
 | Circuit | File | What it proves |
 |---|---|---|
-| **BET_AUTH** | `circuits/groth16/bet_auth.circom` | Note has sufficient balance; nullifier is valid; new note is correctly formed after spend |
-| **SETTLE_CRED** | `circuits/groth16/settlement_credit.circom` | Depositor held a winning position; settlement credit is correct |
-| **WITHDRAW** | `circuits/groth16/withdrawal.circom` | Depositor knows note secret; withdrawal goes to their own depositing address |
-| **BET_CANCEL** | `circuits/groth16/bet_cancel.circom` | Restores note balance for a failed FOK bet |
-| **CANCEL_CRED** | `circuits/groth16/cancel_credit.circom` | N/A market resolution — all CTF payout numerators are zero |
+| **DEPOSIT** (5) | `circuits/groth16/deposit.circom` | Binds the committed balance + owner to the deposited amount and `msg.sender` (FC-2, mandatory; prevents balance forgery / T20) |
+| **BET_AUTH** (0) | `circuits/groth16/bet_auth.circom` | Note has sufficient balance; valid nullifier; new note correct after spending `bet_amount + fee` (fee Vault-injected, FC-10) |
+| **SETTLEMENT_CREDIT** (1) | `circuits/groth16/settlement_credit.circom` | Held a winning position; credit = shares × payout (both Vault-injected) |
+| **WITHDRAWAL** (2) | `circuits/groth16/withdrawal.circom` | Knows the note secret; withdrawal goes to the depositor's own address (W-to-W only) |
+| **BET_CANCEL** (3) | `circuits/groth16/bet_cancel.circom` | Restores note balance for a failed/cancelled bet (amount Vault-injected) |
+| **CANCEL_CREDIT** (4) | `circuits/groth16/cancel_credit.circom` | N/A market (all CTF payout numerators zero) → refund |
+| **POSITION_CLOSE** (6) | `circuits/groth16/position_close.circom` | Pre-settlement sale credit (proceeds Vault-injected from operator SOLD attestation, FC-1) |
+| **PARTIAL_CREDIT** (7) | `circuits/groth16/partial_credit.circom` | Refund of the unfilled remainder of a partial limit-order fill (FC-4) |
+| **CONSOLIDATE** (8) | `circuits/groth16/consolidate.circom` | Merges up to 4 same-owner notes into 1 (FC-8) |
 
 > The Noir circuits in `circuits/bet_auth/`, `circuits/withdrawal/`, etc. are kept as a specification reference only. They are not compiled or used for proof generation. See [`packages/circuits/README.md`](packages/circuits/README.md) for details.
 
@@ -89,14 +107,15 @@ Withdrawal is wallet-to-wallet only. The `owner_address` field is inside the com
 packages/
   contracts/     Vault.sol, CommitmentMerkleTree, NullifierRegistry, verifiers (Foundry)
   circuits/
-    groth16/     Active Circom circuits (Groth16/snarkjs) — bet_auth, settlement_credit, withdrawal, bet_cancel, cancel_credit
+    groth16/     Active Circom (Groth16/snarkjs) — bet_auth, settlement_credit, withdrawal, bet_cancel,
+                 cancel_credit, deposit, position_close, partial_credit, consolidate (9 circuits)
     bet_auth/    Noir source — reference only, not compiled or used
-    withdrawal/  Noir source — reference only, not compiled or used
     (…other Noir dirs)  see packages/circuits/README.md
   backend/
-    signing-layer/     Node.js — listens for BetAuthorized, submits FOK orders to CLOB
-    proof-relay/       Stateless Express — 5 relay endpoints, relayer EOA pays gas
-    indexer/           CTF settlement event listener, REST API for WASM prover witness data
+    signing-layer/     Node.js — BetAuthorized → FAK/GTC/GTD orders; settlement resolver; JIT funding; FC-9 attestations
+    proof-relay/       Relays proofs (relayer EOA pays gas) + backend index/cache:
+                       /merkle-path (CachedMerkleTree), /recovery-data + /events (VaultEventIndex), SQLite merkle.db
+    indexer/           CTF settlement event listener, REST API for witness data
     mock-clob-server/  Fake Polymarket CLOB for local dev (mock only — all other components are real)
     mock-env/          Anvil + contract deployment + service orchestration
   frontend/      Next.js + Wagmi — deposit, bet, settle, withdraw UIs
@@ -106,12 +125,16 @@ docs/
   architecture.md                    System design — read before touching contracts or circuits
   zk-design.md                       Circuit and note specifications — read before touching circuits
   threat-model.md                    Privacy guarantees and attack surface
+  future-changes.md                  Approved/implemented change log (FC-1 … FC-12)
+  diagrams/                          Mermaid process & path diagrams (visual companion to architecture.md)
   open-questions.md                  Unresolved design questions — check before implementing
   polymarket-api.md                  CLOB/CTF integration reference
   Q16-proving-backend-comparison.md  UltraPLONK vs Groth16 benchmark results
   collateral-flow-audit.md           pUSD/USDC collateral flow analysis
   codespaces-setup.md                Dev environment setup (Codespaces / fresh machine)
 ```
+
+> `deploy/` — single-host Docker Compose deployment (Caddy + frontend + backend services). See [`deploy/README.md`](deploy/README.md).
 
 ---
 
@@ -200,27 +223,28 @@ Proof witness data (secret, balance, nonce) is never sent to any server. Secret 
 
 - **Soundness:** Every state transition is gated by an on-chain ZK proof verification. Invalid proofs are rejected by the verifier contracts. There is no admin bypass.
 - **Nullifier protection:** Every spent note produces a public nullifier stored in `NullifierRegistry`. Double-spend is impossible without knowing the secret.
-- **Merkle root window:** The Vault accepts the last 30 Merkle roots to accommodate proof generation latency without compromising security.
+- **Merkle root window:** The Vault accepts a rolling window of the last 1024 Merkle roots (O(1) membership; FC-3) to accommodate proof-generation latency without compromising security.
 - **W-to-W withdrawal:** Withdrawal destination is cryptographically bound to the depositing address inside the note commitment. The circuit enforces this; the Vault also independently verifies it.
 - **Checks-effects-interactions:** All state changes (nullifier mark, new commitment insertion) occur before any external token transfer in every Vault function.
 - **No server-side secrets:** The note preimage never leaves the browser. Secrets are re-derived from wallet signatures on demand.
 - **$50k deposit cap:** 50,000 USDC maximum cumulative deposit per address in MVP, enforced in `Vault.deposit()`.
 
-Smart contracts are open-source and MIT licensed. Independent audits are planned before mainnet deployment.
+- **Instant UUPS upgradeability (largest trust assumption):** the owner key can replace any contract's logic in a single transaction (no timelock). This is a deliberate trade-off for the early mainnet test phase — the owner role must be a multisig/HSM in production. See `docs/threat-model.md` (T21).
+
+Smart contracts are open-source and MIT licensed. The protocol is currently in a **limited mainnet test phase**; an independent audit is planned before public/general availability.
 
 ---
 
 ## Roadmap
 
-| Phase | Timeline | Status | Focus |
-|---|---|---|---|
-| **P1 — MVP Alpha** | H1 2026 | IN PROGRESS | Core contracts, circuits, signing layer v1, testnet scaffold, fee infrastructure, JIT collateral deployment (Option 3 / FC-7) on a relayer/proxy deposit-wallet model |
-| **P2 — Testnet v1** | H2 2026 | PLANNED | Real WASM proofs, wallet-derived secrets, operator-driven settlement, open beta, base-buffer + JIT-overflow collateral (Option 4) |
-| **P3 — TEE + Multi-chain** | H1 2027 | PLANNED | AWS Nitro signing layer v2, multi-chain deposits, withdrawal fee |
-| **P4 — Privacy Infrastructure** | H2 2027 | PLANNED | Decoy traffic, onion relay, SMT nullifier, privacy metrics dashboard |
-| **P5 — Multi-market** | 2028 | RESEARCH | Expand beyond Polymarket, GTC order support |
-| **P6 — Post-Quantum** | 2028–2029 | RESEARCH | Lattice/STARK ZK backends |
-| **P7 — ZK Infrastructure** | 2028+ | RESEARCH | Recursive proofs, mobile WASM prover, ZK coprocessor |
+| Phase | Status | Focus |
+|---|---|---|
+| **P1 — Core Protocol** | ✅ SHIPPED | 9 Circom/Groth16 circuits, UUPS Vault + tree (1024-root) + registry + 9 verifiers, mandatory deposit-binding proof (FC-2), wallet-derived secrets, on-chain payout derivation — **live on Polygon mainnet** |
+| **P2 — Orders, Fees & Infra** | ✅ SHIPPED | FAK market + GTC/GTD limit orders with partial-fill credit (FC-4), gasless operator attestations (FC-9), JIT collateral (FC-7), protocol fees (FC-10), consolidation (FC-8), position close (FC-1), backend index/recovery/explorer (FC-12), live Polymarket integration, single-host Docker deploy |
+| **P3 — Hardening & Beta** | 🔨 IN PROGRESS | Security audit, owner key → multisig/HSM, base-buffer collateral (Option 4 / FC-6), persisted circuit-breaker + alerting, anonymity-set growth, public beta |
+| **P4 — TEE & Trust Min.** | PLANNED | AWS Nitro signing layer v2 + remote attestation gate, multi-EOA rotation, withdrawal timing posture / onion relay, fee governance transition |
+| **P5 — Multi-chain & Scaling** | RESEARCH | Multi-chain deposits, SMT nullifier registry, recursive proofs, mobile WASM prover, generic CLOB adapter beyond Polymarket |
+| **P6 — Cryptography Frontier** | RESEARCH | Post-quantum ZK (STARK/lattice), FHE for private state, ZK coprocessor, proof marketplace |
 
 Full roadmap with per-phase deliverables: [polyshield.xyz/roadmap](https://polyshield.xyz/roadmap)
 

@@ -2,7 +2,7 @@
 
 import { useEffect, useRef, useState, useCallback } from 'react'
 import { useBlockNumber, useDisconnect, usePublicClient } from 'wagmi'
-import { fetchPendingCredit, fetchMarketResolvedAt, fetchBetStatus, fetchAttestation, BET_STATUS } from '@/lib/api'
+import { fetchPendingCredit, fetchMarketResolvedAt, fetchBetStatus, fetchAttestation, fetchBetRecord, BET_STATUS } from '@/lib/api'
 
 // FC-9 attestation reportType: a bet that actually filled has a FILLED (1) attestation.
 const REPORT_FILLED = 1
@@ -50,7 +50,7 @@ type SettlementStatus =
   | { kind: 'pending' }
 
 /**
- * Did this bet actually fill (i.e. does the depositor hold shares)? A FOK fill stays
+ * Did this bet actually fill (i.e. does the depositor hold shares)? A market-order fill stays
  * ACTIVE on-chain but carries a FILLED operator attestation; a post-partial bet is on-chain
  * FILLED. A resting/expired/unfilled order has neither — it holds no shares.
  */
@@ -74,16 +74,40 @@ async function checkSettlementStatus(receipt: Note): Promise<SettlementStatus> {
   // on-chain creditSettlement would revert for lack of a FILLED attestation anyway). An
   // unfilled order is recovered via the reclaim/refund path, not settlement.
   const nullifierOfBet = (receipt.nullifier_of_bet ?? receipt.nullifier) as `0x${string}`
-  if (!(await betDidFill(nullifierOfBet))) return { kind: 'pending' }
-  const outcomeSide = receipt.side === 'NO' ? 1 : 0
-  const payoutPerShare = await fetchPendingCredit(VAULT_ADDRESS, circuitKey, outcomeSide)
-  if (payoutPerShare > 0n) {
-    return { kind: 'ready', payoutPerShare, claimAmount: receipt.expectedShares * payoutPerShare }
+  try {
+    // Gate on ACTUAL fill: an unfilled/resting order holds no shares and must NEVER settle.
+    if (!(await betDidFill(nullifierOfBet))) return { kind: 'pending' }
+
+    // The AUTHORITATIVE on-chain record decides settleability — NOT the FILLED attestation alone. A bet
+    // that filled and was then closed (CLOSING/CLOSED_CREDITED), already settled (CREDITED), or reclaimed
+    // (FAILED/CANCELLED_CREDITED) STILL carries its original FILLED attestation, so betDidFill() is true
+    // for it. Only a still-open filled position is settleable: FILLED, PARTIAL_FILLED, or ACTIVE
+    // (market-order fills stay ACTIVE on-chain but are gated to a real fill by betDidFill). A partial
+    // close keeps status FILLED with sold_shares > 0, so its UNSOLD remainder still settles.
+    const rec = await fetchBetRecord(VAULT_ADDRESS, nullifierOfBet)
+    const settleable =
+      rec.status === BET_STATUS.FILLED ||
+      rec.status === BET_STATUS.PARTIAL_FILLED ||
+      rec.status === BET_STATUS.ACTIVE
+    if (!settleable) return { kind: 'pending' }
+    const remaining = rec.expectedShares > rec.soldShares ? rec.expectedShares - rec.soldShares : 0n
+    if (remaining <= 0n) return { kind: 'pending' } // nothing left to settle (e.g. fully closed)
+
+    const outcomeSide = receipt.side === 'NO' ? 1 : 0
+    const payoutPerShare = await fetchPendingCredit(VAULT_ADDRESS, circuitKey, outcomeSide)
+    if (payoutPerShare > 0n) {
+      return { kind: 'ready', payoutPerShare, claimAmount: remaining * payoutPerShare }
+    }
+    // payout = 0: unresolved OR user's side lost — check resolvedAt to distinguish
+    const resolvedAt = await fetchMarketResolvedAt(VAULT_ADDRESS, circuitKey)
+    if (resolvedAt > 0n) return { kind: 'lost' }
+    return { kind: 'pending' }
+  } catch {
+    // An on-chain read failed even after ethCall's retries (RPC unreachable / sustained rate-limit).
+    // Treat conservatively as PENDING — NEVER fabricate ready/lost from a failed read (that was the
+    // bug that flipped a resolved bet to "pending"/"lost" on a transient 429). The next poll recovers.
+    return { kind: 'pending' }
   }
-  // payout = 0: unresolved OR user's side lost — check resolvedAt to distinguish
-  const resolvedAt = await fetchMarketResolvedAt(VAULT_ADDRESS, circuitKey)
-  if (resolvedAt > 0n) return { kind: 'lost' }
-  return { kind: 'pending' }
 }
 
 async function buildReadyToSettle(receipts: Note[]): Promise<{ ready: ReadyToSettleBet[]; lost: Note[] }> {
@@ -119,14 +143,28 @@ export async function loadPortfolioState(wallet: `0x${string}`): Promise<Portfol
   const refundEvents = activity.filter((event) => event.kind === 'refund')
 
   const closedBetHistory = settlementEvents.map((event) => {
-    const betAmount = betEvents.find((bet) => bet.receiptId && bet.receiptId === event.receiptId)?.amount ?? 0n
+    const committed = betEvents.find((bet) => bet.receiptId && bet.receiptId === event.receiptId)?.amount ?? 0n
+    // Effective cost basis = committed stake − partial-fill refunds already returned for this
+    // receipt. A partial fill returns the unfilled remainder, so the SETTLED position truly cost
+    // `spent` (= committed − refunded), not the committed stake. Netting here makes
+    // P&L = settlement − spent instead of overstating the cost (and understating the gain). A bet
+    // with no partial has refunded = 0, so this is unchanged for the common case.
+    const refunded = refundEvents
+      .filter((r) => r.receiptId && r.receiptId === event.receiptId)
+      .reduce((sum, r) => sum + r.amount, 0n)
+    const betAmount = committed > refunded ? committed - refunded : committed
     const pnl = event.amount - betAmount
     return { ...event, betAmount, pnl }
   }).concat(
+    // A refund returns the user's OWN stake — the unfilled remainder of a partial fill, or the
+    // full stake of a failed bet — so it is a CAPITAL RETURN, not a gain/loss: P&L is 0. (The
+    // earlier `amount − betAmount` booked a partial-fill refund as a phantom loss, which L3 makes
+    // common since downsized market orders now refund the unfilled part; the still-open filled portion
+    // settles separately for the real P&L. Exact cost-basis netting of a partial-then-settled bet —
+    // crediting the settlement against `spent` rather than the committed stake — is an FC-5 follow-up.)
     refundEvents.map((event) => {
       const betAmount = betEvents.find((bet) => bet.receiptId && bet.receiptId === event.receiptId)?.amount ?? 0n
-      const pnl = event.amount - betAmount
-      return { ...event, betAmount, pnl }
+      return { ...event, betAmount, pnl: 0n }
     }),
   )
 
@@ -258,14 +296,20 @@ export function useChainResetDetector(): boolean {
     }
   }, [publicClient, handleReset])
 
-  // Secondary signal: block number going backwards. Cheap and instant on the common case,
-  // and the only signal if the genesis fetch fails.
+  // Secondary signal: block number going backwards — a DEV/Anvil-reset heuristic ONLY.
+  // On mainnet the RPC is load-balanced (publicnode), so a poll can transiently hit a node a
+  // few blocks behind and report a LOWER block than last-seen. That is NOT a chain reset, and
+  // wiping local state + disconnecting on it caused the portfolio to vanish spuriously. So:
+  // (1) gate to dev mode (mainnet never resets — the genesis-hash check above covers dev), and
+  // (2) require a large drop so even dev-RPC jitter can't false-trigger (Anvil resets to 0,
+  //     a huge drop). The fingerprint check remains the authoritative signal.
   useEffect(() => {
     if (blockNumber === undefined) return
+    const isDev = process.env.NEXT_PUBLIC_DEV_MODE === 'true'
     const current = Number(blockNumber)
     const last = getLastSeenBlock()
 
-    if (last > 0 && current < last) {
+    if (isDev && last > 0 && current < last - 100) {
       handleReset()
     }
 

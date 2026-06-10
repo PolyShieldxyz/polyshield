@@ -252,17 +252,26 @@ export async function relayConsolidate(
   return post('/api/relay/consolidate', { proof, inputs }) as Promise<{ txHash: string }>
 }
 
-// FC-4: register a limit-order intent with the signing layer right after relaying
-// authorizeBet for an advanced-mode (limit) bet. The event listener then submits a
-// resting GTC/GTD order instead of the default FOK. expiration is the GTD effective
-// lifetime in seconds (ignored for GTC).
+// Register a Limit-order intent with the signing layer right before relaying authorizeBet for a
+// Limit bet. The event listener then submits a resting GTC/GTD order; a Market bet registers no
+// intent and falls through to the signing layer's default FAK route. expiration is the GTD
+// effective lifetime in seconds (ignored for GTC).
 export async function requestLimitOrder(req: {
   nullifier_of_bet: string
-  order_type: 'GTC' | 'GTD' | 'FAK'
+  order_type: 'GTC' | 'GTD'
   expiration?: number
 }): Promise<{ ok: boolean }> {
   devLog('[polyshield:api] registering limit-order intent', { nullifier_of_bet: req.nullifier_of_bet, order_type: req.order_type })
   return post('/api/signing/limit-order', req) as Promise<{ ok: boolean }>
+}
+
+// Cancel/recover a stuck pending bet: the operator attests FAILED if the order never reached
+// Polymarket (reclaimable), or cancels a resting order on the CLOB and lets the fill tracker
+// finalize it. outcome: 'failed' (reclaim now) | 'cancel-requested' (finalizes shortly) |
+// 'already-finalized'.
+export async function cancelPendingBet(nullifier_of_bet: string): Promise<{ ok: boolean; outcome?: string }> {
+  devLog('[polyshield:api] cancel pending bet', { nullifier_of_bet })
+  return post('/api/signing/cancel-bet', { nullifier_of_bet }) as Promise<{ ok: boolean; outcome?: string }>
 }
 
 // Decoded form of the Vault `betRecords(bytes32)` public getter. `status` is -1
@@ -277,6 +286,43 @@ export interface BetRecordView {
   sellProceeds: bigint
 }
 
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
+
+/**
+ * Resilient eth_call. A metered RPC (e.g. Alchemy free) returns HTTP 429 / a JSON-RPC rate-limit
+ * error under load (the backend cold-start scans peg it). The old raw reads turned that into a fake
+ * default (`result ?? '0x'` → status -1 / 0n), which silently flips a RESOLVED bet to "pending" or
+ * "lost". This retries transient errors (429 / rate-limit / network) with backoff and returns the
+ * real 0x result, throwing only if every attempt fails (genuinely unreachable). Callers treat a throw
+ * conservatively (pending), and the next poll recovers once the RPC is free.
+ */
+async function ethCall(rpcUrl: string, to: string, data: string): Promise<string> {
+  let lastErr: unknown
+  for (let attempt = 0; attempt < 5; attempt++) {
+    try {
+      const res = await fetch(rpcUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'eth_call', params: [{ to, data }, 'latest'] }),
+      })
+      if (res.status === 429) { lastErr = new Error('http 429'); await sleep(300 * 2 ** attempt); continue }
+      const json = await res.json() as { result?: string; error?: { code?: number; message?: string } }
+      if (json.error) {
+        const m = (json.error.message ?? '').toLowerCase()
+        const retryable = json.error.code === 429 || json.error.code === -32005 ||
+          m.includes('rate') || m.includes('compute unit') || m.includes('throughput') || m.includes('limit') || m.includes('exceeded')
+        if (retryable) { lastErr = new Error(json.error.message); await sleep(300 * 2 ** attempt); continue }
+        throw new Error(`eth_call error: ${json.error.message}`)
+      }
+      return json.result ?? '0x'
+    } catch (err) {
+      lastErr = err
+      await sleep(300 * 2 ** attempt) // network/parse error → retry
+    }
+  }
+  throw lastErr instanceof Error ? lastErr : new Error('eth_call failed after retries')
+}
+
 // Read and decode the full bet record from the Vault. The `betRecords` getter
 // returns the BetRecord struct as a flat tuple of 32-byte words (selector
 // 0x3e2ccd6c = keccak256("betRecords(bytes32)")[:4]). Word layout (32 bytes each):
@@ -289,13 +335,7 @@ export async function fetchBetRecord(
   rpcUrl = process.env.NEXT_PUBLIC_CHAIN_RPC ?? 'http://127.0.0.1:8545',
 ): Promise<BetRecordView> {
   const data = `0x3e2ccd6c${nullifier_of_bet.slice(2).padStart(64, '0')}`
-  const res = await fetch(rpcUrl, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'eth_call', params: [{ to: vaultAddress, data }, 'latest'] }),
-  })
-  const json = await res.json() as { result?: string }
-  const raw = json.result ?? '0x'
+  const raw = await ethCall(rpcUrl, vaultAddress, data)
   const word = (i: number): bigint => {
     const slice = raw.slice(2 + 64 * i, 2 + 64 * (i + 1))
     return slice.length === 64 ? BigInt('0x' + slice) : 0n
@@ -325,17 +365,20 @@ export async function fetchPartialFill(
   return { status: r.status, betAmount: r.betAmount, spentAmount: r.spentAmount, filledShares: r.filledShares }
 }
 
-// FC-1: ask the signing layer to submit a FOK SELL for a pre-settlement close.
-// sold_shares and limit_price are 1e6-scaled decimal strings. The operator reports
-// the fill via reportSold (status → CLOSING); the caller then polls the bet status
-// and generates the closePosition proof.
+// FC-1: ask the signing layer to submit a SELL for a pre-settlement close. order_type selects the
+// behavior: FAK = Market close (sell now, default); GTC/GTD = resting Limit close (expiration is the
+// GTD lifetime in seconds). A close may fill PARTIALLY; the operator signs a SOLD attestation for the
+// actual fill and the caller polls it (reportType 4) before generating the closePosition proof.
+// sold_shares and limit_price are 1e6-scaled decimal strings.
 export async function requestClose(req: {
   nullifier_of_bet: string
   position_id: string
   sold_shares: string
   limit_price: string
+  order_type?: 'FAK' | 'GTC' | 'GTD'
+  expiration?: number
 }): Promise<{ ok: boolean }> {
-  devLog('[polyshield:api] requesting position close (FOK SELL)', { nullifier_of_bet: req.nullifier_of_bet })
+  devLog('[polyshield:api] requesting position close', { nullifier_of_bet: req.nullifier_of_bet, order_type: req.order_type ?? 'FAK' })
   return post('/api/signing/close-request', req) as Promise<{ ok: boolean }>
 }
 
@@ -386,16 +429,8 @@ export async function fetchPendingCredit(
   rpcUrl = process.env.NEXT_PUBLIC_CHAIN_RPC ?? 'http://127.0.0.1:8545',
 ): Promise<bigint> {
   const data = `0x64043a2f${market_id.slice(2).padStart(64, '0')}${outcome_side.toString(16).padStart(64, '0')}`
-  const res = await fetch(rpcUrl, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      jsonrpc: '2.0', id: 1, method: 'eth_call',
-      params: [{ to: vaultAddress, data }, 'latest'],
-    }),
-  })
-  const json = await res.json() as { result: string }
-  return BigInt(json.result ?? '0x0')
+  const result = await ethCall(rpcUrl, vaultAddress, data)
+  return BigInt(result || '0x0')
 }
 
 // Fetch the block.timestamp when a market was resolved (0 if not yet resolved).
@@ -405,16 +440,8 @@ export async function fetchMarketResolvedAt(
   market_id: `0x${string}`,
   rpcUrl = process.env.NEXT_PUBLIC_CHAIN_RPC ?? 'http://127.0.0.1:8545',
 ): Promise<bigint> {
-  const res = await fetch(rpcUrl, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      jsonrpc: '2.0', id: 1, method: 'eth_call',
-      params: [{ to: vaultAddress, data: `0x1acf3695${market_id.slice(2).padStart(64, '0')}` }, 'latest'],
-    }),
-  })
-  const json = await res.json() as { result: string }
-  return BigInt(json.result ?? '0x0')
+  const result = await ethCall(rpcUrl, vaultAddress, `0x1acf3695${market_id.slice(2).padStart(64, '0')}`)
+  return BigInt(result || '0x0')
 }
 
 export async function waitForTransactionConfirmation(
