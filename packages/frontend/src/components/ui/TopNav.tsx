@@ -26,8 +26,18 @@ export function TopNav() {
   // otherwise the app pages render the marketing nav. (Brief first-paint flash on the
   // subdomain is expected — window isn't available during SSR.)
   const [appHost, setAppHost] = useState(false)
+  // The dApp lives on the app.* subdomain (middleware 301s apex/app/* -> app.<host>/*).
+  // A Next <Link> soft-navigates and won't reliably switch hosts, so "Launch App" must be a
+  // real cross-host navigation. Compute the absolute app URL per environment.
+  const [launchHref, setLaunchHref] = useState('/app/markets')
   useEffect(() => {
-    if (typeof window !== 'undefined') setAppHost(window.location.hostname.startsWith('app.'))
+    if (typeof window === 'undefined') return
+    const h = window.location.hostname
+    setAppHost(h.startsWith('app.'))
+    const isLocal = h === 'localhost' || h === '127.0.0.1' || !h.includes('.')
+    if (h.startsWith('app.')) setLaunchHref('/markets')
+    else if (isLocal) setLaunchHref('/app/markets')
+    else setLaunchHref(`${window.location.protocol}//app.${h.replace(/^www\./, '')}/markets`)
   }, [])
   const isApp = pathname.startsWith('/app') || appHost
 
@@ -60,9 +70,9 @@ export function TopNav() {
         </div>
         <div className="row gap-3">
           <Link href="/testnet" className="btn btn-sm btn-ghost">Testnet</Link>
-          <Link href="/app/markets" className="btn btn-sm btn-primary">
+          <a href={launchHref} className="btn btn-sm btn-primary">
             Launch App <Icon d={ICONS.arrow} size={12} />
-          </Link>
+          </a>
         </div>
       </div>
     </div>

@@ -1,4 +1,3 @@
-# syntax=docker/dockerfile:1
 # Build context = packages/frontend. The app has server-side API routes, so it runs as a
 # Node server (`next start`), NOT a static export.
 #

@@ -93,7 +93,13 @@ const ERC20_ABI = [
   "function transfer(address to, uint256 amount) returns (bool)",
 ];
 
-const OFFRAMP_ABI = ["function withdraw(uint256 amount) external"];
+// VERIFIED against the live CollateralOfframp (0x2957922Eb93258b93368531d39fAcCA3B4dC5854): the
+// pUSD→USDC.e call is `unwrap(address _asset, address _to, uint256 _amount)` (selector 0x8cc7104f),
+// NOT `withdraw(uint256)` (that was an unverified guess — the same bug class as the onramp, whose
+// real selector was `wrap`, not `deposit`; it made this offramp step silently revert). `unwrap`
+// pulls `_amount` pUSD from msg.sender (the deposit wallet) and sends `_amount` of `_asset` (USDC.e)
+// to `_to` — so we send it straight to the Vault.
+const OFFRAMP_ABI = ["function unwrap(address _asset, address _to, uint256 _amount)"];
 
 async function hasVaultShares(
   ctf: ethers.Contract,
@@ -143,13 +149,11 @@ async function offrampPusdToVault(executor: DepositWalletExecutor, amount: bigin
   const calls: WalletCall[] = [
     // 1) approve offramp to pull pUSD from the deposit wallet
     { target: config.pusdAddress, value: 0n, data: erc20Iface.encodeFunctionData("approve", [config.offrampAddress, amount]) },
-    // 2) offramp.withdraw — burns pUSD, sends USDC to the deposit wallet
-    { target: config.offrampAddress, value: 0n, data: offrampIface.encodeFunctionData("withdraw", [amount]) },
-    // 3) transfer USDC from the deposit wallet to the Vault
-    { target: config.usdcAddress, value: 0n, data: erc20Iface.encodeFunctionData("transfer", [config.vaultContractAddress, amount]) },
+    // 2) unwrap — burns the deposit wallet's pUSD and sends USDC.e straight to the Vault
+    { target: config.offrampAddress, value: 0n, data: offrampIface.encodeFunctionData("unwrap", [config.usdcAddress, config.vaultContractAddress, amount]) },
   ];
 
-  logger.info({ amount: amount.toString() }, "offramp: approve → withdraw → transfer-to-vault via WALLET batch");
+  logger.info({ amount: amount.toString() }, "offramp: approve → unwrap(USDC.e → Vault) via WALLET batch");
   await executor.executeBatch(calls);
   logger.info({ amount: amount.toString() }, "offramp complete — USDC in vault");
 }

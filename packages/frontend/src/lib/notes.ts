@@ -20,6 +20,7 @@ import {
   toBytes,
   type PublicClient,
 } from 'viem'
+import { fetchSpentNullifiers, fetchBetStatus, BET_STATUS } from './api'
 
 export type NoteKind = 'DEPOSIT' | 'BET_OUTPUT' | 'SETTLE_CREDIT' | 'CANCEL_CREDIT' | 'BET_RECEIPT'
 
@@ -302,6 +303,41 @@ export function incrementDepositIndex(address: `0x${string}`): void {
   const key = INDEX_KEY_PREFIX + address.toLowerCase()
   const next = getNextDepositIndex(address) + 1
   localStorage.setItem(key, next.toString())
+}
+
+/** Persist that `usedIndex` was consumed, so the local counter never hands it out again (sets it to
+ *  at least usedIndex+1). Use after a confirmed deposit instead of a blind increment, since the used
+ *  index may be higher than the local counter (it was derived from the on-chain deposit count). */
+export function recordDepositIndexUsed(address: `0x${string}`, usedIndex: number): void {
+  if (typeof window === 'undefined') return
+  const key = INDEX_KEY_PREFIX + address.toLowerCase()
+  const next = Math.max(getNextDepositIndex(address), usedIndex + 1)
+  localStorage.setItem(key, next.toString())
+}
+
+/**
+ * Collision-proof next deposit index. The localStorage counter alone is unsafe: if it's cleared it
+ * resets to 0 and the next deposit re-derives an OLD index → the same secret → a note with a nullifier
+ * that may already be spent, which LOCKS the deposit (a nonce-0 note has exactly one nullifier). So
+ * take the max of the local counter and the wallet's on-chain deposit COUNT (from the backend index),
+ * which is monotonic and survives a cache wipe. The deposit flow additionally verifies the derived
+ * nullifier isn't already spent before committing (belt-and-suspenders).
+ */
+export async function getSafeNextDepositIndex(
+  address: `0x${string}`,
+  recoveryBase = '/api/recovery-data',
+): Promise<number> {
+  const local = getNextDepositIndex(address)
+  try {
+    const res = await fetch(`${recoveryBase}/${address}`, { cache: 'no-store' })
+    if (res.ok) {
+      const d = (await res.json()) as { deposits?: unknown[] }
+      return Math.max(local, (d.deposits ?? []).length)
+    }
+  } catch {
+    /* backend unavailable → fall back to the local counter */
+  }
+  return local
 }
 
 export function computeCommitment(
@@ -1116,6 +1152,80 @@ function notifyNotesChanged(): void {
   if (typeof window !== 'undefined') {
     window.dispatchEvent(new CustomEvent('polyshield:notes-changed'))
   }
+}
+
+/**
+ * Make spent-status CHAIN-AUTHORITATIVE. The local `spent` flag is best-effort and can lag a relayed
+ * spend or a page reload, which makes note selection pick an already-spent note → the relay reverts
+ * NullifierSpent and the user is forced to "Restore". This reconciles every locally-unspent note's
+ * nullifier against the on-chain NullifierRegistry and marks the spent ones, so selection self-heals
+ * on each portfolio load and right before each spend — the user never has to think about notes.
+ * Never marks a note spent on a transient RPC error (would hide funds). Returns true if anything changed.
+ */
+const _receiptsHealedThisSession = new Set<string>()
+
+export async function reconcileSpentStatus(wallet: `0x${string}`): Promise<boolean> {
+  const vaultAddress = process.env.NEXT_PUBLIC_VAULT_ADDRESS as `0x${string}` | undefined
+  if (!vaultAddress) return false
+  const isNonZero = (h?: string): boolean => {
+    if (!h) return false
+    try {
+      return BigInt(h) !== 0n
+    } catch {
+      return false
+    }
+  }
+  // Only the SPENDABLE cash notes get the nullifier-spent check. A BET_RECEIPT tracking note
+  // intentionally carries the nullifier of the cash note consumed at bet-auth (which IS spent
+  // on-chain), so checking it would wrongly mark the OPEN bet "spent" and hide it. Match getSpendableNotes.
+  const spendable = (n: Note): boolean => n.kind !== 'BET_RECEIPT'
+  const notes = loadAll()
+  let changed = false
+
+  // (1) Mark spendable cash notes spent if their nullifier is spent on-chain (every call; cheap).
+  const candidates = notes.filter(
+    (n) => !n.spent && spendable(n) && sameAddress(n.owner_address, wallet) && isNonZero(n.nullifier),
+  )
+  if (candidates.length > 0) {
+    const spentSet = await fetchSpentNullifiers(vaultAddress, candidates.map((n) => n.nullifier))
+    if (spentSet.size > 0) {
+      for (const note of notes) {
+        if (!note.spent && spendable(note) && note.nullifier && spentSet.has(note.nullifier.toLowerCase())) {
+          note.spent = true
+          changed = true
+        }
+      }
+    }
+  }
+
+  // (2) Self-heal BET_RECEIPT visibility, ONCE per session: an earlier bug could mark an OPEN bet's
+  //     receipt spent (its nullifier == the spent cash note's). Un-mark any receipt whose on-chain
+  //     bet status is still non-terminal (open/actionable), so open bets reappear without a Restore.
+  const key = wallet.toLowerCase()
+  if (!_receiptsHealedThisSession.has(key)) {
+    _receiptsHealedThisSession.add(key)
+    const TERMINAL = new Set<number>([BET_STATUS.CREDITED, BET_STATUS.CANCELLED_CREDITED, BET_STATUS.CLOSED_CREDITED])
+    const hidden = notes.filter(
+      (n) => n.spent && n.kind === 'BET_RECEIPT' && sameAddress(n.owner_address, wallet) && isNonZero(n.nullifier_of_bet),
+    )
+    for (const r of hidden) {
+      try {
+        const status = await fetchBetStatus(vaultAddress, r.nullifier_of_bet!)
+        if (status >= 0 && !TERMINAL.has(status)) {
+          r.spent = false
+          changed = true
+        }
+      } catch {
+        /* leave as-is on a read failure */
+      }
+    }
+  }
+
+  if (changed) {
+    saveAll(notes)
+    notifyNotesChanged()
+  }
+  return changed
 }
 
 export function markNoteSpent(commitment: `0x${string}`): void {

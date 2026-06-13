@@ -221,6 +221,7 @@ contract Vault is
     // FEE: governance updated the fee parameters / a recipient claimed accrued fees.
     event FeeParamsUpdated(FeeConfig config);
     event FeesWithdrawn(address indexed to, uint256 amount);
+    event AdminSwept(address indexed to, uint256 amount);
 
     // -------------------------------------------------------------------------
     // Initializer (UUPS)
@@ -391,6 +392,22 @@ contract Vault is
 
     function pause() external onlyOwner { _pause(); }
     function unpause() external onlyOwner { _unpause(); }
+
+    /// @notice TESTING-PHASE escape hatch: sweep `amount` of the Vault's USDC to `to`. Recovers funds
+    /// that are otherwise unspendable through the normal nullifier path — e.g. a note whose nullifier
+    /// collided with an already-spent one (a nonce-0 deposit can never be re-spent), so no withdrawal
+    /// proof can ever release it. onlyOwner; intentionally NOT whenNotPaused so funds can be rescued
+    /// during a pause. `safeTransfer` reverts if `amount` exceeds the Vault's balance.
+    ///
+    /// TRUST: this lets the owner move pool USDC arbitrarily. It grants NO capability the owner does
+    /// not already hold via the instant `onlyOwner` UUPS upgrade (threat-model T21) — but it is an
+    /// explicit fund-drain lever. The owner MUST be a multisig/HSM, and this MUST be removed or
+    /// replaced with a constrained/timelocked recovery before any public, multi-user phase.
+    function adminSweep(address to, uint256 amount) external onlyOwner nonReentrant {
+        if (to == address(0)) revert ZeroAddress();
+        usdc.safeTransfer(to, amount);
+        emit AdminSwept(to, amount);
+    }
 
     /// @notice Fund the Polymarket deposit wallet in USDC directly (JIT, Option 3).
     /// Operator-callable; tracks deployed amount in deployedToPolymarket.

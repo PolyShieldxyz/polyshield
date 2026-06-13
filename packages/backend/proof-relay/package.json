@@ -6,6 +6,7 @@
   "scripts": {
     "build": "tsc",
     "dev": "ts-node src/index.ts",
+    "resync:merkle": "ts-node src/scripts/resyncMerkle.ts",
     "test": "jest --passWithNoTests"
   },
   "dependencies": {
@@ -32,6 +33,10 @@
   },
   "jest": {
     "testEnvironment": "node",
+    "testPathIgnorePatterns": [
+      "/node_modules/",
+      "/dist/"
+    ],
     "transform": {
       "^.+\\.tsx?$": [
         "ts-jest",

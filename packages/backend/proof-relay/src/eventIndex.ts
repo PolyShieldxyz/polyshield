@@ -197,6 +197,13 @@ export class VaultEventIndex {
     return out;
   }
 
+  /** One-shot catch-up (no poll interval) for the resync CLI. Backfills recent events into the DB. */
+  async catchUp(): Promise<{ lastBlock: number }> {
+    await this.sync();
+    this.ready = true;
+    return { lastBlock: this.lastBlock };
+  }
+
   async start(): Promise<void> {
     logger.info({ fromBlock: this.lastBlock + 1 }, "event index: starting catch-up scan");
     await this.sync();

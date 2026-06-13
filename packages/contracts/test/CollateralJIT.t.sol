@@ -16,8 +16,8 @@ import {DeployLib} from "../script/DeployLib.sol";
 
 /// @notice Integration test for the JIT (Option 3 / FC-7) collateral money path on real
 /// contracts, exercising the deposit-wallet proxy + relayer model end-to-end:
-///   fundPolymarketWallet (USDC → pUSD → proxy)
-///   → relayer WALLET batch on the proxy (approve → offramp.withdraw → transfer to Vault)
+///   fundPolymarketWallet (USDC → proxy) → proxy wraps USDC → pUSD via the onramp
+///   → relayer WALLET batch (approve pUSD → offramp.unwrap(USDC, Vault, amt)) → USDC to Vault
 ///   → acknowledgePolymarketReturn.
 /// This is the on-chain core of what the signing layer's jitFunding + DepositWalletExecutor
 /// drive; it deterministically validates the contract/script changes without the service stack.
@@ -85,18 +85,38 @@ contract CollateralJITTest is Test {
         usdc.mint(address(vault), AMT);
     }
 
-    /// Full JIT money path: fund → relayer offramp batch → acknowledge.
+    /// Full JIT money path on real contracts: fund (USDC→proxy) → proxy wraps USDC→pUSD →
+    /// relayer offramp batch (verified unwrap pUSD→USDC straight to the Vault) → acknowledge.
     function test_jitFund_relayerOfframp_acknowledge() public {
-        // 1) JIT funding: operator deploys the exact amount to the proxy.
+        // 1) JIT funding: operator forwards USDC.e to the proxy (current model — the pUSD hop
+        //    happens on the proxy via the onramp, not in fundPolymarketWallet).
         vm.prank(operator);
         vault.fundPolymarketWallet(AMT);
-        assertEq(pusd.balanceOf(address(proxy)), AMT, "proxy should hold pUSD");
+        assertEq(usdc.balanceOf(address(proxy)), AMT, "proxy should hold the funded USDC");
         assertEq(vault.deployedToPolymarket(), AMT, "deployedToPolymarket tracks the funding");
-        assertEq(usdc.balanceOf(address(vault)), 0, "vault USDC was converted out");
+        assertEq(usdc.balanceOf(address(vault)), 0, "vault USDC deployed out");
 
-        // 2) Settlement: relayer submits a WALLET batch ON the proxy:
-        //    approve(offramp) → offramp.withdraw → transfer USDC to the Vault.
-        MockDepositWallet.Call[] memory calls = new MockDepositWallet.Call[](3);
+        // 2) The proxy wraps its USDC -> pUSD via the onramp (relayer WALLET batch) — the
+        //    deposit wallet's buying-power prep.
+        MockDepositWallet.Call[] memory wrap = new MockDepositWallet.Call[](2);
+        wrap[0] = MockDepositWallet.Call({
+            target: address(usdc),
+            value: 0,
+            data: abi.encodeWithSignature("approve(address,uint256)", address(onramp), AMT)
+        });
+        wrap[1] = MockDepositWallet.Call({
+            target: address(onramp),
+            value: 0,
+            data: abi.encodeWithSignature("deposit(uint256)", AMT)
+        });
+        vm.prank(relayer);
+        proxy.executeBatch(wrap);
+        assertEq(pusd.balanceOf(address(proxy)), AMT, "proxy wrapped USDC into pUSD");
+
+        // 3) Settlement/reclaim: relayer offramp batch on the proxy — approve pUSD, then the
+        //    VERIFIED unwrap(USDC, Vault, AMT) sends USDC.e straight back to the Vault (no
+        //    separate transfer). Mirrors redemptionPipeline.offrampPusdToVault.
+        MockDepositWallet.Call[] memory calls = new MockDepositWallet.Call[](2);
         calls[0] = MockDepositWallet.Call({
             target: address(pusd),
             value: 0,
@@ -105,12 +125,7 @@ contract CollateralJITTest is Test {
         calls[1] = MockDepositWallet.Call({
             target: address(offramp),
             value: 0,
-            data: abi.encodeWithSignature("withdraw(uint256)", AMT)
-        });
-        calls[2] = MockDepositWallet.Call({
-            target: address(usdc),
-            value: 0,
-            data: abi.encodeWithSignature("transfer(address,uint256)", address(vault), AMT)
+            data: abi.encodeWithSignature("unwrap(address,address,uint256)", address(usdc), address(vault), AMT)
         });
         vm.prank(relayer);
         proxy.executeBatch(calls);
@@ -129,7 +144,21 @@ contract CollateralJITTest is Test {
     function test_residualBuffer_coversNextBet() public {
         vm.prank(operator);
         vault.fundPolymarketWallet(AMT);
-        // The proxy now holds AMT pUSD. A subsequent bet of <= AMT needs no new onramp:
+        // The proxy wraps the funded USDC -> pUSD; that pUSD is the residual buffer a later
+        // bet of <= AMT reuses with no new onramp.
+        MockDepositWallet.Call[] memory wrap = new MockDepositWallet.Call[](2);
+        wrap[0] = MockDepositWallet.Call({
+            target: address(usdc),
+            value: 0,
+            data: abi.encodeWithSignature("approve(address,uint256)", address(onramp), AMT)
+        });
+        wrap[1] = MockDepositWallet.Call({
+            target: address(onramp),
+            value: 0,
+            data: abi.encodeWithSignature("deposit(uint256)", AMT)
+        });
+        vm.prank(relayer);
+        proxy.executeBatch(wrap);
         assertGe(pusd.balanceOf(address(proxy)), AMT, "residual buffer covers the next bet");
     }
 
@@ -153,5 +182,28 @@ contract CollateralJITTest is Test {
         vm.prank(operator);
         vm.expectRevert(Vault.DeployCapExceeded.selector);
         vault.fundPolymarketWallet(AMT);
+    }
+
+    /// adminSweep (testing-phase escape hatch): owner rescues USDC locked behind a burned nullifier.
+    function test_adminSweep_ownerRescuesUsdc() public {
+        address rescuer = makeAddr("rescuer");
+        uint256 bal = usdc.balanceOf(address(vault));
+        assertGt(bal, 0, "vault seeded with USDC");
+        vm.prank(owner);
+        vault.adminSweep(rescuer, bal);
+        assertEq(usdc.balanceOf(rescuer), bal, "rescuer received the swept USDC");
+        assertEq(usdc.balanceOf(address(vault)), 0, "vault USDC fully swept");
+    }
+
+    function test_adminSweep_revertNotOwner() public {
+        vm.prank(makeAddr("attacker"));
+        vm.expectRevert(); // Ownable2Step: OwnableUnauthorizedAccount
+        vault.adminSweep(makeAddr("x"), 1);
+    }
+
+    function test_adminSweep_revertZeroAddress() public {
+        vm.prank(owner);
+        vm.expectRevert(Vault.ZeroAddress.selector);
+        vault.adminSweep(address(0), 1);
     }
 }

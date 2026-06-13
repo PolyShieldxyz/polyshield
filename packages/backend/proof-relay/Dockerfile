@@ -1,4 +1,3 @@
-# syntax=docker/dockerfile:1
 # Build context MUST be packages/backend/ (the service tsconfig extends ../tsconfig.json).
 #   docker build -f proof-relay/Dockerfile -t polyshield-proof-relay packages/backend
 # (docker compose does this for you.)

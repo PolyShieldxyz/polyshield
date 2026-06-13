@@ -13,6 +13,7 @@ import {
   deriveSecret,
   formatUsdc,
   markNoteSpent,
+  reconcileSpentStatus,
   recordWalletActivity,
   selectNotesForAmount,
   type Note,
@@ -126,6 +127,9 @@ export default function WithdrawPage() {
     setTxHash('')
 
     try {
+      // Chain-authoritative spent check: heal any locally-stale notes (already spent on-chain) before
+      // selecting what to spend, so neither the merge nor the withdraw picks a spent note.
+      await reconcileSpentStatus(address)
       // FC-8: a single note need not cover the amount — merge up to 4 notes first.
       let spendNote = cashNote
       if (requestedAmount > spendNote.balance) {
@@ -148,11 +152,15 @@ export default function WithdrawPage() {
       setStatusMsg('Fetching Merkle path...')
       let merkle
       try {
-        merkle = await fetchMerklePath(spendNote.commitment)
+        merkle = await fetchMerklePath(spendNote.commitment, {
+          // After a note-merge the merged leaf was just inserted on-chain; the backend index needs a
+          // few seconds to ingest it. Poll with a clear message instead of hanging or erroring out.
+          onWait: (n) => setStatusMsg(`Waiting for the network to index your note… (${n})`),
+        })
       } catch (e) {
         const msg = e instanceof Error ? e.message : String(e)
-        if (msg.includes('not found')) {
-          throw new Error('Your note is not in the current chain tree. The chain may have been reset — please refresh the page and deposit again.')
+        if (/not found|not yet indexed/i.test(msg)) {
+          throw new Error('Your note isn’t in the chain tree yet. If you just merged notes, wait a few seconds and retry; if the chain was reset, refresh and deposit again.')
         }
         throw e
       }

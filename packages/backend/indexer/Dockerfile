@@ -1,4 +1,3 @@
-# syntax=docker/dockerfile:1
 # Build context MUST be packages/backend/ (the service tsconfig extends ../tsconfig.json).
 # indexer uses better-sqlite3 (native) — the build stage carries a toolchain in case no
 # prebuilt binary is available for this platform/Node ABI.

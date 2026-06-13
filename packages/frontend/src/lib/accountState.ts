@@ -19,6 +19,7 @@ import {
   setChainFingerprint,
   resetAllLocalState,
   receiptCircuitKey,
+  reconcileSpentStatus,
   type Note,
   type WalletActivityEvent,
   type ReadyToSettleBet,
@@ -125,6 +126,10 @@ async function buildReadyToSettle(receipts: Note[]): Promise<{ ready: ReadyToSet
 }
 
 export async function loadPortfolioState(wallet: `0x${string}`): Promise<PortfolioState> {
+  // Chain-authoritative spent reconciliation: heal any local note whose nullifier is already spent
+  // on-chain BEFORE computing balances/cash-note, so the displayed balance and the note selection
+  // are correct without the user ever running "Restore". Best-effort: tolerant of RPC errors.
+  await reconcileSpentStatus(wallet).catch(() => undefined)
   const notes = getWalletNotes(wallet)
   const cashNote = getCurrentCashNote(wallet)
   const cashBalance = getCashBalance(wallet)

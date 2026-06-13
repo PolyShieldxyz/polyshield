@@ -1,4 +1,3 @@
-# syntax=docker/dockerfile:1
 # Build context MUST be packages/backend/ (the service tsconfig extends ../tsconfig.json).
 # signing-layer HOLDS THE VAULT KEY — this image is the trust-sensitive one. It also uses
 # better-sqlite3 (native), so the build stage carries a toolchain.

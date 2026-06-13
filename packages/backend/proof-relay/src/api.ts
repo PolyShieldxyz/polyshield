@@ -19,50 +19,106 @@ import { computeMerkleProof } from "./merkle";
 // Source IP is NEVER logged — see pino redact config in index.ts
 const logger = pino({ name: "proof-relay-api" });
 
-// API-004: allowlist of known Vault custom-error names. Any error whose message
-// contains one of these is surfaced verbatim (it leaks nothing sensitive); every
-// other error is collapsed to a generic message + correlation id. The full error
-// is always logged server-side under that id.
-const KNOWN_VAULT_ERRORS = [
-  "BetNotFilled",
-  "NullifierSpent",
-  "UnknownRoot",
-  "InvalidProof",
-  "BetNotFound",
-  "WrongMarket",
-  "BetNotCancellable",
-  "ConditionNotResolved",
-  "NotNA",
-] as const;
+// API-004 + legibility: the Vault reverts with custom errors. On a metered RPC ethers reports them
+// as "unknown custom error" with only the raw 4-byte selector in `data` (the relay's call ABI does
+// not carry the error defs), so a name-substring match never fires and everything collapsed to the
+// useless "relay failed". We decode the selector against the full Vault error set and return a clear,
+// actionable message (the error NAME is protocol-level, not sensitive). The full error is still
+// logged server-side under a correlation id.
+const VAULT_ERROR_SIGS = [
+  "AlreadyPartiallyClosed()", "AttestationMismatch()", "AttestationRequired()", "BadRecipient()",
+  "BelowMinimum()", "BetNotActive()", "BetNotCancellable()", "BetNotClosing()", "BetNotFailed()",
+  "BetNotFilled()", "BetNotFound()", "BetNotPartialFillable()", "BetNotPartialFilled()",
+  "BetNotReportable()", "BetTimeoutNotElapsed()", "CannotCloseResolvedMarket()", "ConditionNotRegistered()",
+  "ConditionNotResolved()", "DeployCapExceeded()", "DepositCapExceeded()", "EmptyConsolidation()",
+  "InsufficientLiquidity(uint256,uint256)", "InsufficientVaultLiquidity()", "InvalidAmount()",
+  "InvalidAttestation()", "InvalidFilledShares()", "InvalidProof()", "InvalidSoldShares()",
+  "InvalidSpentAmount()", "MarketAlreadyResolved()", "MarketNotResolved()", "NonMonotonicProceeds()",
+  "NotFeeRecipient()", "NotNA()", "NullifierSpent()", "OnlyOperator()", "PayoutRoundsToZero()",
+  "UnknownRoot()", "VerifierTimelockActive()", "WrongMarket()", "ZeroAddress()",
+];
+const VAULT_ERRORS_IFACE = new ethers.Interface(VAULT_ERROR_SIGS.map((s) => `error ${s}`));
+
+// User-actionable hints for the errors a depositor can actually hit + resolve. Anything else falls
+// back to the decoded error name (still legible), then to "relay failed" if undecodable.
+const ERROR_HINTS: Record<string, string> = {
+  NullifierSpent: "This note was already spent — your wallet is out of sync with the chain. Open Portfolio → Restore to recover your notes, then retry.",
+  UnknownRoot: "Your note's Merkle root is no longer in the vault's recent window — recover your notes (Portfolio → Restore) and retry.",
+  InvalidProof: "Proof verification failed (often a fee or input mismatch). Refresh the page and try again.",
+  BelowMinimum: "Amount is below the minimum allowed.",
+  DepositCapExceeded: "This would exceed the $50,000 per-address deposit cap.",
+  InsufficientLiquidity: "The vault is temporarily short on USDC to pay this out — try a smaller amount or retry shortly.",
+  ConditionNotResolved: "This market hasn't resolved yet — settlement isn't available.",
+  MarketNotResolved: "This market hasn't resolved yet — settlement isn't available.",
+  BadRecipient: "Withdrawals can only go to your depositing wallet.",
+  BetNotFound: "No matching bet was found on-chain for this note.",
+};
+
+/** Pull the raw revert selector (0x........) out of an ethers v6 error, from any of the shapes it uses. */
+function extractRevertData(err: unknown): string | null {
+  const e = err as { data?: unknown; info?: { error?: { data?: unknown } }; error?: { data?: unknown }; message?: unknown };
+  for (const c of [e?.data, e?.info?.error?.data, e?.error?.data]) {
+    if (typeof c === "string" && /^0x[0-9a-fA-F]{8}/.test(c)) return c;
+  }
+  const m = typeof e?.message === "string" ? e.message.match(/data="?(0x[0-9a-fA-F]{8,})"?/) : null;
+  return m ? m[1] : null;
+}
+
+/** Decode a reverted relay error to a Vault error name + actionable hint, or null if undecodable. */
+function decodeVaultError(err: unknown): { name: string; hint?: string } | null {
+  const data = extractRevertData(err);
+  if (!data) return null;
+  try {
+    const d = VAULT_ERRORS_IFACE.parseError(data);
+    if (d) return { name: d.name, hint: ERROR_HINTS[d.name] };
+  } catch {
+    /* not a known Vault custom error */
+  }
+  return null;
+}
 
 /**
- * API-004: produce a SAFE client-facing error response and log the full error
- * server-side under a correlation id. Known Vault custom errors are mapped to
- * their clean name; everything else returns a generic "relay failed".
+ * API-004: produce a SAFE, ACTIONABLE client-facing error and log the full error server-side under a
+ * correlation id. Decodes the Vault custom-error selector to a clear message + machine `code`; falls
+ * back to a name-in-message match, then a generic message.
  */
-function safeError(logger: pino.Logger, context: string, err: unknown): { error: string; ref: string } {
+function safeError(
+  logger: pino.Logger,
+  context: string,
+  err: unknown,
+): { error: string; code?: string; ref: string } {
   const ref = crypto.randomBytes(8).toString("hex");
   logger.error({ err, ref, context }, `${context} failed`);
 
+  const decoded = decodeVaultError(err);
+  if (decoded) return { error: decoded.hint ?? decoded.name, code: decoded.name, ref };
+
+  // Fallback: some providers do include the name in the reason/message string.
   let message = "";
   if (err && typeof err === "object") {
     const e = err as Record<string, unknown>;
     if (typeof e["reason"] === "string") message += e["reason"];
     if (typeof e["message"] === "string") message += " " + (e["message"] as string);
   }
-  const matched = KNOWN_VAULT_ERRORS.find((name) => message.includes(name));
-  return { error: matched ?? "relay failed", ref };
+  const matched = VAULT_ERROR_SIGS.map((s) => s.split("(")[0]).find((name) => message.includes(name));
+  return { error: matched ?? "relay failed", code: matched, ref };
 }
 
 let _provider: ethers.JsonRpcProvider | null = null;
 let _treeAddress: string | null = null;
 let _vaultAddress: string | null = null;
 let _treeDeployBlock = 0; // start block for merkle-path log scans (tree deploy block)
-let _merkleCache: { proofFor: (commitment: string) => unknown } | null = null;
+interface MerkleCacheLike {
+  proofFor: (commitment: string) => unknown;
+  syncNow: () => Promise<void>;
+  isReady: () => boolean;
+}
+let _merkleCache: MerkleCacheLike | null = null;
 
 /** Register the backend Merkle read-cache. The /merkle-path route serves from it (O(depth), no chain
- * call) and falls back to on-the-fly computation on a cache miss / inconsistency. */
-export function setMerkleCache(cache: { proofFor: (commitment: string) => unknown }): void {
+ * call). On a miss it does a quick incremental catch-up (syncNow) for a freshly-inserted leaf, and
+ * only falls back to the slow full-from-deploy reconstruction when the cache is unavailable/diverged. */
+export function setMerkleCache(cache: MerkleCacheLike): void {
   _merkleCache = cache;
 }
 
@@ -387,19 +443,34 @@ export function createApp(): express.Application {
       res.status(400).json({ error: "commitment must be 0x-prefixed 32-byte hex" });
       return;
     }
+    type CachedProof = { path: string[]; pathIndices: number[]; root: string; leafIndex: number };
     try {
-      // Fast path: serve from the backend cache (O(depth) in-memory, no chain query). Returns null on
-      // a cache miss (leaf not yet ingested / cache not ready / diverged) → fall back to the
-      // authoritative on-the-fly reconstruction below.
-      const cached = _merkleCache?.proofFor(commitment) as
-        | { path: string[]; pathIndices: number[]; root: string; leafIndex: number }
-        | null
-        | undefined;
-      if (cached) {
-        logger.info({ commitment, leafIndex: cached.leafIndex, source: "cache" }, "merkle-path served");
-        res.json(cached);
-        return;
+      const cache = _merkleCache;
+      if (cache) {
+        // Fast path: serve from the backend cache (O(depth) in-memory, no chain query).
+        let cached = cache.proofFor(commitment) as CachedProof | null;
+        // Cache miss on a healthy cache → almost always a freshly-inserted leaf the poll hasn't
+        // ingested yet. Do a quick INCREMENTAL catch-up (only new blocks since the cursor) and
+        // re-check — NOT the slow full-from-deploy scan, which is what hung on a metered RPC.
+        if (!cached && cache.isReady()) {
+          await cache.syncNow();
+          cached = cache.proofFor(commitment) as CachedProof | null;
+        }
+        if (cached) {
+          logger.info({ commitment, leafIndex: cached.leafIndex, source: "cache" }, "merkle-path served");
+          res.json(cached);
+          return;
+        }
+        // Cache is healthy and caught up to (head − confirmations) but still lacks this leaf: it is
+        // either genuinely not in the tree, or inserted within the last few (unconfirmed) blocks.
+        // Return fast so the client polls — do NOT trigger a full chain scan.
+        if (cache.isReady()) {
+          res.status(404).json({ error: "commitment not yet indexed — retry shortly" });
+          return;
+        }
+        // else: cache not ready / diverged → fall through to the authoritative on-chain path.
       }
+      // Fallback (cache unavailable or diverged only): authoritative full reconstruction.
       const proof = await computeMerkleProof(_treeAddress, commitment, _provider, {
         fromBlock: _treeDeployBlock,
       });

@@ -323,6 +323,51 @@ async function ethCall(rpcUrl: string, to: string, data: string): Promise<string
   throw lastErr instanceof Error ? lastErr : new Error('eth_call failed after retries')
 }
 
+// Chain-authoritative spent check. The frontend's local `spent` flag is best-effort (it can lag a
+// relayed spend or a reload), so note SELECTION must verify against the on-chain NullifierRegistry —
+// otherwise a stale note is chosen and the relay reverts NullifierSpent. The registry address is read
+// once from Vault.nullifiers() (selector 0x39b51ea5) and cached; spent-status via isSpent(bytes32)
+// (0xe5285dcc). A transient read error leaves a nullifier OUT of the "spent" set so we NEVER falsely
+// mark a note spent (which would hide funds) — at worst selection retries it and the relay guards us.
+let _nullifierRegistry: string | null = null
+
+async function resolveNullifierRegistry(vaultAddress: string, rpcUrl: string): Promise<string> {
+  if (_nullifierRegistry) return _nullifierRegistry
+  const raw = await ethCall(rpcUrl, vaultAddress, '0x39b51ea5') // nullifiers()
+  const addr = `0x${raw.slice(-40)}`
+  if (!/^0x[0-9a-fA-F]{40}$/.test(addr) || BigInt(addr) === 0n) throw new Error('could not resolve NullifierRegistry')
+  _nullifierRegistry = addr
+  return addr
+}
+
+/** Returns the lowercased subset of `nullifiers` already spent on-chain. Safe under load (429-retry
+ *  via ethCall); definitive `true` only. */
+export async function fetchSpentNullifiers(
+  vaultAddress: string,
+  nullifiers: `0x${string}`[],
+  rpcUrl = process.env.NEXT_PUBLIC_CHAIN_RPC ?? 'http://127.0.0.1:8545',
+): Promise<Set<string>> {
+  if (nullifiers.length === 0) return new Set()
+  let registry: string
+  try {
+    registry = await resolveNullifierRegistry(vaultAddress, rpcUrl)
+  } catch {
+    return new Set() // can't resolve registry → treat nothing as spent (selection + relay still guard)
+  }
+  const spent = new Set<string>()
+  await Promise.all(
+    nullifiers.map(async (n) => {
+      try {
+        const raw = await ethCall(rpcUrl, registry, `0xe5285dcc${n.slice(2).padStart(64, '0')}`)
+        if (raw && raw !== '0x' && BigInt(raw) === 1n) spent.add(n.toLowerCase())
+      } catch {
+        /* unknown → not spent (never hide funds on a transient error) */
+      }
+    }),
+  )
+  return spent
+}
+
 // Read and decode the full bet record from the Vault. The `betRecords` getter
 // returns the BetRecord struct as a flat tuple of 32-byte words (selector
 // 0x3e2ccd6c = keccak256("betRecords(bytes32)")[:4]). Word layout (32 bytes each):
@@ -414,9 +459,31 @@ export async function fetchDevStatus(): Promise<DevStatus> {
 
 // Fetch the Merkle inclusion proof for a commitment leaf.
 // The proof-relay backend reconstructs the tree from on-chain LeafInserted events.
-export async function fetchMerklePath(commitment: `0x${string}`): Promise<MerkleProof> {
+export async function fetchMerklePath(
+  commitment: `0x${string}`,
+  opts?: { maxRetries?: number; delayMs?: number; onWait?: (attempt: number) => void },
+): Promise<MerkleProof> {
   devLog('[polyshield:api] fetching merkle path for', commitment)
-  return get(`/api/merkle-path/${commitment}`) as Promise<MerkleProof>
+  const maxRetries = opts?.maxRetries ?? 12
+  const delayMs = opts?.delayMs ?? 5000
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return (await get(`/api/merkle-path/${commitment}`)) as MerkleProof
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e)
+      // A freshly-inserted leaf (e.g. the output of a just-mined consolidate) isn't in the backend
+      // merkle cache for a few seconds — until the poll ingests it past the confirmation buffer. The
+      // backend returns "not yet indexed — retry shortly" (fast, no chain scan); poll until it lands.
+      // A genuinely-missing leaf simply exhausts the retries and rethrows for the caller to handle.
+      const transient = /not yet indexed|not found|relay is not running|HTTP 503/i.test(msg)
+      if (transient && attempt < maxRetries) {
+        opts?.onWait?.(attempt + 1)
+        await new Promise((r) => setTimeout(r, delayMs))
+        continue
+      }
+      throw e
+    }
+  }
 }
 
 // Fetch payout_per_share for a resolved market from Vault.pendingCredit(bytes32,uint8).

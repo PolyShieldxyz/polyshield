@@ -17,6 +17,7 @@ import {
   markNoteSpent,
   MAX_CONSOLIDATE_INPUTS,
   positionToField,
+  reconcileSpentStatus,
   recordWalletActivity,
   selectNotesForAmount,
   toFieldSafe,
@@ -245,6 +246,9 @@ export function BetModal({
       )
       return
     }
+    // Chain-authoritative spent check before selecting a note: heals any locally-stale note whose
+    // nullifier is already spent on-chain, so we never pick a spent note → no NullifierSpent revert.
+    await reconcileSpentStatus(address).catch(() => undefined)
     let cashNote = getCurrentCashNote(address)
     if (!cashNote) {
       const msg = 'No available cash balance to place this bet. Deposit USDC first.'

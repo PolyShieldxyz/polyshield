@@ -9,6 +9,8 @@
     "setup:deposit-wallet": "ts-node src/scripts/depositWalletSetup.ts",
     "attest-sold": "ts-node src/scripts/attestSold.ts",
     "report-close-sells": "ts-node src/scripts/reportCloseSells.ts",
+    "reclaim:status": "ts-node src/scripts/reclaimStatus.ts",
+    "reclaim:to-vault": "ts-node src/scripts/reclaimToVault.ts",
     "test": "jest --passWithNoTests"
   },
   "dependencies": {

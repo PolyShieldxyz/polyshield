@@ -66,6 +66,7 @@ export class CachedMerkleTree {
   private lastBlock: number;
   private ready = false;
   private consistent = true;
+  private syncInFlight: Promise<void> | null = null;
 
   constructor(
     private provider: ethers.JsonRpcProvider,
@@ -234,6 +235,24 @@ export class CachedMerkleTree {
     }
   }
 
+  /** Serialize sync() so the background poll and an on-demand syncNow() never overlap (a concurrent
+   *  run would race lastBlock/nextIndex and risk double-appending). Callers share the in-flight run. */
+  private runSync(): Promise<void> {
+    if (this.syncInFlight) return this.syncInFlight;
+    this.syncInFlight = this.sync().finally(() => {
+      this.syncInFlight = null;
+    });
+    return this.syncInFlight;
+  }
+
+  /** Trigger an immediate incremental catch-up (only new blocks since the cursor — cheap). Used by the
+   *  /merkle-path route on a cache miss so a freshly-inserted leaf is picked up in seconds without the
+   *  slow full from-deploy fallback. No-op if the cache has diverged (the API uses the on-chain path). */
+  async syncNow(): Promise<void> {
+    if (!this.consistent) return;
+    await this.runSync().catch((err) => logger.error({ err: String(err) }, "merkle cache syncNow failed"));
+  }
+
   /** Belt-and-suspenders: the cached root must equal the contract's live currentRoot once caught up. */
   private async verifyAgainstChain(): Promise<void> {
     if (!this.isReady() || this.nextIndex === 0) return;
@@ -249,13 +268,24 @@ export class CachedMerkleTree {
     }
   }
 
+  /** One-shot backfill: load persisted leaves + catch up to head, WITHOUT starting the background
+   *  poll intervals. For the resync CLI. Returns the resulting state (leaves, cursor, consistency,
+   *  computed root). If `consistent` is false the on-chain tree diverged from the persisted leaves —
+   *  the DB must be rebuilt from scratch (delete merkle.db and re-run). */
+  async catchUp(): Promise<{ leaves: number; lastBlock: number; consistent: boolean; root: string }> {
+    this.loadFromDb();
+    await this.runSync();
+    this.ready = true;
+    return { leaves: this.nextIndex, lastBlock: this.lastBlock, consistent: this.consistent, root: toHex(this.root()) };
+  }
+
   async start(): Promise<void> {
     this.loadFromDb();
     logger.info({ fromBlock: this.lastBlock + 1, haveLeaves: this.nextIndex }, "merkle cache: starting catch-up scan (one-time full scan on a fresh cache)");
-    await this.sync();
+    await this.runSync();
     this.ready = true;
     logger.info({ leaves: this.nextIndex, consistent: this.consistent, persisted: !!this.db }, "merkle cache ready");
-    setInterval(() => void this.sync().catch((err) => logger.error({ err: String(err) }, "merkle cache sync failed")), POLL_MS);
+    setInterval(() => void this.runSync().catch((err) => logger.error({ err: String(err) }, "merkle cache sync failed")), POLL_MS);
     setInterval(() => void this.verifyAgainstChain(), POLL_MS * 4);
   }
 }

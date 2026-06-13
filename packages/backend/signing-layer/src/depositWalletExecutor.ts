@@ -10,6 +10,27 @@ const logger = pino({ name: "deposit-wallet-executor" });
 // signer/relayer clock skew and submission latency, short enough to bound replay.
 const RELAY_DEADLINE_SECONDS = 300;
 
+// The Polymarket relayer serializes WALLET actions per deposit wallet: a second batch submitted
+// before the previous one has fully settled is rejected with HTTP 400 "wallet busy: active action
+// exists". Back-to-back batches (redeem→offramp in settlement, offramp→sweep in reclaim) hit this,
+// so retry with backoff until the prior action clears.
+const WALLET_BUSY_MAX_RETRIES = 8;
+const WALLET_BUSY_DELAY_MS = 5000;
+
+const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
+
+function isWalletBusy(err: unknown): boolean {
+  let s = "";
+  try {
+    s = JSON.stringify(err);
+  } catch {
+    /* circular — fall back to fields below */
+  }
+  const e = err as { message?: unknown; data?: { error?: unknown } } | null;
+  s += ` ${String(e?.message ?? "")} ${String(e?.data?.error ?? "")}`;
+  return /wallet busy|active action exists/i.test(s);
+}
+
 /**
  * Deposit-wallet execution abstraction.
  *
@@ -199,25 +220,42 @@ class PolymarketRelayerExecutor implements DepositWalletExecutor {
     if (!config.depositWalletAddress) {
       throw new Error("PolymarketRelayerExecutor: DEPOSIT_WALLET_ADDRESS not set");
     }
-    const resp = await this.client().executeDepositWalletBatch(
-      this.toDepositWalletCalls(calls),
-      config.depositWalletAddress,
-      this.deadline(),
-    );
-    // wait() resolves to the mined RelayerTransaction, or undefined if the relayer tx hit
-    // its fail state / timed out. Treat undefined as a hard failure and THROW — callers
-    // (redemptionPipeline) depend on a throw to halt; a silent no-throw would let the
-    // post-batch pUSD balance-delta read compute 0 and skip the offramp (lost funds).
-    const mined = await resp.wait();
-    if (!mined) {
-      throw new Error(
-        `polymarket relayer WALLET batch failed or timed out (txId=${resp.transactionID}, state=${resp.state})`,
-      );
+    for (let attempt = 1; ; attempt++) {
+      try {
+        const resp = await this.client().executeDepositWalletBatch(
+          this.toDepositWalletCalls(calls),
+          config.depositWalletAddress,
+          this.deadline(),
+        );
+        // wait() resolves to the mined RelayerTransaction, or undefined if the relayer tx hit
+        // its fail state / timed out. Treat undefined as a hard failure and THROW — callers
+        // (redemptionPipeline) depend on a throw to halt; a silent no-throw would let the
+        // post-batch pUSD balance-delta read compute 0 and skip the offramp (lost funds).
+        const mined = await resp.wait();
+        if (!mined) {
+          throw new Error(
+            `polymarket relayer WALLET batch failed or timed out (txId=${resp.transactionID}, state=${resp.state})`,
+          );
+        }
+        logger.info(
+          { calls: calls.length, txId: mined.transactionID, txHash: mined.transactionHash, state: mined.state },
+          "polymarket relayer: WALLET batch mined",
+        );
+        return;
+      } catch (err) {
+        // The relayer serializes actions per wallet; a prior batch may not have cleared yet.
+        // Back off and retry rather than failing the whole reclaim/settlement.
+        if (isWalletBusy(err) && attempt < WALLET_BUSY_MAX_RETRIES) {
+          logger.warn(
+            { attempt, maxRetries: WALLET_BUSY_MAX_RETRIES, delayMs: WALLET_BUSY_DELAY_MS },
+            "polymarket relayer: wallet busy (active action exists) — waiting for it to clear, then retrying",
+          );
+          await sleep(WALLET_BUSY_DELAY_MS);
+          continue;
+        }
+        throw err;
+      }
     }
-    logger.info(
-      { calls: calls.length, txId: mined.transactionID, txHash: mined.transactionHash, state: mined.state },
-      "polymarket relayer: WALLET batch mined",
-    );
   }
 
   async ensureApprovals(): Promise<void> {

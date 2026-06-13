@@ -9,8 +9,9 @@ import { Icon, ICONS } from '@/components/ui/Icon'
 import { VAULT_ABI, USDC_ABI } from '@/lib/vaultAbi'
 import {
   deriveSecret, computeCommitment, computeNullifier,
-  getNextDepositIndex, incrementDepositIndex, addNote, clearNoteCache, recordWalletActivity,
+  getSafeNextDepositIndex, recordDepositIndexUsed, addNote, clearNoteCache, recordWalletActivity,
 } from '@/lib/notes'
+import { fetchSpentNullifiers } from '@/lib/api'
 import { generateDepositProof } from '@/lib/prover'
 
 const IS_DEV = process.env.NEXT_PUBLIC_DEV_MODE === 'true'
@@ -365,8 +366,9 @@ export default function DepositPage() {
 
   useEffect(() => {
     if (depositConfirmed && depositTxHash && address) {
-      // Increment deposit index only after confirmed so re-derives on retry get the same index
-      incrementDepositIndex(address)
+      // Record the index actually used (may exceed the local counter, since it came from the
+      // on-chain deposit count) so it is never handed out again.
+      recordDepositIndexUsed(address, depositIndex)
       addNote({
         id: commitment,
         kind: 'DEPOSIT',
@@ -421,10 +423,22 @@ export default function DepositPage() {
     if (!address) return
     setDeriving(true)
     try {
-      const index = getNextDepositIndex(address)
-      const secret = await deriveSecret(signMessageAsync, address, index)
+      // Collision-proof index. The localStorage counter resets to 0 on a cache wipe, which previously
+      // re-derived an OLD index → a note with an already-spent nullifier → LOCKED funds. Start from the
+      // on-chain deposit count, then bump past any index whose nullifier is already spent on-chain (a
+      // nonce-0 note has exactly one nullifier, so depositing onto a spent one is unrecoverable).
+      let index = await getSafeNextDepositIndex(address)
+      let secret = await deriveSecret(signMessageAsync, address, index)
+      let n = computeNullifier(secret, 0n)
+      for (let guard = 0; guard < 20; guard++) {
+        const spent = await fetchSpentNullifiers(VAULT_ADDRESS, [n])
+        if (!spent.has(n.toLowerCase())) break
+        console.warn('[deposit] index', index, 'has a spent nullifier — bumping to avoid a locked deposit')
+        index += 1
+        secret = await deriveSecret(signMessageAsync, address, index)
+        n = computeNullifier(secret, 0n)
+      }
       const c = computeCommitment(secret, amountMicro, 0n, address)
-      const n = computeNullifier(secret, 0n)
       setCommitment(c); setNullifier(n); setDepositIndex(index)
       console.log('[deposit] note derived from wallet signature', { commitment: c, index })
 
