@@ -57,7 +57,7 @@ const PHASES: Phase[] = [
       'Base-buffer collateral policy (Option 4 / FC-6) layered over JIT to smooth funding',
       'Persist the signing-layer circuit-breaker halt flag across restarts + a real alert sink (PagerDuty/Telegram)',
       'Grow the anonymity set; define the governance path to lift the per-address deposit cap',
-      'Polygon Amoy public testnet cohort and invite-only mainnet beta',
+      'Public mainnet beta — open onboarding on Polygon mainnet (current phase)',
     ],
   },
   {

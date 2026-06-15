@@ -91,7 +91,14 @@ const BINARY_PAIRS: ReadonlyArray<readonly [string, string]> = [
   ["up", "down"],
 ];
 
-/** Map a Gamma market to a registry row, or null if it isn't a binary (Yes/No or Up/Down) orderbook market. */
+/**
+ * Map a Gamma market to a registry row, or null if it isn't a two-outcome orderbook market.
+ * Canonical Yes/No (or Up/Down) markets keep that orientation; any other two-outcome market is a
+ * head-to-head (team A vs B, candidate A vs B, esports, …) and keeps its NATIVE outcome order —
+ * outcome_side 0 → outcomes[0]'s token, 1 → outcomes[1]'s token. This MUST stay consistent with
+ * the proof-relay catalog's binaryIndices (which uses the same 0/1 = native-order convention) so a
+ * bet's outcome_side resolves to the same side the user saw and bet on.
+ */
 function toRow(
   m: GammaMarket,
 ): { key: string; conditionId: string; yes: string; no: string; question: string; endDate: number | null } | null {
@@ -100,8 +107,10 @@ function toRow(
   if (!m.enableOrderBook) return null;
   const outcomes = parseJsonArray(m.outcomes).map((o) => o.toLowerCase());
   if (outcomes.length !== 2) return null;
-  let yesIdx = -1;
-  let noIdx = -1;
+  // Default to native order (head-to-head); override only if a canonical pair is present so Yes/Up
+  // stays side 0 for the markets where that's meaningful.
+  let yesIdx = 0;
+  let noIdx = 1;
   for (const [a, b] of BINARY_PAIRS) {
     const yi = outcomes.indexOf(a);
     const ni = outcomes.indexOf(b);
@@ -111,7 +120,6 @@ function toRow(
       break;
     }
   }
-  if (yesIdx < 0 || noIdx < 0) return null;
   const tokens = parseJsonArray(m.clobTokenIds);
   const yes = tokens[yesIdx];
   const no = tokens[noIdx];
@@ -183,6 +191,46 @@ export async function syncMarkets(): Promise<number> {
   );
   logger.info({ byVolume, bySoon }, "market registry sync complete");
   return byVolume + bySoon;
+}
+
+/**
+ * FC-15: register/refresh a SINGLE market by its real conditionId (on-demand). Used when a user opens
+ * a live-searched / long-tail market that the periodic bulk sync hasn't covered yet, so resolveToken
+ * can serve a bet on it (guarantees shown ⊆ routable). The signing layer fetches the AUTHORITATIVE
+ * tokenIds from Gamma itself — it never trusts a client-supplied mapping. Returns true if upserted.
+ */
+export async function syncOneMarket(conditionId: string): Promise<boolean> {
+  const cid = (conditionId ?? "").toLowerCase();
+  if (!/^0x[0-9a-fA-F]{64}$/.test(cid)) return false;
+  let data: GammaMarket[];
+  try {
+    const res = await fetch(`${GAMMA}/markets?condition_ids=${encodeURIComponent(cid)}`);
+    if (!res.ok) return false;
+    data = (await res.json()) as GammaMarket[];
+  } catch (err) {
+    logger.warn({ err, conditionId: cid }, "syncOneMarket gamma fetch failed");
+    return false;
+  }
+  const row = (Array.isArray(data) ? data : [])
+    .map(toRow)
+    .find((r): r is NonNullable<ReturnType<typeof toRow>> => r !== null);
+  if (!row) return false;
+  const ts = Math.floor(Date.now() / 1000);
+  db()
+    .prepare(`
+      INSERT INTO market_registry (market_id_field, condition_id, yes_token_id, no_token_id, question, end_date, updated_at)
+      VALUES (@key, @conditionId, @yes, @no, @question, @endDate, @ts)
+      ON CONFLICT(market_id_field) DO UPDATE SET
+        condition_id = excluded.condition_id,
+        yes_token_id = excluded.yes_token_id,
+        no_token_id  = excluded.no_token_id,
+        question     = excluded.question,
+        end_date     = COALESCE(excluded.end_date, market_registry.end_date),
+        updated_at   = excluded.updated_at
+    `)
+    .run({ ...row, ts });
+  logger.info({ conditionId: cid, key: row.key }, "registered market on demand");
+  return true;
 }
 
 export interface ResolvedToken {

@@ -8,7 +8,6 @@ import {
   addNote,
   computeCommitment,
   computeNullifier,
-  deriveSecret,
   formatUsdc,
   getFreeNoteForDeposit,
   markNoteSpent,
@@ -16,9 +15,11 @@ import {
   replaceNote,
   type Note,
 } from '@/lib/notes'
+import { getNoteSecret } from '@/lib/secretSession'
 import {
   fetchAttestation,
   fetchBetRecord,
+  fetchBetProtocolFee,
   fetchMerklePath,
   relayPartialCredit,
   waitForTransactionConfirmation,
@@ -55,10 +56,15 @@ export function PartialFillCreditModal({
   const [betAmount, setBetAmount] = useState<bigint>(0n)
   const [spentAmount, setSpentAmount] = useState<bigint>(0n)
   const [filledShares, setFilledShares] = useState<bigint>(0n)
+  // FC-14: refund includes the pro-rata protocol fee on the unexecuted portion (relay fee kept).
+  const [protocolFee, setProtocolFee] = useState<bigint>(0n)
   const [attestation, setAttestation] = useState<SignedAttestation | null>(null)
   const [loading, setLoading] = useState(true)
 
-  const refundAmount = betAmount > spentAmount ? betAmount - spentAmount : 0n
+  // FC-14: matches the Vault's injected refund exactly (floor math): unfilled stake + pro-rata fee.
+  const unexecuted = betAmount > spentAmount ? betAmount - spentAmount : 0n
+  const refundAmount =
+    unexecuted > 0n && betAmount > 0n ? unexecuted + (protocolFee * unexecuted) / betAmount : 0n
   const nullifierOfBet = (receipt.nullifier_of_bet ?? receipt.nullifier) as `0x${string}`
 
   useEffect(() => {
@@ -80,6 +86,7 @@ export function PartialFillCreditModal({
         setBetAmount(rec.betAmount)
         setSpentAmount(BigInt(att.amountB))
         setFilledShares(BigInt(att.amountA))
+        setProtocolFee(await fetchBetProtocolFee(vaultAddress, nullifierOfBet))
       } catch (e) {
         setError(e instanceof Error ? e.message : String(e))
         setPhase('error')
@@ -113,7 +120,7 @@ export function PartialFillCreditModal({
       // (expected_shares := filled_shares, status := FILLED) so the position becomes settleable. The
       // Vault accepts refund_amount == 0 (L3 "B-relax"). Blocking it here strands the bet.
       setPhase('proving')
-      const secret = await deriveSecret(signMessageAsync, address, freeNote.depositIndex)
+      const secret = await getNoteSecret(signMessageAsync, address, freeNote.depositIndex, freeNote.derivationVersion ?? 1)
       const merkle = await fetchMerklePath(freeNote.commitment)
       const newNonce = freeNote.nonce + 1n
       const newBalance = freeNote.balance + refundAmount
@@ -161,6 +168,7 @@ export function PartialFillCreditModal({
         txHash,
         marketId: receipt.marketId,
         condition_id: receipt.condition_id,
+        derivationVersion: freeNote.derivationVersion ?? 1, // FC-13: inherit lineage version
       })
       // The Vault normalized the bet record to FILLED with reduced shares/amount.
       // Mirror that on the open receipt so it can still be settled/closed later.

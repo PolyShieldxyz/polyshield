@@ -43,6 +43,23 @@ nullifier = poseidon2(secret, nonce)
 
 Nullifiers are published on-chain when a note is spent (when a new note replaces it). The nullifier does not reveal which commitment it belongs to (it does not contain the balance, only the secret and nonce). This prevents double-spending while maintaining privacy.
 
+### Secret Derivation (wallet-derived; FC-13)
+
+Secrets are derived deterministically from the wallet, never random and never persisted. There are two schemes; a note's `derivationVersion` selects which (untagged legacy notes default to V1). **Both message strings below are frozen protocol constants — never change them after mainnet deployment.**
+
+- **V2 (default for new deposits).** One signature per session unlocks a master seed; every note secret is then derived locally with no further prompt:
+  ```
+  master_seed = keccak256(wallet.sign("PolyShield master seed\nAddress: {W}\nVersion: 2"))
+  secret_i    = keccak256(master_seed ‖ uint32(i)) mod p     // distinct per deposit index i
+  ```
+  The master seed lives in memory only (`secretSession.ts`), cleared on disconnect/tab close.
+- **V1 (legacy).** One signature per deposit index:
+  ```
+  secret_i = keccak256(wallet.sign("PolyShield deposit derivation\nAddress: {W}\nIndex: {i}\nVersion: 1")) mod p
+  ```
+
+Derivation is invisible to the circuits — `secret` is a private witness regardless of how it was produced, so V2 required NO circuit/contract change. Recovery tries V2 first (free, after the one seed signature) and falls back to V1 per index only for commitments V2 can't match. See `docs/future-changes.md` FC-13.
+
 ### Merkle Tree
 
 - Hash function: Poseidon (binary tree, `poseidon2(left, right)`)

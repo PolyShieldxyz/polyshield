@@ -30,7 +30,7 @@ sequenceDiagram
     box rgb(204,251,241) Frontend / browser
         participant FE as 🖥️ Deposit Page
         participant PV as 🔐 WASM Prover
-        participant LS as 💾 localStorage
+        participant LS as 💾 IndexedDB (encrypted)
     end
     box rgb(187,247,208) On-chain
         participant USDC as 💵 USDC
@@ -40,10 +40,10 @@ sequenceDiagram
     end
 
     W->>FE: connect wallet, enter amount
-    Note over FE,W: P3+ wallet-derived secret
-    FE->>W: signMessage("PolyShield deposit derivation … Index:i")
+    Note over FE,W: V2 master seed — one signature per session (FC-13)
+    FE->>W: signMessage("PolyShield master seed … Version:2")  %% once per session
     W-->>FE: signature
-    FE->>FE: secret = keccak256(sig) mod p
+    FE->>FE: master_seed = keccak256(sig); secret_i = keccak256(master_seed‖i) mod p
     FE->>FE: commitment = Poseidon4(secret, amount, 0, owner_addr)
 
     rect rgb(252,231,243)
@@ -65,7 +65,7 @@ sequenceDiagram
 
     FE->>LS: addNote{commitment, nullifier, balance, nonce, depositIndex}
     FE->>LS: incrementDepositIndex(wallet)
-    Note over W,LS: secret is NEVER stored — re-derived from wallet on demand (P3+)
+    Note over W,LS: secret NEVER stored; master seed in memory only (FC-13). Cache = encrypted IndexedDB
 ```
 
 **Key checks (in order):** deposit cap → ZK binding proof → token pull → leaf insert.
@@ -90,7 +90,7 @@ sequenceDiagram
     box rgb(204,251,241) Frontend
         participant FE as 🖥️ UI (withdraw/bet)
         participant PV as 🔐 WASM Prover
-        participant LS as 💾 localStorage
+        participant LS as 💾 IndexedDB (encrypted)
     end
     box rgb(237,233,254) Relay
         participant RL as 📨 Proof Relay
@@ -137,24 +137,25 @@ sequenceDiagram
 
 ## 1.3 Note recovery (P3+ — backend-served events, client-side matching · FC-12)
 
-In P3+ the secret is *never* persisted — the wallet **is** the backup. If localStorage is
-wiped, the full note set is reconstructed by re-deriving secrets per index and replaying
-events. **The public events come from the backend (`/recovery-data`), not a client chain
-scan** (FC-12 — fast, and works under a metered RPC's getLogs cap); the **secret-based
-matching stays in the browser** (privacy preserved). A direct-chain scan remains as a fallback.
+In P3+ the secret is *never* persisted — the wallet **is** the backup. If the encrypted cache is
+wiped, the full note set is reconstructed by deriving the master seed **once** (FC-13) and replaying
+events; legacy V1 notes fall back to per-index signing. **The public events come from the backend
+(`/recovery-data`), not a client chain scan** (FC-12 — fast, and works under a metered RPC's getLogs
+cap); the **secret-based matching stays in the browser** (privacy preserved). A direct-chain scan
+remains as a fallback. An all-V2 wallet restores in ONE signature.
 
 ```mermaid
 flowchart TD
     START([User clicks Restore]):::user
     FETCH["fetch /api/recovery-data/:wallet (backend index)<br/>= this wallet's Deposited + ALL anon spend events<br/>+ blockTimestamps + feeConfig + currentRoot<br/>(fallback: direct chain scan if backend down)"]:::relay
-    SIGN[Wallet signs derivation msg per index i]:::user
+    SIGN["Sign master seed ONCE (V2); V1 per-index only as fallback"]:::user
     EV["events: Deposited · BetAuthorized · SettlementCredited<br/>BetCancellationCredited · NACancellationCredited · PartialFillCredited<br/>Withdrawn · BetSold · PositionClosed · Consolidated"]:::relay
-    DERIVE["secret_i = keccak256(sig_i) mod p<br/>commitment = Poseidon4(secret_i, bal, nonce, owner)<br/>nullifier  = Poseidon2(secret_i, nonce)"]:::fe
+    DERIVE["secret_i = keccak256(master_seed‖i) mod p (V2, no per-index sign)<br/>commitment = Poseidon4(secret_i, bal, nonce, owner)<br/>nullifier  = Poseidon2(secret_i, nonce)"]:::fe
     MATCH{event's nullifier ==<br/>OWN derived nullifier?<br/>(only mine — can't be forged)}:::fe
     REPLAY[Replay state transitions for this index<br/>apply fee from feeConfig · cheap state reads on RPC<br/>(pendingCredit/betRecords) · pair BetSold+PositionClosed]:::fe
     GAP{5 consecutive<br/>indices with<br/>no match?}:::fe
     NEXT[i = i + 1]:::fe
-    DONE([Rebuilt note cache in localStorage<br/>incl. credit notes; stale 'pending' cleared]):::fe
+    DONE([Rebuilt note cache in encrypted IndexedDB<br/>incl. credit notes; stale 'pending' cleared]):::fe
 
     START --> FETCH --> SIGN --> DERIVE
     FETCH --> EV --> MATCH

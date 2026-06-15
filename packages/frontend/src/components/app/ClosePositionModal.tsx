@@ -8,7 +8,6 @@ import {
   addNote,
   computeCommitment,
   computeNullifier,
-  deriveSecret,
   formatUsdc,
   getFreeNoteForDeposit,
   markNoteSpent,
@@ -16,6 +15,7 @@ import {
   recordWalletActivity,
   type Note,
 } from '@/lib/notes'
+import { getNoteSecret } from '@/lib/secretSession'
 import {
   fetchMerklePath,
   fetchAttestation,
@@ -31,6 +31,10 @@ import { type OrderKind, ORDER_KIND_LABEL } from '@/lib/orderType'
 // FC-9: proceeds are conveyed by the operator's SOLD attestation (reportType 4), not an
 // on-chain CLOSING status. We poll the attestation endpoint until the operator signs it.
 const REPORT_SOLD = 4
+
+// Polymarket prices live in (0,1) — i.e. (0¢, 100¢), and can be fractional below 1¢ or above 99¢.
+// Allow up to 2 decimal places of a cent; clamp into the open interval only when we actually use it.
+const clampPriceCents = (p: number): number => Math.min(99.99, Math.max(0.01, Number.isFinite(p) ? p : 0.01))
 
 type Phase = 'input' | 'selling' | 'proving' | 'done' | 'error'
 
@@ -53,7 +57,7 @@ export function ClosePositionModal({
 }: ClosePositionModalProps) {
   const { signMessageAsync } = useSignMessage()
   const [phase, setPhase] = useState<Phase>('input')
-  // limit price in cents (1..99) → 1e6-scaled probability; shares default = full position.
+  // limit price in cents (0.01..99.99, up to 2 decimals) → 1e6-scaled probability; full position.
   const [priceCents, setPriceCents] = useState(50)
   // Market (FAK) close = sell now at ≥ the floor; Limit (GTC/GTD) close = rest at the price.
   const [orderKind, setOrderKind] = useState<OrderKind>('MARKET')
@@ -104,8 +108,14 @@ export function ClosePositionModal({
       setPhase('error'); setError('Position has no shares to sell.'); return
     }
 
-    // Full close in this UI. limit_price is 1e6-scaled (priceCents/100 * 1e6).
-    const limitPrice = BigInt(priceCents) * 10_000n // cents → 1e6 scale
+    // Full close in this UI. limit_price is 1e6-scaled (priceCents/100 * 1e6). A MARKET close needs
+    // no user price — sell at the best available bid with a low protective floor; a LIMIT close uses
+    // the user's price (cents, up to 2 decimals).
+    const limitPrice =
+      orderKind === 'MARKET'
+        ? 1n // permissive floor; the signing layer prices the market SELL at the live best bid (which
+             // IS the market price), so it crosses any book — including sub-1¢ markets.
+        : BigInt(Math.round(clampPriceCents(priceCents) * 10_000))
 
     try {
       // Size the SELL from the authoritative on-chain expected_shares (full close), NOT the
@@ -143,7 +153,7 @@ export function ClosePositionModal({
         throw new Error('No spendable note for this position’s deposit. Recover your notes and try again.')
       }
 
-      const secret = await deriveSecret(signMessageAsync, address, freeNote.depositIndex)
+      const secret = await getNoteSecret(signMessageAsync, address, freeNote.depositIndex, freeNote.derivationVersion ?? 1)
       const merkle = await fetchMerklePath(freeNote.commitment)
       const newNonce = freeNote.nonce + 1n
       const newBalance = freeNote.balance + computedProceeds
@@ -205,6 +215,7 @@ export function ClosePositionModal({
         txHash,
         marketId: receipt.marketId,
         condition_id: receipt.condition_id,
+        derivationVersion: freeNote.derivationVersion ?? 1, // FC-13: inherit lineage version
       }
       addNote(credited)
       setPhase('done')
@@ -245,14 +256,19 @@ export function ClosePositionModal({
               ))}
             </div>
           </div>
-          <label className="col gap-2">
-            <span className="micro">{orderKind === 'LIMIT' ? 'LIMIT PRICE (¢ per share, 1–99)' : 'MINIMUM PRICE / FLOOR (¢ per share, 1–99)'}</span>
-            <input
-              type="number" min={1} max={99} value={priceCents}
-              onChange={(e) => setPriceCents(Math.max(1, Math.min(99, Number(e.target.value) || 1)))}
-              className="input"
-            />
-          </label>
+          {/* Market close sells at the best available bid → no price to enter. Only a LIMIT close
+              takes a price (cents, up to 2 decimals; Polymarket allows below 1¢ and above 99¢). */}
+          {orderKind === 'LIMIT' && (
+            <label className="col gap-2">
+              <span className="micro">LIMIT PRICE (¢ per share)</span>
+              <input
+                type="number" min={0.01} max={99.99} step={0.01} value={priceCents}
+                onChange={(e) => setPriceCents(Number(e.target.value))}
+                onBlur={(e) => setPriceCents(clampPriceCents(Number(e.target.value)))}
+                className="input"
+              />
+            </label>
+          )}
           {orderKind === 'LIMIT' && (
             <label className="col gap-2">
               <span className="row gap-2" style={{ alignItems: 'center' }}>
@@ -270,7 +286,22 @@ export function ClosePositionModal({
             </label>
           )}
           <div className="panel" style={{ padding: 16 }}>
-            <KV l="Est. proceeds if filled" v={`$${formatUsdc((totalShares * BigInt(priceCents) * 10_000n) / 1_000_000n)} USDC`} />
+            {/* FC-14: a market SELL is a taker — Polymarket deducts its fee from the proceeds. For a
+                LIMIT close we can estimate net proceeds at the chosen price; a MARKET close fills at
+                the best bid (unknown until fill), so we don't show a dollar figure. Exact proceeds
+                come from the operator's SOLD attestation. */}
+            {orderKind === 'LIMIT' ? (
+              <KV
+                l="Est. proceeds (net of ~Polymarket fee)"
+                v={`≈ $${formatUsdc(
+                  (((totalShares * BigInt(Math.round(clampPriceCents(priceCents) * 10_000))) / 1_000_000n) *
+                    (10_000n - BigInt(process.env.NEXT_PUBLIC_CLOB_TAKER_FEE_BPS ?? '0'))) /
+                    10_000n,
+                )} USDC`}
+              />
+            ) : (
+              <KV l="Proceeds" v="Sold at the best available bid (net of Polymarket fee)" />
+            )}
           </div>
           <div className="row" style={{ justifyContent: 'space-between', gap: 12 }}>
             <button className="btn" onClick={onClose}>Cancel</button>

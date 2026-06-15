@@ -22,7 +22,9 @@ const VAULT_ABI = [
   "function registerCondition(bytes32 condition_id) external",
   "function pendingCredit(bytes32 market_id, uint8 outcome_side) view returns (uint64)",
   "function marketResolvedAt(bytes32 circuit_key) view returns (uint64)",
-  "event BetAuthorized(bytes32 indexed nullifier, bytes32 market_id, bytes32 position_id, uint64 expected_shares, uint256 bet_amount, uint64 price, uint8 outcome_side, bytes32 new_commitment)",
+  // Must match the deployed Vault exactly (FC-14 appended protocolFee, relayFee) so the signature
+  // hash / decoding line up with the on-chain event.
+  "event BetAuthorized(bytes32 indexed nullifier, bytes32 market_id, bytes32 position_id, uint64 expected_shares, uint256 bet_amount, uint64 price, uint8 outcome_side, bytes32 new_commitment, uint64 protocolFee, uint64 relayFee)",
 ];
 
 // Poll cadence for the settlement scan. Resolution is a slow, infrequent event, so this can be
@@ -118,6 +120,22 @@ function isVaultMarket(conditionId: string): boolean {
   return _trackedCache.keys.has(toFieldSafe(conditionId).toLowerCase());
 }
 
+/**
+ * Probe whether the RPC supports filter methods (eth_newFilter). Public providers like Ankr/
+ * publicnode return "Method disabled" — attaching a `.on` subscription there does nothing but
+ * spam an eth_newFilter error every few seconds forever. Anvil/dev and full archive nodes support
+ * it. We probe once at startup and only attach the live subscription when it actually works.
+ */
+async function filtersSupported(provider: ethers.JsonRpcProvider): Promise<boolean> {
+  try {
+    const id = (await provider.send("eth_newFilter", [{ fromBlock: "latest", toBlock: "latest" }])) as string;
+    try { await provider.send("eth_uninstallFilter", [id]); } catch { /* best-effort cleanup */ }
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 export function startSettlementResolver(
   provider: ethers.JsonRpcProvider,
   wallet: ethers.Wallet
@@ -125,28 +143,38 @@ export function startSettlementResolver(
   const ctf = new ethers.Contract(config.ctfAddress, CTF_ABI, provider);
 
   // Path 1 — live subscription. Works against Anvil/dev (filters supported) and provides the raw
-  // conditionId directly from the event. On a public mainnet RPC this subscription silently dies
-  // (no eth_newFilter), which is why Path 2 below exists.
-  ctf.on(
-    "ConditionResolution",
-    async (
-      conditionId: string,
-      _oracle: string,
-      _questionId: string,
-      _outcomeSlotCount: bigint,
-      _payoutNumerators: bigint[],
-      event: ethers.ContractEventPayload
-    ) => {
-      try {
-        if (!isVaultMarket(conditionId)) return; // global CTF event for a market the vault has no bets on
-        await provider.waitForTransaction(event.log.transactionHash, 1);
-        await handleResolution(provider, wallet, conditionId, event.log.blockNumber);
-        resolvedMarkets.add(toFieldSafe(conditionId));
-      } catch (err) {
-        logger.error({ err, conditionId }, "Failed to run redemption pipeline (event path)");
-      }
+  // conditionId directly from the event. On a filter-disabled RPC (Ankr "Method disabled") this
+  // subscription never fires AND retries eth_newFilter forever, so we attach it ONLY when a startup
+  // probe confirms filter support; otherwise Path 2's poll is the sole (and sufficient) path.
+  void (async () => {
+    if (!(await filtersSupported(provider))) {
+      logger.warn(
+        "RPC does not support eth_newFilter — skipping live CTF subscription; settlement runs via poll fallback only",
+      );
+      return;
     }
-  );
+    ctf.on(
+      "ConditionResolution",
+      async (
+        conditionId: string,
+        _oracle: string,
+        _questionId: string,
+        _outcomeSlotCount: bigint,
+        _payoutNumerators: bigint[],
+        event: ethers.ContractEventPayload
+      ) => {
+        try {
+          if (!isVaultMarket(conditionId)) return; // global CTF event for a market the vault has no bets on
+          await provider.waitForTransaction(event.log.transactionHash, 1);
+          await handleResolution(provider, wallet, conditionId, event.log.blockNumber);
+          resolvedMarkets.add(toFieldSafe(conditionId));
+        } catch (err) {
+          logger.error({ err, conditionId }, "Failed to run redemption pipeline (event path)");
+        }
+      }
+    );
+    logger.info("RPC supports filters — live CTF subscription attached");
+  })();
 
   // Path 2 — poll fallback for public RPCs where `ctf.on` never fires (and pruned RPCs that can't
   // serve historical logs). We iterate the locally-persisted tracked_markets table — the markets the

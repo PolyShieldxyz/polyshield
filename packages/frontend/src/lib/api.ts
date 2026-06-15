@@ -399,6 +399,21 @@ export async function fetchBetRecord(
   }
 }
 
+// FC-14: read the protocol fee charged on a bet (betProtocolFee(bytes32), selector 0x6075ae59).
+// Used by the cancel/partial modals to compute the exact refund the Vault will inject:
+//   cancel  → refund = bet_amount + protocolFee
+//   partial → refund = (bet_amount - spent) + floor(protocolFee * (bet_amount - spent) / bet_amount)
+export async function fetchBetProtocolFee(
+  vaultAddress: string,
+  nullifier_of_bet: `0x${string}`,
+  rpcUrl = process.env.NEXT_PUBLIC_CHAIN_RPC ?? 'http://127.0.0.1:8545',
+): Promise<bigint> {
+  const data = `0x6075ae59${nullifier_of_bet.slice(2).padStart(64, '0')}`
+  const raw = await ethCall(rpcUrl, vaultAddress, data)
+  const slice = raw.slice(2, 2 + 64)
+  return slice.length === 64 ? BigInt('0x' + slice) : 0n
+}
+
 // FC-4: partial-fill view used by PartialFillCreditModal to compute the exact
 // refund_amount = bet_amount - spent_amount that the Vault will inject.
 export async function fetchPartialFill(

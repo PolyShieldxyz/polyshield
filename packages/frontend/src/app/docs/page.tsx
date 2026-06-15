@@ -5,10 +5,10 @@ const SECTIONS: Record<string, { title: string; content: string }[]> = {
   'Getting started': [
     {
       title: 'Overview',
-      content: `Polyshield is a ZK-based privacy vault for Polymarket, live on Polygon mainnet. Depositors fund a shared vault, then authorize bets via zero-knowledge proofs. All bets appear on-chain as coming from the vault's single Polymarket EOA, so no depositor address ever appears in a Polymarket transaction.
+      content: `PolyShield is a ZK-based privacy vault for Polymarket, live on Polygon mainnet. Depositors fund a shared vault, then authorize bets via zero-knowledge proofs. All bets appear on-chain as coming from the vault's single Polymarket EOA, so no depositor address ever appears in a Polymarket transaction.
 
-**What Polyshield hides:** which depositor authorized which bet.
-**What Polyshield does NOT hide:** that a wallet deposited into the vault — the deposit transaction is public by design.
+**What PolyShield hides:** which depositor authorized which bet.
+**What PolyShield does NOT hide:** that a wallet deposited into the vault — the deposit transaction is public by design.
 
 Every privacy-sensitive operation (note generation, proof generation) happens in your browser. No secret ever leaves your device, and no backend service can link a bet to a depositor.`,
     },
@@ -110,7 +110,7 @@ Privacy is preserved: the index stores only public, anonymous data. It cannot li
   'Security': [
     {
       title: 'Threat model',
-      content: `Polyshield protects against a network observer with full on-chain visibility who is trying to link a depositor address to a specific Polymarket bet.
+      content: `PolyShield protects against a network observer with full on-chain visibility who is trying to link a depositor address to a specific Polymarket bet.
 
 **Mitigated:**
 - Observer identifies which wallet placed a CLOB order — all orders come from the vault's single shared EOA
@@ -120,7 +120,7 @@ Privacy is preserved: the index stores only public, anonymous data. It cannot li
 - Malicious backend index — serves only public data; worst case is incomplete recovery, never theft or de-anonymization
 
 **Not mitigated (by design):**
-- That a wallet used Polyshield (the deposit is public)
+- That a wallet used PolyShield (the deposit is public)
 - The deposit amount (ERC-20 transfer amount is on-chain)
 - Calling a spend function from your OWN wallet self-deanonymizes (the frontend never does this; it is a client discipline)
 
@@ -144,43 +144,7 @@ Privacy is preserved: the index stores only public, anonymous data. It cannot li
 
 **Withdrawal fee** — a flat USDC amount skimmed from the payout by \`withdraw()\` directly (no circuit change needed, because the Vault controls the USDC).
 
-Current testing defaults: bet fee 0.05%, withdrawal fee $0.10, min bet $1, min withdrawal $1.`,
-    },
-  ],
-  'API reference': [
-    {
-      title: 'Proof relay API',
-      content: `All relay endpoints accept a JSON body with \`proof\` (hex-encoded) and \`inputs\` (proof-type-specific public inputs). Returns \`{ txHash: "0x..." }\` on success. The relay pays gas; your wallet is never the transaction sender.
-
-\`POST /relay/bet\` — Vault.authorizeBet()
-\`POST /relay/settlement\` — Vault.creditSettlement()
-\`POST /relay/withdrawal\` — Vault.withdraw() (+ recipientAddress)
-\`POST /relay/bet-cancel\` — Vault.betCancellationCredit()
-\`POST /relay/na-cancel\` — Vault.naCancellationCredit()
-\`POST /relay/partial-credit\` — Vault.partialFillCredit()
-\`POST /relay/position-close\` — Vault.closePosition()
-\`POST /relay/consolidate\` — Vault.consolidate()
-\`POST /relay/deposit\` — Vault.deposit()`,
-    },
-    {
-      title: 'Backend index API (FC-12)',
-      content: `The proof-relay also serves the public on-chain mirror so clients never scan the chain.
-
-\`GET /merkle-path/:commitment\` — merkle path + root for a leaf (O(32), zero chain calls)
-\`GET /recovery-data/:depositor\` — that wallet's Deposited events + all anonymous spend events + block timestamps + feeConfig + currentRoot
-\`GET /events?limit=N\` — all indexed Vault events (anonymous) for the explorer
-\`GET /health\` → 200 OK
-
-All data is public and anonymous; the index cannot de-anonymize or forge notes.`,
-    },
-    {
-      title: 'Indexer REST API',
-      content: `The Polymarket Indexer exposes supplementary settlement data.
-
-\`GET /settlement/:market_id\` → \`{ conditionId, positionId, payout_per_share, block_number, outcome }\`
-\`GET /health\` → 200 OK
-
-Note: the frontend reads resolution/payout directly from the Vault (\`pendingCredit\` / \`marketResolvedAt\`) on-chain; the indexer is supplementary.`,
+Current defaults: bet fee 0.2%, withdrawal fee $0.10, min bet $1, min withdrawal $1.`,
     },
   ],
 }

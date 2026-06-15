@@ -226,7 +226,7 @@ Proof witness data (secret, balance, nonce) is never sent to any server. Secret 
 - **Merkle root window:** The Vault accepts a rolling window of the last 1024 Merkle roots (O(1) membership; FC-3) to accommodate proof-generation latency without compromising security.
 - **W-to-W withdrawal:** Withdrawal destination is cryptographically bound to the depositing address inside the note commitment. The circuit enforces this; the Vault also independently verifies it.
 - **Checks-effects-interactions:** All state changes (nullifier mark, new commitment insertion) occur before any external token transfer in every Vault function.
-- **No server-side secrets:** The note preimage never leaves the browser. Secrets are re-derived from wallet signatures on demand.
+- **No server-side secrets:** The note preimage never leaves the browser. Secrets are wallet-derived (FC-13: one master-seed signature per session derives all of them locally; held in memory, never persisted). The note cache (balances/commitments/linkage, never the secret) is stored **encrypted in IndexedDB**.
 - **$50k deposit cap:** 50,000 USDC maximum cumulative deposit per address in MVP, enforced in `Vault.deposit()`.
 
 - **Instant UUPS upgradeability (largest trust assumption):** the owner key can replace any contract's logic in a single transaction (no timelock). This is a deliberate trade-off for the early mainnet test phase — the owner role must be a multisig/HSM in production. See `docs/threat-model.md` (T21).
@@ -239,7 +239,7 @@ Smart contracts are open-source and MIT licensed. The protocol is currently in a
 
 | Phase | Status | Focus |
 |---|---|---|
-| **P1 — Core Protocol** | ✅ SHIPPED | 9 Circom/Groth16 circuits, UUPS Vault + tree (1024-root) + registry + 9 verifiers, mandatory deposit-binding proof (FC-2), wallet-derived secrets, on-chain payout derivation — **live on Polygon mainnet** |
+| **P1 — Core Protocol** | ✅ SHIPPED | 9 Circom/Groth16 circuits, UUPS Vault + tree (1024-root) + registry + 9 verifiers, mandatory deposit-binding proof (FC-2), wallet-derived secrets (FC-13 one-signature master seed + encrypted IndexedDB cache), on-chain payout derivation — **live on Polygon mainnet** |
 | **P2 — Orders, Fees & Infra** | ✅ SHIPPED | FAK market + GTC/GTD limit orders with partial-fill credit (FC-4), gasless operator attestations (FC-9), JIT collateral (FC-7), protocol fees (FC-10), consolidation (FC-8), position close (FC-1), backend index/recovery/explorer (FC-12), live Polymarket integration, single-host Docker deploy |
 | **P3 — Hardening & Beta** | 🔨 IN PROGRESS | Security audit, owner key → multisig/HSM, base-buffer collateral (Option 4 / FC-6), persisted circuit-breaker + alerting, anonymity-set growth, public beta |
 | **P4 — TEE & Trust Min.** | PLANNED | AWS Nitro signing layer v2 + remote attestation gate, multi-EOA rotation, withdrawal timing posture / onion relay, fee governance transition |

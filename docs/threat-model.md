@@ -117,8 +117,8 @@ Polyshield's privacy guarantee is: **which depositor authorized which bet is hid
 ### T12 — Note Grinding / Pre-Image Attack
 **Severity:** HIGH
 **Description:** If an attacker can guess a user's `secret`, they can compute all the user's note commitments, nullifiers, and withdraw their funds.
-**Mitigation:** `secret` must be generated using `crypto.getRandomValues()` (Web Crypto API), which provides 254 bits of entropy. Never generated with Math.random. Never reused across deposits. The frontend must enforce this.
-**Status:** DESIGN LEVEL (must be enforced in SDK implementation)
+**Mitigation:** secrets are **wallet-derived, not random** (P3+ / FC-13), so entropy comes from the wallet's ECDSA key, not a CSPRNG. V2: `secret_i = keccak256(master_seed ‖ i) mod p` where `master_seed = keccak256(wallet.sign(V2 msg))`; V1 (legacy): `keccak256(wallet.sign(per-index msg)) mod p`. Each is a 254-bit field element an attacker cannot guess without the wallet key. Secrets are never reused across deposits (distinct per index) and never persisted. (`crypto.getRandomValues()` is no longer used for note secrets; the old random-secret mitigation applies only to any residual P1/P2 notes.)
+**Status:** MITIGATED by wallet-derived secrets (FC-13). The frontend must never fall back to a weaker source.
 
 ### T13 — Vault Undercollateralization
 **Severity:** HIGH
@@ -151,8 +151,8 @@ Polyshield's privacy guarantee is: **which depositor authorized which bet is hid
 ### T17 — Note Preimage Loss
 **Severity:** HIGH (impacts individual users, not the protocol)
 **Description:** A user who loses their note (the `(secret, balance, nonce)` preimage) permanently loses access to their vault funds. The Vault contract cannot identify the owner of a commitment without the secret.
-**Mitigation:** Strong UX warnings. Optional encrypted note backup (see Q10). Consider whether a time-locked default withdrawal (e.g., funds claimable by the depositor address after 1 year of inactivity) is acceptable -- this would partially break the privacy model but prevent permanent fund loss.
-**Status:** OPEN (recovery design pending Q10 resolution)
+**Mitigation:** **Largely closed by wallet-derived secrets (FC-13).** The wallet IS the backup — there is no separate preimage to lose. A user with only their wallet reconstructs every note from on-chain events with ONE signature (`recoverNotes`, V2 master seed; V1 per-index as fallback). The encrypted IndexedDB note cache survives reloads (so recovery is rarely needed), and a silent reconcile auto-syncs new on-chain notes. Residual loss only for any legacy P1/P2 random-secret notes, which still need the Q10 ECIES backup.
+**Status:** MITIGATED for wallet-derived (P3+) notes via FC-13 recovery; OPEN only for residual P1/P2 random-secret notes.
 
 ### T18 — Proof Relay IP / Timing Correlation Attack
 **Severity:** HIGH
@@ -201,18 +201,21 @@ Polyshield's privacy guarantee is: **which depositor authorized which bet is hid
 | T9 | Withdrawal front-running | HIGH | Design correct (private recipient) |
 | T10 | Invalid proof spam | LOW | Accepted |
 | T11 | Circuit upgrade breaks commitments | HIGH | Design level (registry + pause, Q27) |
-| T12 | Note grinding | HIGH | Design level |
+| T12 | Note grinding | HIGH | Mitigated (wallet-derived secrets, FC-13 — entropy from the wallet key) |
 | T13 | Vault undercollateralization | HIGH | Mitigated by FC-7 (JIT) — funds rest in Vault; `InsufficientLiquidity` backstop |
 | T14 | Fee bypass | MEDIUM | Open |
 | T15 | Polymarket account ban | HIGH | Open |
 | T16 | API downtime during bet window | MEDIUM | Open |
-| T17 | Note preimage loss | HIGH | Open |
+| T17 | Note preimage loss | HIGH | Mitigated for P3+ (FC-13 one-signature recovery); open only for residual P1/P2 |
 | T18 | Proof Relay IP/timing correlation | HIGH | Open |
 | T19 | Frontend direct transaction (impl risk) | CRITICAL | Design level |
 | T20 | Deposit balance forgery (committed != deposited) | CRITICAL | Solved (mandatory deposit proof, FC-2) |
 | T21 | Instant owner-controlled UUPS upgrade (all contracts) | CRITICAL | Accepted for initial test, CONDITIONAL on multisig/HSM owner; timelock recommended fast-follow |
 | T22 | Operator signs two contradictory fill attestations (FC-9) | HIGH | Mitigated off-chain: single-write attestation store (sign exactly one terminal attestation per bet) |
 | T23 | adminCancelBet refunds a healthy filled-but-unclaimed bet (FC-9) | MEDIUM | Mitigated: 3-day timelock floor (7-day default) + owner-trusted; bounded by existing owner-upgrade trust |
+| T24 | Backend index / recovery-data trust (proof-relay) | MEDIUM | Mitigated: serves only public data; worst case = incomplete recovery, never theft/de-anon |
+| T25 | Client at-rest cache + in-memory master seed (FC-13) | MEDIUM | Mitigated at intended level (at-rest obfuscation + no-persist-secret); residual = full active-device compromise |
+| T26 | Accrued fees not reserved vs JIT deployment (FC-14) | LOW | Accepted: owner-trusted, small, deploymentCap-bounded, withdrawFees only transiently reverts |
 
 ### T22 — FC-9 operator attestation: the single-terminal-signing invariant (load-bearing)
 
@@ -232,3 +235,19 @@ The proof-relay maintains a backend mirror of public on-chain state (`CachedMerk
 - **Cannot forge funds.** Recovery's replay only acts on an event whose nullifier equals the wallet's *own* derived nullifier (`Poseidon2(secret, nonce)`). A backend that injects fabricated events can't produce one matching a secret it doesn't have, so injected events are ignored. **Worst case from a malicious/buggy backend = *incomplete* recovery** (omitting real events → some notes not rebuilt), never theft.
 - **Merkle path integrity.** A forged merkle path can't mint funds — the on-chain verifier checks the proof's `merkle_root` against the contract's `knownRoots`, and a path that doesn't reproduce a known root is rejected. The cache additionally asserts each appended leaf's computed root equals `LeafInserted.newRoot` and falls back to on-the-fly computation on mismatch. **Open hardening:** the client does not yet verify the served `currentRoot` against the on-chain tree (would catch a backend serving a stale/wrong leaf set for path generation).
 - **Availability, not safety.** The index/RPC is a *liveness* dependency (down → can't recover/serve paths via the backend), not a safety one — the on-chain tree remains authoritative and the frontend retains a direct-chain fallback. Requires an archive RPC with a usable getLogs range (§2.5); a pruned/10-block-capped RPC degrades availability, not safety.
+
+### T25 — Client-side at-rest cache + in-memory master seed (FC-13)
+
+FC-13 moved the note cache to **encrypted IndexedDB** and introduced an **in-memory master seed**. Trust analysis:
+
+- **At-rest cache encryption is obfuscation, not full-device protection.** The note cache (`polyshield:notes`/`polyshield:activity` — the de-anonymizing linkage) is encrypted with a non-extractable AES-GCM `CryptoKey` whose raw bytes can never be exported. This defeats casual inspection, malicious extensions, and backup/sync scrapers reading raw storage. It does NOT defend a fully compromised device/browser that can drive the page's own crypto (it can ask the opaque key to decrypt). This is an accepted limitation and a deliberate decision (random IDB key, not wallet-derived) so the portfolio hydrates with zero signatures. Mitigating factor: note **secrets are never persisted**, so even a full IDB dump yields balances/linkage but no spendable key.
+- **Master seed is memory-only.** The V2 master seed (which derives all note secrets) lives only in JS memory for the session and is cleared on disconnect/tab close — never written to localStorage/IndexedDB/server. This preserves the "secret is not persisted" invariant (a stolen device at rest yields no key) at the cost of one signature per session/reload. Deliberate decision over persisting an encrypted seed.
+- **Non-sensitive counters stay in localStorage.** `deposit_index`, `last_block`, `chain_fp` remain plaintext in localStorage — none reveal the wallet↔note link (deposit count is already public via `/recovery-data`).
+- **Migration.** The one-time import of any legacy plaintext localStorage cache into the encrypted store then deletes the plaintext copies, so old plaintext linkage doesn't linger.
+**Status:** MITIGATED at the intended level (at-rest obfuscation + no-persist-secret); residual risk = full active-device compromise, unchanged from before FC-13.
+
+### T26 — Accrued fees not reserved against JIT deployment (FC-14, accepted)
+
+`feeAccumulator` (claimable USDC owed to `feeRecipient`) sits in the pool but is NOT reserved when the operator deploys capital via `fundPolymarketWallet`, so if most liquid USDC is deployed to Polymarket, `withdrawFees` can transiently revert (insufficient liquid balance) and competes with user withdrawals for liquid USDC. **Accepted, not fixed (FC-14 decision):** the `feeRecipient` is owner-trusted, fees are small relative to the pool, deployment is JIT and bounded by `deploymentCap`, and `withdrawFees` only ever fails *temporarily* (it succeeds once redeemed pUSD offramps back via `acknowledgePolymarketReturn`). No funds are at risk — purely a liveness nuisance for the fee claimer. A future hardening could reserve `feeAccumulator` in `fundPolymarketWallet`'s liquidity check (balance − feeAccumulator ≥ amount).
+**Note (FC-14 SC-01 fix):** `feeAccumulator` now holds only *claimable* (non-refundable) fees — provisional protocol fees live in `betProtocolFee` until earned — so the related "withdraw a fee that is later refunded → underflow" vector is **eliminated**; T26 is now strictly the liquidity-vs-deployment nuance below.
+**Status:** ACCEPTED (owner-trusted, small, bounded, recoverable).

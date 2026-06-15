@@ -2,28 +2,42 @@
    src/app/layout.tsx). The previous Google Fonts CDN @import was removed because
    it leaked visitor IP/Referer to a third party and render-blocked first paint. */
 
-/* Polyshield — design tokens */
+/* PolyShield — design tokens */
 :root {
   --bg: #06080B;
   --bg-1: #0A0D12;
-  --surface: #0E1218;
-  --surface-1: #131822;
-  --surface-2: #181E2A;
+  /* Elevation: wider value steps between surfaces so stacked panels/cards read as
+     distinct layers instead of one flat plane. Pair with --line + --shadow-1. */
+  --surface: #0E141C;
+  --surface-1: #161D29;
+  --surface-2: #202836;
   --line: rgba(255, 255, 255, 0.06);
   --line-strong: rgba(255, 255, 255, 0.12);
   --line-bright: rgba(255, 255, 255, 0.22);
   --text: #E6EAF0;
   --text-1: #B7C0CC;
-  --text-2: #7A828F;
-  --text-3: #4D5460;
+  /* Contrast: --text-2/--text-3 were below WCAG AA on the darkest surfaces. Lightened
+     so secondary labels and meta text stay legible at small sizes. */
+  --text-2: #8B94A2;
+  --text-3: #69717F;
+
+  /* Accent discipline: --cyan is the single INTERACTIVE/brand action color (links, buttons,
+     focus). --cyan-soft is a calmer fill for large surfaces/data so the UI doesn't read as
+     all-neon. --violet is brand/gradient only. --green/--red/--amber are SEMANTIC only
+     (gain/loss, success/error, warning) — do not use them decoratively. */
   --cyan: oklch(0.82 0.13 210);
+  --cyan-soft: oklch(0.80 0.09 210);
   --cyan-dim: oklch(0.55 0.10 210);
   --cyan-glow: oklch(0.82 0.13 210 / 0.18);
   --violet: oklch(0.70 0.15 290);
   --violet-dim: oklch(0.50 0.13 290);
+  /* Semantic values are kept identical to the inline oklch() literals used across the app
+     components, so the token and any hardcoded usage render the same color (one source of truth). */
   --green: oklch(0.78 0.16 152);
   --red: oklch(0.70 0.18 25);
   --amber: oklch(0.82 0.14 70);
+  /* Keyboard focus ring (A11Y) — applied below to interactive elements. */
+  --focus: oklch(0.82 0.13 210 / 0.65);
 
   --r-1: 4px;
   --r-2: 6px;
@@ -51,6 +65,16 @@ body {
 }
 a { color: inherit; text-decoration: none; }
 button { font-family: inherit; }
+
+/* A11Y: visible keyboard focus ring on all interactive elements (mouse clicks
+   stay ring-free via :focus-visible). Replaces the UA default that was easy to lose
+   against the dark theme. */
+a:focus-visible, button:focus-visible, input:focus-visible, select:focus-visible,
+textarea:focus-visible, [role="link"]:focus-visible, [tabindex]:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+  border-radius: var(--r-1);
+}
 
 /* Background grid */
 .dot-grid {

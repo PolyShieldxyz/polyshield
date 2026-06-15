@@ -10,7 +10,6 @@ import {
   addNote,
   computeCommitment,
   computeNullifier,
-  deriveSecret,
   formatUsdc,
   getCurrentCashNote,
   getFreeNotes,
@@ -23,6 +22,7 @@ import {
   toFieldSafe,
   type Note,
 } from '@/lib/notes'
+import { getNoteSecret } from '@/lib/secretSession'
 import { consolidateNotes } from '@/lib/consolidate'
 import { fetchMerklePath, relayBet, requestLimitOrder, waitForTransactionConfirmation } from '@/lib/api'
 import { generateProofInWorker } from '@/lib/prover'
@@ -198,11 +198,19 @@ export function BetModal({
   const betFeeBps = feeConfigData ? BigInt(feeConfigData[0]) : 0n
   const relayGasFeeUSDC = feeConfigData ? BigInt(feeConfigData[1]) : 0n
   const minBet = feeConfigData ? BigInt(feeConfigData[2]) : 1_000_000n // default $1 until loaded
+  // Polymarket also enforces a $1 minimum ORDER NOTIONAL, and the signing layer reserves the
+  // per-market taker fee out of the stake BEFORE sizing the order — so a $1 bet sizes a sub-$1 order
+  // the CLOB rejects ("invalid amount … min size: $1"). Require enough headroom that the post-fee
+  // order clears $1 even at a generous (~20%) taker-fee assumption. Sits ON TOP of the on-chain minBet.
+  const POLY_MIN_ORDER_USDC = 1_000_000n
+  const ORDER_FEE_HEADROOM_BPS = 2_000n // assume up to 20% taker-fee reserve (real ≈ 1–7%) → ~$1.25 floor
+  const minOrderBet = (POLY_MIN_ORDER_USDC * 10_000n) / (10_000n - ORDER_FEE_HEADROOM_BPS)
+  const effectiveMinBet = minBet > minOrderBet ? minBet : minOrderBet
   const fee = useMemo(() => {
     if (!amountMicro || amountMicro <= 0n) return 0n
     return (amountMicro * betFeeBps) / 10_000n + relayGasFeeUSDC
   }, [amountMicro, betFeeBps, relayGasFeeUSDC])
-  const belowMinBet = amountMicro !== null && amountMicro > 0n && amountMicro < minBet
+  const belowMinBet = amountMicro !== null && amountMicro > 0n && amountMicro < effectiveMinBet
 
   // FEE: the spent note must cover bet_amount + fee — the bet_auth circuit computes
   // new_balance = current_balance - bet_amount - fee and range-checks it to 64 bits, so a bet
@@ -233,9 +241,9 @@ export function BetModal({
       setError('Loading fee schedule — please try again in a moment.')
       return
     }
-    if (amountMicro < minBet) {
+    if (amountMicro < effectiveMinBet) {
       setPhase('error')
-      setError(`Minimum bet is $${formatUsdc(minBet)} (Polymarket rejects smaller orders).`)
+      setError(`Minimum bet is $${formatUsdc(effectiveMinBet)} — Polymarket requires a $1 order and the taker fee comes out of your stake first.`)
       return
     }
     if (shares < MIN_SHARES) {
@@ -304,7 +312,7 @@ export function BetModal({
           `This bet plus the $${formatUsdc(fee)} fee exceeds your balance. Reduce the amount.`,
         )
       }
-      const secret = await deriveSecret(signMessageAsync, address, cashNote.depositIndex)
+      const secret = await getNoteSecret(signMessageAsync, address, cashNote.depositIndex, cashNote.derivationVersion ?? 1)
       let merkleProof
       try {
         merkleProof = await fetchMerklePath(cashNote.commitment)
@@ -403,6 +411,7 @@ export function BetModal({
         createdAt: Date.now(),
         txHash: nextTxHash,
         side,
+        derivationVersion: cashNote.derivationVersion ?? 1, // FC-13: inherit lineage version
       })
       addNote({
         id: `receipt-${nullifierHex}`,
@@ -416,6 +425,7 @@ export function BetModal({
         nullifier_of_bet: nullifierHex,
         position_id: positionId as `0x${string}`,
         marketId,
+        marketName, // human-readable question for portfolio display (#5)
         condition_id: safeConditionId as `0x${string}`,
         raw_condition_id: conditionId,
         bet_amount: stake,
@@ -424,6 +434,8 @@ export function BetModal({
         createdAt: Date.now(),
         txHash: nextTxHash,
         side,
+        sideLabel, // human-readable outcome (team name etc.) for head-to-head markets (#5/head-to-head UX)
+        derivationVersion: cashNote.derivationVersion ?? 1, // FC-13: inherit lineage version
       })
       recordWalletActivity({
         id: `bet-${nextTxHash}`,
@@ -433,6 +445,7 @@ export function BetModal({
         createdAt: Date.now(),
         txHash: nextTxHash,
         marketId: conditionId,
+        marketName, // #5: thread the readable name into closed-bet history
         side,
         receiptId: `receipt-${nullifierHex}`,
         receiptNullifier: nullifierHex,
@@ -475,7 +488,14 @@ export function BetModal({
             <KV l="Market" v={marketName} />
             <KV l="Side" v={sideLabel ?? side} />
             <KV l="Amount" v={`$${formatUsdc(amountMicro ?? 0n)} USDC`} />
-            <KV l={orderKind === 'MARKET' ? 'Minimum shares' : 'Estimated shares'} v={shares.toString()} />
+            {/* FC-14: `shares` is the fee-naive upper bound (bet_amount/price). The Polymarket taker
+                fee is paid from the stake, so the actual fill is slightly fewer shares — show an
+                approximate net estimate (NEXT_PUBLIC_CLOB_TAKER_FEE_BPS; 0 → shows the cap). The exact
+                fill is reconciled automatically after the order executes. */}
+            <KV
+              l={orderKind === 'MARKET' ? 'Est. shares (after ~Polymarket fee)' : 'Estimated shares'}
+              v={`≈ ${((shares * (10_000n - BigInt(process.env.NEXT_PUBLIC_CLOB_TAKER_FEE_BPS ?? '0'))) / 10_000n).toString()}`}
+            />
             <KV
               l={`Protocol fee${betFeeBps > 0n ? ` (${(Number(betFeeBps) / 100).toFixed(2)}%)` : ''}`}
               v={`$${formatUsdc(fee)} USDC`}
@@ -507,7 +527,7 @@ export function BetModal({
             </div>
             {belowMinBet && (
               <div className="small mt-1" style={{ color: 'var(--red)', fontSize: 11 }}>
-                Minimum bet is ${formatUsdc(minBet)} (Polymarket rejects smaller orders).
+                Minimum bet is ${formatUsdc(effectiveMinBet)} — Polymarket requires a $1 order and the taker fee comes out of your stake first.
               </div>
             )}
             {!belowMinBet && exceedsBalance && (
@@ -557,7 +577,7 @@ export function BetModal({
             <div>
               <div style={{ fontSize: 13 }}>Auto-settle <span className="pill pill-soft" style={{ fontSize: 9, verticalAlign: 'middle' }}>COMING SOON</span></div>
               <div className="small" style={{ fontSize: 11 }}>
-                Polyshield will claim winnings automatically when this market resolves. Settle manually from Portfolio for now.
+                PolyShield will claim winnings automatically when this market resolves. Settle manually from Portfolio for now.
               </div>
             </div>
           </label>

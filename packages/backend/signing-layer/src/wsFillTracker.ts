@@ -191,9 +191,30 @@ let _stopped = false;
 let _reconnectAttempts = 0;
 let _reconnectTimer: ReturnType<typeof setTimeout> | null = null;
 let _reconcileTimer: ReturnType<typeof setInterval> | null = null;
+let _pingTimer: ReturnType<typeof setInterval> | null = null;
 
 const RECONCILE_INTERVAL_MS = 30_000;
 const RECONNECT_DELAYS_MS = [1_000, 2_000, 5_000, 10_000, 30_000];
+// Polymarket's CLOB user-channel idle-times-out a socket that doesn't periodically PING (the cause of
+// the regular ~2-minute "websocket closed — reconnecting" churn, which drops live limit-order fill
+// tracking). Send a lightweight "PING" well inside that window; the server replies "PONG" (a non-JSON
+// frame that handleMessage already ignores).
+const PING_INTERVAL_MS = 10_000;
+
+function stopPing(): void {
+  if (_pingTimer) { clearInterval(_pingTimer); _pingTimer = null; }
+}
+
+function startPing(ws: WebSocket): void {
+  stopPing();
+  _pingTimer = setInterval(() => {
+    if (_ws === ws && ws.readyState === WebSocket.OPEN) {
+      try { ws.send("PING"); } catch { /* next reconnect handles it */ }
+    } else {
+      stopPing();
+    }
+  }, PING_INTERVAL_MS);
+}
 
 function httpHost(): string {
   return process.env.POLY_API_URL ?? "https://clob.polymarket.com";
@@ -233,6 +254,7 @@ export function stopFillTracker(): void {
   _stopped = true;
   if (_reconnectTimer) { clearTimeout(_reconnectTimer); _reconnectTimer = null; }
   if (_reconcileTimer) { clearInterval(_reconcileTimer); _reconcileTimer = null; }
+  stopPing();
   try { _ws?.close(); } catch { /* ignore */ }
   _ws = null;
 }
@@ -414,6 +436,7 @@ function connect(): void {
     _connecting = false;
     _reconnectAttempts = 0;
     logger.info({ url }, "user-channel websocket connected");
+    startPing(ws); // keepalive — stops Polymarket's idle close (~2-min reconnect churn)
     // Load the DERIVED CLOB creds before subscribing — the static env creds are rejected by
     // Polymarket, which closed the socket on every connect (no fills ever tracked).
     void (async () => {
@@ -433,12 +456,14 @@ function connect(): void {
 
   ws.on("close", () => {
     _connecting = false;
+    stopPing();
     if (_ws === ws) _ws = null;
     if (!_stopped) { logger.warn("user-channel websocket closed — reconnecting"); scheduleReconnect(); }
   });
 
   ws.on("error", (err: Error) => {
     _connecting = false;
+    stopPing();
     logger.warn({ err: err?.message }, "user-channel websocket error");
     try { ws.close(); } catch { /* ignore */ }
   });

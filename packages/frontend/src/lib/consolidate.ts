@@ -14,10 +14,10 @@ import {
   MAX_CONSOLIDATE_INPUTS,
   computeCommitment,
   computeNullifier,
-  deriveSecret,
   addNote,
   markNoteSpent,
 } from './notes'
+import { getNoteSecret } from './secretSession'
 import {
   fetchMerklePath,
   relayConsolidate,
@@ -53,7 +53,7 @@ export async function consolidateNotes(params: ConsolidateParams): Promise<Note>
   const secrets: `0x${string}`[] = []
   const paths: { path: string[]; pathIndices: number[]; root: string }[] = []
   for (const n of notes) {
-    secrets.push(await deriveSecret(signMessageAsync, wallet, n.depositIndex))
+    secrets.push(await getNoteSecret(signMessageAsync, wallet, n.depositIndex, n.derivationVersion ?? 1))
     paths.push(await fetchMerklePath(n.commitment))
   }
   // All active notes prove against the same (current) root.
@@ -135,6 +135,7 @@ export async function consolidateNotes(params: ConsolidateParams): Promise<Note>
     spent: false,
     createdAt: Date.now(),
     txHash,
+    derivationVersion: notes[0].derivationVersion ?? 1, // FC-13: merged note continues slot 0's lineage
   }
   addNote(merged)
   return merged

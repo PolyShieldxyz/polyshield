@@ -159,6 +159,7 @@ export default function PrivacyPage() {
                   ['Nullifier unlinkability', 'Nullifiers are poseidon(secret, nonce). No observer can link a nullifier to a deposit address.', 'var(--green)'],
                   ['Relay separation', 'Proof relay submits transactions. Your wallet never appears in bet, settle, or withdraw calldata.', 'var(--violet)'],
                   ['Timing entropy', 'Withdraw relay adds random jitter (3–12 min standard, up to 60 min paranoid). Breaks timing correlation.', 'oklch(0.80 0.15 70)'],
+                  ['Anonymous analytics', 'During beta we count which markets/tags/sorts/searches are popular to tune what we fetch. Aggregate counts only — no wallet address, no IP, no per-user id. Browsing is never linked to your wallet or bets.', 'oklch(0.72 0.10 200)'],
                 ].map(([label, desc, color]) => (
                   <div key={label as string}>
                     <div className="row gap-2" style={{ alignItems: 'center', marginBottom: 4 }}>

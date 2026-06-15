@@ -20,6 +20,7 @@ class MemStorage {
 ;(globalThis as unknown as { window: unknown }).window = globalThis
 ;(globalThis as unknown as { localStorage: MemStorage }).localStorage = new MemStorage()
 
+import { keccak256, toBytes } from 'viem'
 import {
   recoverNotesWithClient,
   computeCommitment,
@@ -28,6 +29,8 @@ import {
   getSpendableNotes,
   clearNoteCache,
   byBlockThenLogIndex,
+  deriveMasterSeed,
+  deriveSecretV2,
 } from '../notes'
 
 const WALLET = '0x15d34AAf54267DB7D7c367839AAf71A00a2C6A65' as const
@@ -298,6 +301,96 @@ describe('FC-5 recovery', () => {
     const receipt = notes.find((n) => n.kind === 'BET_RECEIPT')!
     expect(receipt.spent).toBe(false)                       // still open
     expect(receipt.expectedShares).toBe(shares - sold)      // reduced by sold portion
+  })
+})
+
+// FC-13: V2 master-seed recovery + backward-compat with legacy V1 notes.
+describe('FC-13 master-seed recovery', () => {
+  // Deterministic signer: signature = keccak256(message). Reproducible per message, as wallets are.
+  const detSign = vi.fn(async ({ message }: { message: string }) => keccak256(toBytes(message)))
+  const emptyEvents = {
+    BetAuthorized: [], BetSold: [], PositionClosed: [], SettlementCredited: [],
+    BetCancellationCredited: [], NACancellationCredited: [], PartialFillCredited: [],
+    Consolidated: [], Withdrawn: [],
+  }
+
+  it('recovers an all-V2 wallet with exactly ONE signature and tags notes version 2', async () => {
+    const seed = await deriveMasterSeed(detSign, WALLET)
+    const s0 = deriveSecretV2(seed, 0)
+    const s1 = deriveSecretV2(seed, 1)
+    const amt0 = 500_000_000n
+    const amt1 = 700_000_000n
+    const logs: Record<string, Log[]> = {
+      Deposited: [
+        { blockNumber: 5n, transactionHash: '0xa', args: { depositor: WALLET, commitment: computeCommitment(s0, amt0, 0n, WALLET), amount: amt0 } },
+        { blockNumber: 6n, transactionHash: '0xb', args: { depositor: WALLET, commitment: computeCommitment(s1, amt1, 0n, WALLET), amount: amt1 } },
+      ],
+      ...emptyEvents,
+    }
+    vi.clearAllMocks() // forget the seed-derivation call used only to build the fixtures
+    const notes = await recoverNotesWithClient(WALLET, detSign, makeClient(logs, { '5': 1, '6': 2 }), VAULT)
+
+    // ONE signature for the whole wallet (the master seed) — no per-index prompts, no V1 fallback.
+    expect(detSign).toHaveBeenCalledTimes(1)
+    const deposits = notes.filter((n) => n.kind === 'DEPOSIT')
+    expect(deposits.length).toBe(2)
+    expect(deposits.every((n) => n.derivationVersion === 2)).toBe(true)
+    const balances = deposits.map((n) => n.balance).sort()
+    expect(balances).toContain(amt0)
+    expect(balances).toContain(amt1)
+  })
+
+  it('recovers a mixed V1+V2 wallet, tagging each lineage with its own version', async () => {
+    const sign = vi.fn(async ({ message }: { message: string }) => keccak256(toBytes(message)))
+    // index 0 = legacy V1 (per-index signature); index 1 = V2 (master seed).
+    const seed = await deriveMasterSeed(sign, WALLET)
+    const s0 = await deriveSecret(sign, WALLET, 0) // V1 primitive — what recovery's fallback recomputes
+    const s1 = deriveSecretV2(seed, 1)
+    const amt0 = 300_000_000n
+    const amt1 = 800_000_000n
+    const logs: Record<string, Log[]> = {
+      Deposited: [
+        { blockNumber: 5n, transactionHash: '0xa', args: { depositor: WALLET, commitment: computeCommitment(s0, amt0, 0n, WALLET), amount: amt0 } },
+        { blockNumber: 6n, transactionHash: '0xb', args: { depositor: WALLET, commitment: computeCommitment(s1, amt1, 0n, WALLET), amount: amt1 } },
+      ],
+      ...emptyEvents,
+    }
+    const notes = await recoverNotesWithClient(WALLET, sign, makeClient(logs, { '5': 1, '6': 2 }), VAULT)
+    const deposits = notes.filter((n) => n.kind === 'DEPOSIT')
+    expect(deposits.length).toBe(2)
+    const versionByBalance = Object.fromEntries(deposits.map((n) => [n.balance.toString(), n.derivationVersion]))
+    expect(versionByBalance[amt0.toString()]).toBe(1) // legacy lineage
+    expect(versionByBalance[amt1.toString()]).toBe(2) // master-seed lineage
+  })
+})
+
+// FC-14: the exact fee split is in the BetAuthorized event, so recovery reconstructs the post-bet
+// balance precisely even if governance changed the rate afterward (kills the old rate-change bug).
+describe('FC-14 fee recovery', () => {
+  it('uses the event fee, not the current feeConfig, to rebuild the post-bet balance', async () => {
+    const secret0 = await deriveSecret(sign, WALLET, 0)
+    const depositAmt = 1_000_000_000n
+    const betAmt = 100_000_000n
+    const protocolFee = 200_000n // 0.2% recorded at bet time
+    const relayFee = 0n
+    const shares = 200_000_000n
+    const depositC = computeCommitment(secret0, depositAmt, 0n, WALLET)
+    const betNull = computeNullifier(secret0, 0n)
+    const betOutC = computeCommitment(secret0, depositAmt - betAmt - protocolFee - relayFee, 1n, WALLET)
+    const logs: Record<string, Log[]> = {
+      Deposited: [{ blockNumber: 10n, transactionHash: '0xdep', args: { depositor: WALLET, commitment: depositC, amount: depositAmt } }],
+      BetAuthorized: [{ blockNumber: 11n, transactionHash: '0xbet', args: { nullifier: betNull, market_id: b32(7n), position_id: b32(1n), expected_shares: shares, bet_amount: betAmt, price: 50_000_000n, outcome_side: 0, new_commitment: betOutC, protocolFee, relayFee } }],
+      BetSold: [], PositionClosed: [], SettlementCredited: [], BetCancellationCredited: [], NACancellationCredited: [], Withdrawn: [],
+    }
+    // Current feeConfig has a DIFFERENT (much higher) rate — recovery must IGNORE it and use the
+    // per-bet fee from the event. The legacy recompute path would mis-reconstruct here.
+    const laterRate: FeeConfig = [99, 0n, 1_000_000n, 100_000n, 1_000_000n, '0x0000000000000000000000000000000000000000']
+    await recoverNotesWithClient(WALLET, sign, makeClient(logs, { '10': 1, '11': 2 }, 0n, laterRate), VAULT)
+
+    const spendable = getSpendableNotes(WALLET).filter((n) => !n.spent)
+    const cash = spendable.reduce((m, n) => (n.balance > m.balance ? n : m), spendable[0])
+    expect(cash.balance).toBe(depositAmt - betAmt - protocolFee) // exact, from the event
+    expect(cash.commitment.toLowerCase()).toBe(betOutC.toLowerCase())
   })
 })
 

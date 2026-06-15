@@ -8,9 +8,10 @@ import { KV } from '@/components/app/KV'
 import { Icon, ICONS } from '@/components/ui/Icon'
 import { VAULT_ABI, USDC_ABI } from '@/lib/vaultAbi'
 import {
-  deriveSecret, computeCommitment, computeNullifier,
-  getSafeNextDepositIndex, recordDepositIndexUsed, addNote, clearNoteCache, recordWalletActivity,
+  computeCommitment, computeNullifier,
+  getSafeNextDepositIndex, recordDepositIndexUsed, addNote, recordWalletActivity,
 } from '@/lib/notes'
+import { getNoteSecret } from '@/lib/secretSession'
 import { fetchSpentNullifiers } from '@/lib/api'
 import { generateDepositProof } from '@/lib/prover'
 
@@ -19,6 +20,10 @@ const VAULT_ADDRESS = (process.env.NEXT_PUBLIC_VAULT_ADDRESS ?? '0x0000000000000
 const USDC_ADDRESS  = (process.env.NEXT_PUBLIC_USDC_ADDRESS  ?? '0x0000000000000000000000000000000000000000') as `0x${string}`
 
 function short(hex: string) { return hex.slice(0, 8) + '…' + hex.slice(-6) }
+
+// Minimum deposit enforced in the UI ($1 USDC). Keeps dust deposits out of the pool and
+// matches the protocol's $1 minimums elsewhere (minBet / minWithdrawal).
+const MIN_DEPOSIT = 1
 
 // ── Visual components ────────────────────────────────────────────────────────
 
@@ -71,6 +76,7 @@ function Step0({
 }) {
   const balanceFormatted = (Number(usdcBalance) / 1e6).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })
   const insufficient = usdcBalance < parseUnits(String(amount), 6)
+  const belowMin = amount > 0 && amount < MIN_DEPOSIT
 
   return (
     <div style={{ display: 'grid', gridTemplateColumns: '1.2fr 1fr', gap: 32 }}>
@@ -81,14 +87,24 @@ function Step0({
         <div className="mt-6">
           <div className="row" style={{ justifyContent: 'space-between' }}>
             <div className="micro">AMOUNT</div>
-            {IS_DEV && (
-              <div className="row gap-3">
-                <span className="small" style={{ fontSize: 11, color: 'var(--text-3)' }}>Balance: ${balanceFormatted}</span>
+            <div className="row gap-3" style={{ alignItems: 'center' }}>
+              {/* Wallet USDC.e balance (the collateral token the vault accepts). Always shown so the
+                  user can see what they have to deposit; the mint button is a dev-only convenience. */}
+              <button
+                type="button"
+                className="small"
+                style={{ fontSize: 11, color: 'var(--text-3)', background: 'none', border: 'none', cursor: 'pointer', padding: 0 }}
+                onClick={() => setAmount(Math.floor(Number(usdcBalance) / 1e6))}
+                title="Use full wallet balance"
+              >
+                Wallet: ${balanceFormatted} USDC.e
+              </button>
+              {IS_DEV && (
                 <button className="btn btn-sm" style={{ fontSize: 10, padding: '3px 8px' }} onClick={mintUsdc} disabled={minting}>
                   {minting ? 'Minting…' : '+ Get test USDC'}
                 </button>
-              </div>
-            )}
+              )}
+            </div>
           </div>
           <div style={{ display: 'flex', alignItems: 'center', background: 'var(--bg-1)', border: `1px solid ${insufficient && amount > 0 ? 'var(--red)' : 'var(--line-strong)'}`, borderRadius: 6, padding: '0 14px', marginTop: 8 }}>
             <span className="mono" style={{ color: 'var(--text-2)', marginRight: 8, fontSize: 20 }}>$</span>
@@ -98,6 +114,9 @@ function Step0({
               style={{ background: 'transparent', border: 'none', color: 'var(--text)', fontFamily: 'var(--mono)', fontSize: 28, padding: '16px 0', width: '100%' }} />
             <span className="mono" style={{ color: 'var(--text-2)', fontSize: 14, letterSpacing: '0.06em' }}>USDC</span>
           </div>
+          {belowMin && (
+            <div className="small mt-1" style={{ fontSize: 11, color: 'var(--red)' }}>Minimum deposit is ${MIN_DEPOSIT} USDC.</div>
+          )}
           {insufficient && amount > 0 && (
             <div className="small mt-1" style={{ fontSize: 11, color: 'var(--red)' }}>Insufficient USDC balance{IS_DEV && ' — click "+ Get test USDC" above'}</div>
           )}
@@ -115,16 +134,15 @@ function Step0({
         <div className="panel mt-3" style={{ padding: 20 }}>
           <KV l="Amount" v={`$${amount.toLocaleString()} USDC`} />
           <KV l="Vault" v={VAULT_ADDRESS ? short(VAULT_ADDRESS) : '(not connected)'} />
-          <KV l="Anonymity set" v="1,842 wallets" />
           <KV l="Network fee" v="~$0.04 (Polygon)" />
-          <KV l="Polyshield fee" v="$0.00" />
+          <KV l="PolyShield fee" v="$0.00" />
           <KV l="Key derivation" v="Poseidon4(wallet_sig_hash, …)" />
           {IS_DEV && <KV l="Mode" v="DEV — MockVerifier" />}
           <button
             className="btn btn-primary mt-4"
             style={{ width: '100%', justifyContent: 'center', padding: '14px 0', fontSize: 13 }}
             onClick={onNext}
-            disabled={amount <= 0 || insufficient || deriving}
+            disabled={amount < MIN_DEPOSIT || insufficient || deriving}
           >
             {deriving ? 'Signing…' : <>Sign to derive key <Icon d={ICONS.arrow} size={12} /></>}
           </button>
@@ -252,7 +270,6 @@ function Step2({ amount, commitment, txHash, onDone }: { amount: number; commitm
         <div className="panel mt-6" style={{ padding: 20 }}>
           <KV l="Amount deposited" v={`$${amount.toLocaleString()} USDC`} />
           <KV l="Deposit tx" v={short(txHash)} />
-          <KV l="Vault anonymity set" v="[live count coming soon]" />
         </div>
         <div className="row gap-3 mt-6">
           <button className="btn btn-primary" onClick={onDone}>Back to portfolio <Icon d={ICONS.arrow} size={12} /></button>
@@ -381,6 +398,7 @@ export default function DepositPage() {
         spent: false,
         createdAt: Date.now(),
         txHash: depositTxHash,
+        derivationVersion: 2, // FC-13: new deposits use the V2 master-seed scheme
       })
       recordWalletActivity({
         id: `deposit-${depositTxHash}`,
@@ -390,8 +408,8 @@ export default function DepositPage() {
         createdAt: Date.now(),
         txHash: depositTxHash,
       })
-      // Invalidate in-memory cache so the portfolio page reads fresh balance from localStorage
-      clearNoteCache()
+      // The addNote above already updated the in-memory cache + persisted (encrypted) and fired the
+      // notes-changed event, so the portfolio refreshes without a cache invalidation here.
       setFinalTxHash(depositTxHash)
       setPhase('done')
       setStep(2)
@@ -428,14 +446,16 @@ export default function DepositPage() {
       // on-chain deposit count, then bump past any index whose nullifier is already spent on-chain (a
       // nonce-0 note has exactly one nullifier, so depositing onto a spent one is unrecoverable).
       let index = await getSafeNextDepositIndex(address)
-      let secret = await deriveSecret(signMessageAsync, address, index)
+      // FC-13: new deposits use the V2 master seed. The first call signs once to unlock the seed;
+      // every re-derivation below (collision-guard) is then free (no extra wallet prompt).
+      let secret = await getNoteSecret(signMessageAsync, address, index, 2)
       let n = computeNullifier(secret, 0n)
       for (let guard = 0; guard < 20; guard++) {
         const spent = await fetchSpentNullifiers(VAULT_ADDRESS, [n])
         if (!spent.has(n.toLowerCase())) break
         console.warn('[deposit] index', index, 'has a spent nullifier — bumping to avoid a locked deposit')
         index += 1
-        secret = await deriveSecret(signMessageAsync, address, index)
+        secret = await getNoteSecret(signMessageAsync, address, index, 2)
         n = computeNullifier(secret, 0n)
       }
       const c = computeCommitment(secret, amountMicro, 0n, address)

@@ -152,12 +152,12 @@ Both the cache and the index use the same resilient one-time scan (windowed, cur
 
 ### 2.3 Frontend
 
-Next.js + Wagmi. All cryptography (note derivation, proof generation via snarkjs WASM) runs in-browser. **No secret ever leaves the browser.** Secrets are **wallet-derived (P3+)**: `secret = keccak256(wallet.signMessage("PolyShield deposit derivation\nAddress:{W}\nIndex:{i}\nVersion:1")) mod p` — so the wallet IS the backup; nothing to save. The note cache (commitment/nullifier/balance/nonce/spent, NOT the secret) lives in `localStorage` for performance only.
+Next.js + Wagmi. All cryptography (note derivation, proof generation via snarkjs WASM) runs in-browser. **No secret ever leaves the browser.** Secrets are **wallet-derived (P3+)**. **V2 (FC-13, default):** one master-seed signature per session — `master_seed = keccak256(wallet.sign("PolyShield master seed\nAddress:{W}\nVersion:2"))`, `secret_i = keccak256(master_seed ‖ uint32(i)) mod p` — held in memory only, so the wallet IS the backup and a whole session needs one signature. **V1 (legacy):** `secret = keccak256(wallet.signMessage("PolyShield deposit derivation\nAddress:{W}\nIndex:{i}\nVersion:1")) mod p`. The note cache (commitment/nullifier/balance/nonce/spent/derivationVersion, NOT the secret) is persisted **encrypted in IndexedDB** (FC-13, non-extractable AES-GCM key) and mirrored to an in-memory working set; the master seed is never persisted.
 
 Flows:
 - **Deposit:** the **only** transaction the user's wallet ever sends. Derives the secret, computes `Poseidon4(secret, amount, 0, owner)`, generates the mandatory deposit-binding proof (FC-2), calls `Vault.deposit(proof, commitment, amount)`.
 - **Bet / Settle / Close / Cancel / Withdraw:** generate the proof client-side, fetch the **merkle path from the proof-relay** (`/api/merkle-path` → `CachedMerkleTree`, not a client chain scan), and **POST the proof to the Proof Relay** — the frontend NEVER calls a state-mutating Vault function from the user's wallet (T19). Cheap on-chain reads (e.g. `pendingCredit`, `betRecords`) use a resilient `ethCall` helper that retries rate-limits and never fabricates state on error (a transient 429 must not flip a resolved bet to "pending").
-- **Restore / recovery (P3+):** rebuilds the local note cache by fetching `/api/recovery-data/:wallet` from the backend (NOT a client chain scan), re-deriving secrets per deposit index, and replaying the events locally to match its own notes. See §2.4.
+- **Restore / recovery (P3+):** rebuilds the local note cache by fetching `/api/recovery-data/:wallet` from the backend (NOT a client chain scan), then mapping each on-chain `Deposited` commitment to its index via the free V2 derivation (one master-seed signature; legacy V1 per-index signing only as a fallback) and replaying the events locally to match its own notes. An all-V2 wallet restores in ONE signature; a silent reconcile auto-syncs new on-chain notes when the seed is already unlocked, and a determinate progress bar drives the manual Restore/Sync. See §2.4 and FC-13.
 - **Explorer:** reads `/api/events` (backend index), not a client chain scan.
 
 ---
@@ -189,10 +189,11 @@ Flows:
    ┌──────────────────────────────────────────────────────────────────────────────────────────────┐
    │ USER BROWSER — RESTORE / RECOVERY (secret-dependent → client-only)                              │
    │  1. GET /api/recovery-data/:wallet  ── fetch public events from the backend (no client scan)    │
-   │  2. for each deposit index i: secret_i = deriveSecret(wallet, i)                                 │
+   │  2. master_seed = keccak(sign(V2 msg)) ONCE; secret_i = keccak(master_seed‖i)  (V1 per-index    │
+   │     signing only as a fallback for legacy commitments V2 can't match)                            │
    │  3. replay events locally, keeping only those whose nullifier == own derived nullifier           │
    │     → rebuild balances/nonces/spent-status; cheap state reads (pendingCredit/betRecords) on RPC  │
-   │  4. result = the wallet's note set (incl. the +credit notes); localStorage repopulated           │
+   │  4. result = the wallet's note set (incl. the +credit notes); encrypted IndexedDB cache repopulated │
    └──────────────────────────────────────────────────────────────────────────────────────────────┘
 ```
 

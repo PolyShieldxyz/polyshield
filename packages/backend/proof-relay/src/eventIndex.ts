@@ -25,7 +25,7 @@ const SCAN_WINDOW = Number(process.env.MERKLE_SCAN_WINDOW ?? "5000");
 // The exact events the frontend recovery replay consumes (must match lib/notes.ts).
 const VAULT_EVENTS_ABI = [
   "event Deposited(address indexed depositor, bytes32 commitment, uint256 amount)",
-  "event BetAuthorized(bytes32 indexed nullifier, bytes32 market_id, bytes32 position_id, uint64 expected_shares, uint256 bet_amount, uint64 price, uint8 outcome_side, bytes32 new_commitment)",
+  "event BetAuthorized(bytes32 indexed nullifier, bytes32 market_id, bytes32 position_id, uint64 expected_shares, uint256 bet_amount, uint64 price, uint8 outcome_side, bytes32 new_commitment, uint64 protocolFee, uint64 relayFee)",
   "event SettlementCredited(bytes32 indexed nullifier, bytes32 nullifier_of_bet, bytes32 new_commitment)",
   "event BetCancellationCredited(bytes32 indexed nullifier, bytes32 nullifier_of_bet, bytes32 new_commitment)",
   "event NACancellationCredited(bytes32 indexed nullifier, bytes32 nullifier_of_bet, bytes32 new_commitment)",
@@ -54,7 +54,7 @@ function serializeArgs(name: string, parsed: ethers.LogDescription): Record<stri
   const num = (v: unknown) => (typeof v === "bigint" ? v.toString() : String(v));
   switch (name) {
     case "Deposited": return { depositor: hx(a.depositor), commitment: hx(a.commitment), amount: num(a.amount) };
-    case "BetAuthorized": return { nullifier: hx(a.nullifier), market_id: hx(a.market_id), position_id: hx(a.position_id), expected_shares: num(a.expected_shares), bet_amount: num(a.bet_amount), price: num(a.price), outcome_side: num(a.outcome_side), new_commitment: hx(a.new_commitment) };
+    case "BetAuthorized": return { nullifier: hx(a.nullifier), market_id: hx(a.market_id), position_id: hx(a.position_id), expected_shares: num(a.expected_shares), bet_amount: num(a.bet_amount), price: num(a.price), outcome_side: num(a.outcome_side), new_commitment: hx(a.new_commitment), protocolFee: num(a.protocolFee), relayFee: num(a.relayFee) };
     case "SettlementCredited":
     case "BetCancellationCredited":
     case "NACancellationCredited":

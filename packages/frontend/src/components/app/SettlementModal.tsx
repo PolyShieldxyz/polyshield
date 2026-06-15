@@ -9,7 +9,6 @@ import {
   addNote,
   computeCommitment,
   computeNullifier,
-  deriveSecret,
   formatUsdc,
   getCurrentCashNote,
   getFreeNoteForDeposit,
@@ -19,6 +18,7 @@ import {
   type Note,
   type ReadyToSettleBet,
 } from '@/lib/notes'
+import { getNoteSecret } from '@/lib/secretSession'
 import {
   fetchAttestation,
   fetchMerklePath,
@@ -138,7 +138,7 @@ export function SettlementModal({
       for (let i = 0; i < betsToProcess.length; i++) {
         const bet = betsToProcess[i]
         const receipt = bet.receipt
-        const secret = await deriveSecret(signMessageAsync, address, currentFreeNote.depositIndex)
+        const secret = await getNoteSecret(signMessageAsync, address, currentFreeNote.depositIndex, currentFreeNote.derivationVersion ?? 1)
         const merkle = await fetchMerklePath(currentFreeNote.commitment)
         const marketIdField = receipt.condition_id ?? ZERO_BYTES32
         const newNonce = currentFreeNote.nonce + 1n
@@ -226,6 +226,7 @@ export function SettlementModal({
           txHash,
           marketId: receipt.marketId,
           condition_id: marketIdField,
+          derivationVersion: currentFreeNote.derivationVersion ?? 1, // FC-13: inherit lineage version
         }
         addNote(nextFreeNote)
 
@@ -260,7 +261,7 @@ export function SettlementModal({
           <p className="body" style={{ margin: 0 }}>
             {isCloseLosses
               ? 'Generate a zero-credit settlement proof for each lost bet. This formally closes the position on-chain so your note nonce stays consistent.'
-              : 'Select one or more resolved bets. Polyshield will generate one proof per bet and relay them sequentially so your balance stays in sync.'}
+              : 'Select one or more resolved bets. PolyShield will generate one proof per bet and relay them sequentially so your balance stays in sync.'}
           </p>
           <div className="col gap-2">
             {readyBets.length === 0 && (

@@ -8,7 +8,6 @@ import {
   addNote,
   computeCommitment,
   computeNullifier,
-  deriveSecret,
   formatUsdc,
   getFreeNoteForDeposit,
   markBetReceiptSpent,
@@ -16,9 +15,11 @@ import {
   recordWalletActivity,
   type Note,
 } from '@/lib/notes'
+import { getNoteSecret } from '@/lib/secretSession'
 import {
   fetchAttestation,
   fetchBetRecord,
+  fetchBetProtocolFee,
   fetchMerklePath,
   relayBetCancel,
   waitForTransactionConfirmation,
@@ -60,6 +61,8 @@ export function BetCancelRefundModal({
   const [phase, setPhase] = useState<Phase>('input')
   const [error, setError] = useState<string | null>(null)
   const [betAmount, setBetAmount] = useState<bigint>(0n)
+  // FC-14: a never-executed bet refunds the protocol fee too. refundTotal = stake + protocolFee.
+  const [protocolFee, setProtocolFee] = useState<bigint>(0n)
   const [attestation, setAttestation] = useState<SignedAttestation | null>(null)
   const [loading, setLoading] = useState(true)
 
@@ -81,8 +84,9 @@ export function BetCancelRefundModal({
         }
         const rec = await fetchBetRecord(vaultAddress, nullifierOfBet)
         setAttestation(att)
-        // Vault injects rec.bet_amount as the refund; show that authoritative figure.
+        // Vault injects rec.bet_amount + protocolFee as the refund (FC-14); show both.
         setBetAmount(rec.betAmount)
+        setProtocolFee(await fetchBetProtocolFee(vaultAddress, nullifierOfBet))
       } catch (e) {
         setError(e instanceof Error ? e.message : String(e))
         setPhase('error')
@@ -116,10 +120,12 @@ export function BetCancelRefundModal({
       }
 
       setPhase('proving')
-      const secret = await deriveSecret(signMessageAsync, address, freeNote.depositIndex)
+      // FC-14: refund the stake AND the full protocol fee (the Vault injects exactly this sum).
+      const refundTotal = betAmount + protocolFee
+      const secret = await getNoteSecret(signMessageAsync, address, freeNote.depositIndex, freeNote.derivationVersion ?? 1)
       const merkle = await fetchMerklePath(freeNote.commitment)
       const newNonce = freeNote.nonce + 1n
-      const newBalance = freeNote.balance + betAmount
+      const newBalance = freeNote.balance + refundTotal
       const newCommitment = computeCommitment(secret, newBalance, newNonce, address)
       const newNullifier = computeNullifier(secret, newNonce)
 
@@ -137,7 +143,7 @@ export function BetCancelRefundModal({
           nullifier: freeNote.nullifier,
           new_commitment: newCommitment,
           nullifier_of_bet: nullifierOfBet,
-          bet_amount: betAmount, // Vault-injected; must match rec.bet_amount
+          bet_amount: refundTotal, // FC-14: Vault-injected refund = bet_amount + protocolFee
         },
       })
 
@@ -165,18 +171,19 @@ export function BetCancelRefundModal({
         txHash,
         marketId: receipt.marketId,
         condition_id: receipt.condition_id,
+        derivationVersion: freeNote.derivationVersion ?? 1, // FC-13: inherit lineage version
       })
       recordWalletActivity({
         id: `betcancel-${txHash}-${receipt.id}`,
         wallet: address,
         kind: 'refund',
-        amount: betAmount,
+        amount: refundTotal,
         createdAt: Date.now(),
         txHash,
         marketId: receipt.marketId as `0x${string}` | undefined,
         receiptId: receipt.id,
         receiptNullifier: nullifierOfBet,
-        payout: betAmount,
+        payout: refundTotal,
       })
 
       setPhase('done')
@@ -197,12 +204,14 @@ export function BetCancelRefundModal({
           <div className="panel" style={{ padding: 16 }}>
             <KV l="Market" v={receipt.marketId ?? receipt.id} />
             <KV l="Side" v={receipt.side ?? '—'} />
-            <KV l="Stake to reclaim" v={loading ? '…' : `$${formatUsdc(betAmount)} USDC`} />
+            <KV l="Stake" v={loading ? '…' : `$${formatUsdc(betAmount)} USDC`} />
+            {protocolFee > 0n && <KV l="Protocol fee refund" v={loading ? '…' : `$${formatUsdc(protocolFee)} USDC`} />}
+            <KV l="Total to reclaim" v={loading ? '…' : `$${formatUsdc(betAmount + protocolFee)} USDC`} />
           </div>
           <div className="row" style={{ justifyContent: 'space-between', gap: 12 }}>
             <button className="btn" onClick={onClose}>Cancel</button>
             <button className="btn btn-primary" disabled={loading || betAmount <= 0n} onClick={() => void run()}>
-              Reclaim ${formatUsdc(betAmount)}
+              Reclaim ${formatUsdc(betAmount + protocolFee)}
             </button>
           </div>
         </div>
@@ -219,7 +228,7 @@ export function BetCancelRefundModal({
       {phase === 'done' && (
         <div className="col gap-4">
           <div className="micro" style={{ color: 'var(--green)' }}>STAKE RECLAIMED</div>
-          <h3 className="h4" style={{ margin: 0 }}>+${formatUsdc(betAmount)} returned to your balance.</h3>
+          <h3 className="h4" style={{ margin: 0 }}>+${formatUsdc(betAmount + protocolFee)} returned to your balance.</h3>
           <p className="small" style={{ margin: 0 }}>Auto close in 5 seconds.</p>
         </div>
       )}

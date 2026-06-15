@@ -1,9 +1,12 @@
 'use client'
-import { useEffect, useRef } from 'react'
-import { useAccount, useSwitchChain } from 'wagmi'
+import { useEffect, useRef, useState } from 'react'
+import { useAccount, useSwitchChain, useDisconnect } from 'wagmi'
 import { WalletConnect } from '@/components/ui/WalletConnect'
+import { BetaConsentGate } from '@/components/app/BetaConsentGate'
 import { Logo } from '@/components/ui/Logo'
-import { clearNoteCache, resetAllLocalState } from '@/lib/notes'
+import { clearNoteCache, resetAllLocalState, resetWalletConnectorStorage } from '@/lib/notes'
+import { clearSession } from '@/lib/secretSession'
+import { useNotesHydration } from '@/lib/useNotesHydration'
 import { useChainResetDetector } from '@/lib/accountState'
 import { initProver } from '@/lib/prover'
 
@@ -12,10 +15,31 @@ import { initProver } from '@/lib/prover'
 const EXPECTED_CHAIN_ID = Number(process.env.NEXT_PUBLIC_CHAIN_ID ?? '137')
 
 export default function AppLayout({ children }: { children: React.ReactNode }) {
-  const { isConnected, status, chainId } = useAccount()
+  const { address, isConnected, status, chainId } = useAccount()
   const { switchChain, isPending: switching } = useSwitchChain()
+  const { disconnect } = useDisconnect()
+
+  // Hard escape hatch for a wedged wallet session (broken reconnect after a hard refresh: the gate
+  // persists, "Disconnect" reopens the connect modal). Force-disconnect, wipe the connector's
+  // persisted state so a broken connector isn't restored, then reload to a clean slate.
+  const resetConnection = () => {
+    try { disconnect() } catch { /* no active connector — storage wipe below still recovers it */ }
+    resetWalletConnectorStorage()
+    window.location.reload()
+  }
   const chainWasReset = useChainResetDetector()
+  const notesReady = useNotesHydration()
   const prevConnected = useRef<boolean | null>(null)
+  // Safety valve: if wagmi never leaves 'reconnecting'/'connecting' (broken connector / RPC), stop
+  // waiting after a few seconds and show the connect gate rather than a blank page forever.
+  const [reconnectTimedOut, setReconnectTimedOut] = useState(false)
+  useEffect(() => {
+    if (status === 'reconnecting' || status === 'connecting') {
+      const t = setTimeout(() => setReconnectTimedOut(true), 6000)
+      return () => clearTimeout(t)
+    }
+    setReconnectTimedOut(false) // settled → reset for any future reconnect
+  }, [status])
 
   // Start fetching the entry-flow circuit .wasm and .zkey files as soon as the
   // user enters the app, well before they reach any proof step.
@@ -34,8 +58,10 @@ export default function AppLayout({ children }: { children: React.ReactNode }) {
     }
     if (prevConnected.current && !isConnected) {
       clearNoteCache()
-      // Clear localStorage too so a shared device does not leak the prior user's
-      // notes/activity/deposit-index to the next connector.
+      // FC-13: forget the in-memory master seed so the next connector can't reuse it.
+      clearSession()
+      // Clear persisted state too (encrypted IDB cache + localStorage counters) so a shared
+      // device does not leak the prior user's notes/activity/deposit-index to the next connector.
       resetAllLocalState()
     }
     prevConnected.current = isConnected
@@ -44,7 +70,12 @@ export default function AppLayout({ children }: { children: React.ReactNode }) {
   // During initial hydration wagmi status is 'reconnecting' while it restores
   // the previous session from storage. Rendering the gate during this window
   // causes it to flash on every page load even when already connected.
-  if (status === 'reconnecting' || status === 'connecting') {
+  // BUT a broken connector (e.g. an invalid WalletConnect project id, or a
+  // CORS-blocked RPC) can leave wagmi stuck in 'reconnecting'/'connecting'
+  // FOREVER — which used to render nothing but the outer nav (the "only the
+  // nav bar loads" bug). Cap the wait so we always fall through to the connect
+  // gate instead of hanging on a blank page.
+  if ((status === 'reconnecting' || status === 'connecting') && !reconnectTimedOut) {
     return null
   }
 
@@ -64,15 +95,26 @@ export default function AppLayout({ children }: { children: React.ReactNode }) {
             <>
               <h2 className="h3 mt-6" style={{ margin: 0 }}>Connect your wallet</h2>
               <p className="body mt-3" style={{ fontSize: 14 }}>
-                Connect a wallet to access the Polyshield app, deposit USDC, place private bets, and manage your account.
+                Connect a wallet to access the PolyShield app, deposit USDC, place private bets, and manage your account.
               </p>
             </>
           )}
           <div className="mt-6" style={{ display: 'flex', justifyContent: 'center' }}>
             <WalletConnect />
           </div>
+          {/* Escape hatch: if a previous session is wedged (gate keeps showing even though your wallet
+              says it's connected, or Disconnect just reopens this modal), reset the connection state. */}
+          <div className="small mt-3" style={{ fontSize: 11 }}>
+            <button
+              onClick={resetConnection}
+              style={{ background: 'none', border: 'none', color: 'var(--text-3)', textDecoration: 'underline', cursor: 'pointer', fontSize: 11 }}
+              title="Force-disconnect and clear the saved wallet session, then reload"
+            >
+              Stuck connecting? Reset connection
+            </button>
+          </div>
           <div className="small mt-4" style={{ fontSize: 11, color: 'var(--text-3)' }}>
-            Polygon mainnet · Amoy testnet supported
+            Polygon mainnet · beta
           </div>
         </div>
       </div>
@@ -88,7 +130,7 @@ export default function AppLayout({ children }: { children: React.ReactNode }) {
           <Logo size={40} withText={false} />
           <h2 className="h3 mt-6" style={{ margin: 0 }}>Wrong network</h2>
           <p className="body mt-3" style={{ fontSize: 14 }}>
-            Polyshield runs on {target}, but your wallet is on chain {chainId}. Your USDC
+            PolyShield runs on {target}, but your wallet is on chain {chainId}. Your USDC
             balance and deposits won&apos;t load until you switch.
           </p>
           <div className="mt-6" style={{ display: 'flex', justifyContent: 'center' }}>
@@ -106,7 +148,13 @@ export default function AppLayout({ children }: { children: React.ReactNode }) {
     )
   }
 
-  return (
+  // FC-13: hold note-reading screens until the encrypted cache has hydrated into memory, so the
+  // first paint never reads an empty cache (which would flash a $0 balance / "no notes").
+  if (!notesReady) return null
+
+  // Beta terms gate: connected + correct network, but require a one-time signed acknowledgement
+  // before any app content (deposit/bet/withdraw) is reachable.
+  const shell = (
     <div className="app-shell">
       {/* FINDING: A11Y-003 — distinct id ("app-main") to avoid duplicating the
           root layout's #main skip-link target, which already wraps this subtree. */}
@@ -115,4 +163,6 @@ export default function AppLayout({ children }: { children: React.ReactNode }) {
       </main>
     </div>
   )
+
+  return address ? <BetaConsentGate address={address}>{shell}</BetaConsentGate> : shell
 }

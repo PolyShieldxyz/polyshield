@@ -161,6 +161,7 @@ library VaultLogic {
     function betCancellationCredit(
         Ctx memory ctx,
         mapping(bytes32 => BetRecord) storage betRecords,
+        mapping(bytes32 => uint64) storage betProtocolFee,
         address verifier,
         bytes calldata proof,
         BetCancelPublicInputs calldata inputs,
@@ -176,10 +177,17 @@ library VaultLogic {
             _checkAttestation(ctx, att, sig, inputs.nullifier_of_bet, REPORT_FAILED, REPORT_FAILED);
         }
 
-        if (!VaultInputs.verifyBetCancel(verifier, proof, inputs, rec.bet_amount)) revert InvalidProof();
+        // FC-14: a cancelled bet never executed, so refund the stake AND the full protocol fee
+        // (the relay-gas fee is kept — it was a real submission cost). The circuit credits the
+        // Vault-injected amount; the frontend/recovery compute the identical value. feeAccumulator is
+        // NOT touched — the protocol fee was provisional (never claimable), so there's nothing to
+        // decrement; we just clear the provisional entry.
+        uint64 refund_amount = rec.bet_amount + betProtocolFee[inputs.nullifier_of_bet];
+        if (!VaultInputs.verifyBetCancel(verifier, proof, inputs, refund_amount)) revert InvalidProof();
 
         _spendAndInsert(ctx, inputs.nullifier, inputs.new_commitment);
         rec.status = BetStatus.CANCELLED_CREDITED;
+        betProtocolFee[inputs.nullifier_of_bet] = 0; // provisional fee fully refunded
 
         emit BetCancellationCredited(inputs.nullifier, inputs.nullifier_of_bet, inputs.new_commitment);
     }
@@ -230,6 +238,8 @@ library VaultLogic {
         emit NACancellationCredited(inputs.nullifier, inputs.nullifier_of_bet, inputs.new_commitment);
     }
 
+    /// @return fullClose true when this close fully exits the position (terminal) — the caller then
+    /// releases the bet's provisional protocol fee as earned (FC-14).
     function closePosition(
         Ctx memory ctx,
         mapping(bytes32 => BetRecord) storage betRecords,
@@ -239,7 +249,7 @@ library VaultLogic {
         ClosePublicInputs calldata inputs,
         OperatorAttestation calldata att,
         bytes calldata sig
-    ) external {
+    ) external returns (bool fullClose) {
         _requireUnspentKnownRoot(ctx, inputs.nullifier, inputs.merkle_root);
 
         BetRecord storage rec = betRecords[inputs.nullifier_of_bet];
@@ -264,22 +274,25 @@ library VaultLogic {
         uint64 deltaSold = att.amountA - rec.sold_shares;
         rec.sold_shares = att.amountA;
         rec.sell_proceeds = att.amountB;
-        bool fullClose = att.amountA == rec.expected_shares;
+        fullClose = att.amountA == rec.expected_shares; // named return → caller releases the fee on full close
         rec.status = fullClose ? BetStatus.CLOSED_CREDITED : BetStatus.FILLED;
 
         emit BetSold(inputs.nullifier_of_bet, deltaSold, credit);
         emit PositionClosed(inputs.nullifier, inputs.nullifier_of_bet, inputs.new_commitment, fullClose);
     }
 
+    /// @return protocolEarned the protocol fee on the EXECUTED part (the caller adds it to the
+    /// claimable feeAccumulator). The unexecuted part is refunded to the user via the injected amount.
     function partialFillCredit(
         Ctx memory ctx,
         mapping(bytes32 => BetRecord) storage betRecords,
+        mapping(bytes32 => uint64) storage betProtocolFee,
         address verifier,
         bytes calldata proof,
         PartialFillPublicInputs calldata inputs,
         OperatorAttestation calldata att,
         bytes calldata sig
-    ) external {
+    ) external returns (uint64 protocolEarned) {
         _requireUnspentKnownRoot(ctx, inputs.nullifier, inputs.merkle_root);
 
         BetRecord storage rec = betRecords[inputs.nullifier_of_bet];
@@ -297,12 +310,24 @@ library VaultLogic {
         // on the committed expected_shares. spent_amount can never exceed bet_amount (the on-chain
         // debit and the order's budget cap), so `>` is the correct upper bound.
         if (spent_amount == 0 || spent_amount > rec.bet_amount) revert InvalidSpentAmount();
-        uint64 refund_amount = rec.bet_amount - spent_amount;
+        // FC-14: refund the unfilled stake PLUS the pro-rata protocol fee on the unexecuted portion
+        // (relay-gas fee kept), and report the protocol fee on the EXECUTED part as earned (caller
+        // adds it to claimable feeAccumulator). A fee-only short fill has unexecuted == 0 → refund 0,
+        // earned = full protocolFee. Computed from the recorded fee BEFORE normalization; the
+        // frontend/recovery mirror the refund floor math. A block scope keeps the legacy stack shallow.
+        uint64 refund_amount;
+        {
+            uint64 pf = betProtocolFee[inputs.nullifier_of_bet];
+            uint64 refundedPf = uint64((uint256(pf) * (rec.bet_amount - spent_amount)) / rec.bet_amount);
+            refund_amount = (rec.bet_amount - spent_amount) + refundedPf;
+            protocolEarned = pf - refundedPf;
+        }
 
         if (!VaultInputs.verifyPartialCredit(verifier, proof, inputs, refund_amount)) revert InvalidProof();
 
         _spendAndInsert(ctx, inputs.nullifier, inputs.new_commitment);
 
+        betProtocolFee[inputs.nullifier_of_bet] = 0; // resolved: refundable part returned, earned part released by caller
         rec.expected_shares = filled_shares;
         rec.bet_amount = spent_amount;
         rec.status = BetStatus.FILLED;

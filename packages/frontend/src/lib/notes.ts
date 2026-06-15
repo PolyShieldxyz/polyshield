@@ -5,10 +5,14 @@
  * Commitment = Poseidon4(secret, balance, nonce, owner_address)  — matches Noir's bn254::hash_4
  * Nullifier  = Poseidon2(secret, nonce)                         — matches Noir's bn254::hash_2
  *
- * Secrets are wallet-derived — never random, never stored in localStorage.
- * Derive with deriveSecret(signMessageAsync, address, index).
- * Notes are stored in localStorage under key "polyshield:notes".
- * NEVER send note preimages (secret, balance, nonce) to any server.
+ * Secrets are wallet-derived — never random, never persisted (no localStorage, no IndexedDB).
+ *  - V2 (FC-13, default): one master-seed signature per session → all secrets derived locally.
+ *    Use getNoteSecret()/getMasterSeed() in secretSession.ts; the pure primitives live here
+ *    (deriveMasterSeed / deriveSecretV2). The seed is held in memory only (secretSession.ts).
+ *  - V1 (legacy): one signature per deposit index via deriveSecret()/deriveSecretV1().
+ * The note CACHE (commitments/balances/nonces/linkage — NOT secrets) is persisted ENCRYPTED in
+ * IndexedDB via cacheStore.ts; the in-memory cache (cachedNotes/cachedActivity) is the synchronous
+ * working set, hydrated once on app start by hydrateCache(). NEVER send note preimages to a server.
  */
 
 import { poseidon2, poseidon4 } from 'poseidon-lite'
@@ -21,6 +25,7 @@ import {
   type PublicClient,
 } from 'viem'
 import { fetchSpentNullifiers, fetchBetStatus, BET_STATUS } from './api'
+import { readEncrypted, writeEncrypted, removeEncrypted } from './cacheStore'
 
 export type NoteKind = 'DEPOSIT' | 'BET_OUTPUT' | 'SETTLE_CREDIT' | 'CANCEL_CREDIT' | 'BET_RECEIPT'
 
@@ -40,7 +45,14 @@ export interface Note {
   leafIndex?: number
   txHash?: string
   marketId?: string
+  /** Human-readable market question (e.g. "Will USA win the 2026 FIFA World Cup?"), captured at
+   *  bet time for display. Recovered/legacy receipts may lack it → resolve from the catalog by
+   *  raw_condition_id. NOT a protocol field; display-only. */
+  marketName?: string
   side?: 'YES' | 'NO'
+  /** Human-readable outcome label the user bet on (e.g. a team name), for head-to-head markets where
+   *  "YES"/"NO" is meaningless. Display-only; `side` still drives outcome_side 0/1. */
+  sideLabel?: string
   expectedShares?: bigint
   /** Nullifier of the note spent at bet auth (Vault betRecords key). */
   nullifier_of_bet?: `0x${string}`
@@ -51,6 +63,14 @@ export interface Note {
   /** Raw unreduced conditionId (keccak256). Use this to recompute circuit_key with correct BN254_P. */
   raw_condition_id?: `0x${string}`
   bet_amount?: bigint
+  /** FC-14: protocol fee charged on this bet (on BET_RECEIPT notes) — drives the cancel/partial refund. */
+  protocolFee?: bigint
+  /**
+   * FC-13: which secret-derivation scheme produced this lineage's secret.
+   *  2 = V2 master-seed (new deposits); 1 = legacy per-index. Undefined → treated as V1
+   *  (pre-FC-13 cached notes). A whole deposit lineage shares one version; children inherit it.
+   */
+  derivationVersion?: 1 | 2
 }
 
 export interface ReadyToSettleBet {
@@ -67,6 +87,9 @@ export interface WalletActivityEvent {
   createdAt: number
   txHash?: string
   marketId?: `0x${string}`
+  /** Human-readable market question, captured at bet time (#5). Threaded into closed-bet history rows
+   *  for display; falls back to a catalog lookup by conditionId, then the raw id. */
+  marketName?: string
   side?: 'YES' | 'NO'
   receiptId?: string
   receiptNullifier?: `0x${string}`
@@ -81,47 +104,144 @@ const ACTIVITY_STORAGE_KEY = 'polyshield:activity'
 const LAST_BLOCK_KEY = 'polyshield:last_block'
 const CHAIN_FP_KEY = 'polyshield:chain_fp'
 
+// In-memory working set — the SYNCHRONOUS source of truth for all reads. Populated once on app
+// start by hydrateCache() (async, from encrypted IndexedDB) and updated synchronously on every
+// write (which also fire-and-forget persists to IndexedDB). null = not yet hydrated.
 let cachedNotes: Note[] | null = null
 let cachedActivity: WalletActivityEvent[] | null = null
+let hydrated = false
 
 export const BN254_P = 0x30644e72e131a029b85045b68181585d2833e84879b9709143e1f593f0000001n
 
-/** Protocol constant — do not change after mainnet deployment. */
+/**
+ * V1 (legacy) per-index derivation message. Protocol constant — frozen; never change for
+ * already-deposited V1 notes. New deposits use the V2 master seed (see masterSeedMessageV2).
+ */
 export function derivationMessage(address: string, index: number): string {
   return `PolyShield deposit derivation\nAddress: ${address}\nIndex: ${index}\nVersion: 1`
 }
 
-function loadAll(): Note[] {
-  if (typeof window === 'undefined') return []
-  if (cachedNotes) return cachedNotes
-  try {
-    const raw = localStorage.getItem(STORAGE_KEY)
-    if (!raw) return []
-    const arr = JSON.parse(raw) as Array<Record<string, unknown>>
-    cachedNotes = arr.map((n) => ({
+/**
+ * V2 (FC-13) master-seed message. Signed ONCE per session; the resulting seed derives every note
+ * secret locally (deriveSecretV2). Protocol constant — frozen after mainnet; never change it.
+ */
+export function masterSeedMessageV2(address: string): string {
+  return `PolyShield master seed\nAddress: ${address}\nVersion: 2`
+}
+
+// ── Note-cache (de)serialization (shared by persistence + hydration) ──────────
+function serializeNotes(notes: Note[]): string {
+  return JSON.stringify(
+    notes.map((n) => ({
       ...n,
-      balance: BigInt(n.balance as string),
-      nonce: BigInt(n.nonce as string),
-      ...(n.expectedShares != null ? { expectedShares: BigInt(n.expectedShares as string) } : {}),
-      ...(n.bet_amount != null ? { bet_amount: BigInt(n.bet_amount as string) } : {}),
-    })) as Note[]
-    return cachedNotes
-  } catch {
-    return []
+      balance: n.balance.toString(),
+      nonce: n.nonce.toString(),
+      ...(n.expectedShares != null ? { expectedShares: n.expectedShares.toString() } : {}),
+      ...(n.bet_amount != null ? { bet_amount: n.bet_amount.toString() } : {}),
+      ...(n.protocolFee != null ? { protocolFee: n.protocolFee.toString() } : {}),
+    })),
+  )
+}
+
+function deserializeNotes(raw: string): Note[] {
+  const arr = JSON.parse(raw) as Array<Record<string, unknown>>
+  return arr.map((n) => ({
+    ...n,
+    balance: BigInt(n.balance as string),
+    nonce: BigInt(n.nonce as string),
+    ...(n.expectedShares != null ? { expectedShares: BigInt(n.expectedShares as string) } : {}),
+    ...(n.bet_amount != null ? { bet_amount: BigInt(n.bet_amount as string) } : {}),
+    ...(n.protocolFee != null ? { protocolFee: BigInt(n.protocolFee as string) } : {}),
+  })) as Note[]
+}
+
+function serializeActivity(events: WalletActivityEvent[]): string {
+  return JSON.stringify(
+    events.map((event) => ({
+      ...event,
+      amount: event.amount.toString(),
+      ...(event.payout != null ? { payout: event.payout.toString() } : {}),
+    })),
+  )
+}
+
+function deserializeActivity(raw: string): WalletActivityEvent[] {
+  const arr = JSON.parse(raw) as Array<Record<string, unknown>>
+  return arr.map((event) => ({
+    ...event,
+    amount: BigInt(event.amount as string),
+    ...(event.payout != null ? { payout: BigInt(event.payout as string) } : {}),
+  })) as WalletActivityEvent[]
+}
+
+/**
+ * FC-13: one-time import of any legacy PLAINTEXT localStorage cache into encrypted IndexedDB,
+ * then delete the plaintext copies. Existing users keep their notes/activity with no recovery,
+ * and nothing sensitive is left readable in localStorage afterward.
+ */
+async function migrateLegacyLocalStorage(): Promise<void> {
+  if (typeof window === 'undefined' || typeof localStorage === 'undefined') return
+  // Persist each legacy plaintext key into the encrypted store, then drop the plaintext ONLY after
+  // verifying the encrypted copy reads back. If IndexedDB is unavailable (e.g. private mode) or the
+  // write fails, the plaintext is left intact rather than destroyed — never lose the cache here
+  // (and funds are chain-recoverable regardless).
+  const migrateKey = async (key: string) => {
+    try {
+      const legacy = localStorage.getItem(key)
+      if (legacy == null) return
+      if ((await readEncrypted(key)) == null) await writeEncrypted(key, legacy)
+      if ((await readEncrypted(key)) != null) localStorage.removeItem(key)
+    } catch {
+      /* best-effort; keep the plaintext on any failure */
+    }
   }
+  await migrateKey(STORAGE_KEY)
+  await migrateKey(ACTIVITY_STORAGE_KEY)
+}
+
+/**
+ * FC-13: populate the in-memory caches from encrypted IndexedDB. Idempotent — skips if already
+ * populated in memory (so it never clobbers unflushed writes). Call once on app start (and after a
+ * clearNoteCache) BEFORE rendering note-reading UI; see useNotesHydration / app/app/layout.tsx.
+ */
+export async function hydrateCache(): Promise<void> {
+  if (typeof window === 'undefined') return
+  if (cachedNotes !== null) {
+    hydrated = true
+    return
+  }
+  await migrateLegacyLocalStorage()
+  try {
+    const notesRaw = await readEncrypted(STORAGE_KEY)
+    cachedNotes = notesRaw ? deserializeNotes(notesRaw) : []
+  } catch {
+    cachedNotes = []
+  }
+  try {
+    const actRaw = await readEncrypted(ACTIVITY_STORAGE_KEY)
+    cachedActivity = actRaw ? deserializeActivity(actRaw) : []
+  } catch {
+    cachedActivity = []
+  }
+  hydrated = true
+}
+
+/** True once the encrypted cache has been read into memory (or there was nothing to read). */
+export function isHydrated(): boolean {
+  return hydrated || cachedNotes !== null
+}
+
+function loadAll(): Note[] {
+  // Reads are synchronous against the in-memory working set. Before hydration completes this
+  // returns [] (the app gates note-reading UI on hydration); writes set the cache synchronously.
+  return cachedNotes ?? []
 }
 
 function saveAll(notes: Note[]): void {
   if (typeof window === 'undefined') return
   cachedNotes = notes
-  const serialized = notes.map((n) => ({
-    ...n,
-    balance: n.balance.toString(),
-    nonce: n.nonce.toString(),
-    ...(n.expectedShares != null ? { expectedShares: n.expectedShares.toString() } : {}),
-    ...(n.bet_amount != null ? { bet_amount: n.bet_amount.toString() } : {}),
-  }))
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(serialized))
+  hydrated = true
+  void writeEncrypted(STORAGE_KEY, serializeNotes(notes))
 }
 
 function sameAddress(a: string | undefined, b: string | undefined): boolean {
@@ -130,32 +250,14 @@ function sameAddress(a: string | undefined, b: string | undefined): boolean {
 }
 
 function loadActivity(): WalletActivityEvent[] {
-  if (typeof window === 'undefined') return []
-  if (cachedActivity) return cachedActivity
-  try {
-    const raw = localStorage.getItem(ACTIVITY_STORAGE_KEY)
-    if (!raw) return []
-    const arr = JSON.parse(raw) as Array<Record<string, unknown>>
-    cachedActivity = arr.map((event) => ({
-      ...event,
-      amount: BigInt(event.amount as string),
-      ...(event.payout != null ? { payout: BigInt(event.payout as string) } : {}),
-    })) as WalletActivityEvent[]
-    return cachedActivity
-  } catch {
-    return []
-  }
+  return cachedActivity ?? []
 }
 
 function saveActivity(events: WalletActivityEvent[]): void {
   if (typeof window === 'undefined') return
   cachedActivity = events
-  const serialized = events.map((event) => ({
-    ...event,
-    amount: event.amount.toString(),
-    ...(event.payout != null ? { payout: event.payout.toString() } : {}),
-  }))
-  localStorage.setItem(ACTIVITY_STORAGE_KEY, JSON.stringify(serialized))
+  hydrated = true
+  void writeEncrypted(ACTIVITY_STORAGE_KEY, serializeActivity(events))
 }
 
 export function getNotes(): Note[] {
@@ -258,6 +360,7 @@ export function getOpenBetReceipts(wallet: `0x${string}`): Note[] {
 export function clearNoteCache(): void {
   cachedNotes = null
   cachedActivity = null
+  hydrated = false
 }
 
 export function getWalletActivity(wallet: `0x${string}`): WalletActivityEvent[] {
@@ -280,6 +383,10 @@ function bigIntToField(n: bigint): string {
   return `0x${n.toString(16).padStart(64, '0')}`
 }
 
+/**
+ * V1 (legacy) per-index secret. Signs once per index. Used for pre-FC-13 notes
+ * (derivationVersion 1) and as the recovery fallback for legacy deposits.
+ */
 export async function deriveSecret(
   signMessageAsync: (args: { message: string }) => Promise<`0x${string}`>,
   address: `0x${string}`,
@@ -288,6 +395,32 @@ export async function deriveSecret(
   const message = derivationMessage(address, index)
   const sig = await signMessageAsync({ message })
   const hash = keccak256(toBytes(sig))
+  const val = BigInt(hash) % BN254_P
+  return bigIntToField(val === 0n ? 1n : val) as `0x${string}`
+}
+
+/** Alias for clarity at call sites that explicitly mean the V1 scheme. */
+export const deriveSecretV1 = deriveSecret
+
+/**
+ * V2 (FC-13) master seed. ONE wallet signature; secretSession.ts caches the result for the
+ * session, then derives every note secret from it locally via deriveSecretV2 (no further prompts).
+ */
+export async function deriveMasterSeed(
+  signMessageAsync: (args: { message: string }) => Promise<`0x${string}`>,
+  address: `0x${string}`,
+): Promise<`0x${string}`> {
+  const sig = await signMessageAsync({ message: masterSeedMessageV2(address) })
+  return keccak256(toBytes(sig))
+}
+
+/**
+ * Derive a note's V2 secret from the master seed + deposit index, entirely locally (no signature):
+ * secret_i = keccak256(masterSeed ‖ uint32(index)) mod p. Distinct per index, deterministic.
+ */
+export function deriveSecretV2(masterSeed: `0x${string}`, index: number): `0x${string}` {
+  const idxHex = (index >>> 0).toString(16).padStart(8, '0')
+  const hash = keccak256(`0x${masterSeed.slice(2)}${idxHex}` as `0x${string}`)
   const val = BigInt(hash) % BN254_P
   return bigIntToField(val === 0n ? 1n : val) as `0x${string}`
 }
@@ -383,7 +516,9 @@ const depositedEvent = parseAbiItem(
   'event Deposited(address indexed depositor, bytes32 commitment, uint256 amount)',
 )
 const betAuthorizedEvent = parseAbiItem(
-  'event BetAuthorized(bytes32 indexed nullifier, bytes32 market_id, bytes32 position_id, uint64 expected_shares, uint256 bet_amount, uint64 price, uint8 outcome_side, bytes32 new_commitment)',
+  // FC-14: protocolFee + relayFee recorded on-chain so recovery reconstructs the exact post-bet
+  // balance regardless of governance rate changes (older bets lack these → legacy fallback below).
+  'event BetAuthorized(bytes32 indexed nullifier, bytes32 market_id, bytes32 position_id, uint64 expected_shares, uint256 bet_amount, uint64 price, uint8 outcome_side, bytes32 new_commitment, uint64 protocolFee, uint64 relayFee)',
 )
 const settlementCreditedEvent = parseAbiItem(
   'event SettlementCredited(bytes32 indexed nullifier, bytes32 nullifier_of_bet, bytes32 new_commitment)',
@@ -473,19 +608,24 @@ export async function recoverNotes(
   vaultAddress: `0x${string}`,
   rpcUrl = process.env.NEXT_PUBLIC_CHAIN_RPC ?? 'http://127.0.0.1:8545',
   gapLimit = 5,
+  onProgress?: (done: number, total: number) => void,
+  getMasterSeed?: (
+    sign: (args: { message: string }) => Promise<`0x${string}`>,
+    address: `0x${string}`,
+  ) => Promise<`0x${string}`>,
 ): Promise<Note[]> {
   const client = createPublicClient({ transport: http(rpcUrl) })
   // Start the log scan at the vault's deploy block, not genesis. A public Polygon RPC
   // (e.g. publicnode) rejects a fromBlock:0→latest getLogs over ~88M blocks ("could not
   // coalesce error"), which made recovery throw and the portfolio render empty.
   const fromBlock = BigInt(process.env.NEXT_PUBLIC_VAULT_DEPLOY_BLOCK ?? '0')
-  return recoverNotesWithClient(address, signMessageAsync, client, vaultAddress, gapLimit, 1000, fromBlock)
+  return recoverNotesWithClient(address, signMessageAsync, client, vaultAddress, gapLimit, 1000, fromBlock, onProgress, getMasterSeed)
 }
 
 // Fields that arrive from /recovery-data as decimal strings and must be bigints for the replay.
 const RECOVERY_BIGINT_FIELDS: Record<string, string[]> = {
   Deposited: ['amount'],
-  BetAuthorized: ['expected_shares', 'bet_amount', 'price'],
+  BetAuthorized: ['expected_shares', 'bet_amount', 'price', 'protocolFee', 'relayFee'],
   Withdrawn: ['amount'],
   BetSold: ['sold_shares', 'proceeds'],
 }
@@ -516,6 +656,11 @@ export async function recoverNotesViaBackend(
   rpcUrl = process.env.NEXT_PUBLIC_CHAIN_RPC ?? 'http://127.0.0.1:8545',
   recoveryBase = '/api/recovery-data',
   gapLimit = 5,
+  onProgress?: (done: number, total: number) => void,
+  getMasterSeed?: (
+    sign: (args: { message: string }) => Promise<`0x${string}`>,
+    address: `0x${string}`,
+  ) => Promise<`0x${string}`>,
 ): Promise<Note[]> {
   const res = await fetch(`${recoveryBase}/${address}`, { cache: 'no-store' })
   if (!res.ok) throw new Error(`recovery-data HTTP ${res.status}`)
@@ -543,7 +688,7 @@ export async function recoverNotesViaBackend(
   } as unknown as PublicClient
 
   const fromBlock = BigInt(process.env.NEXT_PUBLIC_VAULT_DEPLOY_BLOCK ?? '0')
-  return recoverNotesWithClient(address, signMessageAsync, shim, vaultAddress, gapLimit, 1000, fromBlock)
+  return recoverNotesWithClient(address, signMessageAsync, shim, vaultAddress, gapLimit, 1000, fromBlock, onProgress, getMasterSeed)
 }
 
 export async function recoverNotesWithClient(
@@ -556,6 +701,14 @@ export async function recoverNotesWithClient(
   gapLimit = 5,
   hardCap = 1000,
   fromBlock: bigint = 0n,
+  // FC-13: determinate progress callback (done, total) for the recovery UI.
+  onProgress?: (done: number, total: number) => void,
+  // FC-13: resolve the V2 master seed, reusing a seed already unlocked this session (so recovery
+  // adds ZERO signatures when the user is already unlocked). Omitted → recovery derives it itself.
+  getMasterSeed?: (
+    sign: (args: { message: string }) => Promise<`0x${string}`>,
+    address: `0x${string}`,
+  ) => Promise<`0x${string}`>,
 ): Promise<Note[]> {
   // Public Polygon RPCs (e.g. publicnode) cap eth_getLogs at 10000 blocks, so page each scan
   // in <=9000-block windows (auto-halving on any range/result-limit error). A single
@@ -648,6 +801,7 @@ export async function recoverNotesWithClient(
     deposit: (typeof deposits)[number],
     mode: 'discover' | 'final',
     out: ReplayOut,
+    version: 1 | 2,
   ): Promise<void> => {
     const { recovered, activity, soldByBet } = out
     const receiptByBetNullifier = new Map<string, Note>()
@@ -687,6 +841,7 @@ export async function recoverNotesWithClient(
         spent: s.spent,
         createdAt: s.createdAt,
         txHash,
+        derivationVersion: version,
       })
     }
 
@@ -718,17 +873,25 @@ export async function recoverNotesWithClient(
         const betAmount = ev.args.bet_amount!
         const newNonce = state.nonce + 1n
         const newCommitment = ev.args.new_commitment! as `0x${string}`
-        // FEE: post-bet balance = current - bet_amount - fee. Verify against the on-chain
-        // commitment so bets placed before the fee was enabled (fee not applied) still recover:
-        // if the fee-adjusted balance does not reproduce the committed note, drop the fee.
-        const fee = (betAmount * betFeeBps) / 10_000n + relayGasFeeUSDC
-        let newBalance = state.balance - betAmount - fee
-        if (
-          fee > 0n &&
-          computeCommitment(secret, newBalance, newNonce, address).toLowerCase() !==
-            newCommitment.toLowerCase()
-        ) {
-          newBalance = state.balance - betAmount
+        // FC-14: the exact fee split is in the event → reconstruct the post-bet balance exactly
+        // (no governance-rate-change corruption). Legacy bets predating FC-14 lack these fields
+        // (undefined) → fall back to recompute-from-current-config + a commitment-trial that drops
+        // the fee for pre-fee bets.
+        const eventProtocolFee = ev.args.protocolFee as bigint | undefined
+        const eventRelayFee = ev.args.relayFee as bigint | undefined
+        let newBalance: bigint
+        if (eventProtocolFee != null) {
+          newBalance = state.balance - betAmount - eventProtocolFee - (eventRelayFee ?? 0n)
+        } else {
+          const fee = (betAmount * betFeeBps) / 10_000n + relayGasFeeUSDC
+          newBalance = state.balance - betAmount - fee
+          if (
+            fee > 0n &&
+            computeCommitment(secret, newBalance, newNonce, address).toLowerCase() !==
+              newCommitment.toLowerCase()
+          ) {
+            newBalance = state.balance - betAmount
+          }
         }
 
         state.spent = true
@@ -753,6 +916,8 @@ export async function recoverNotesWithClient(
           spent: false,
           createdAt: evTs,
           txHash: ev.tx,
+          derivationVersion: version,
+          protocolFee: eventProtocolFee, // FC-14: original protocol fee, for cancel/partial refund replay
         }
         recovered.push(receipt)
         receiptByBetNullifier.set(betNull.toLowerCase(), receipt)
@@ -808,7 +973,10 @@ export async function recoverNotesWithClient(
             newBalance = inferBalanceFromCommitment(secret, newNonce, address, newCommitment) ?? oldBalance
           }
         } else if (receipt?.bet_amount) {
-          newBalance = oldBalance + receipt.bet_amount
+          // FC-14: a full bet cancellation refunds the protocol fee in addition to the stake;
+          // an N/A (void) cancellation keeps the fee (the bet executed). Mirrors the contract.
+          const protocolRefund = ev.type === 'betCancel' ? (receipt.protocolFee ?? 0n) : 0n
+          newBalance = oldBalance + receipt.bet_amount + protocolRefund
         } else {
           newBalance = inferBalanceFromCommitment(secret, newNonce, address, newCommitment) ?? oldBalance
         }
@@ -883,7 +1051,15 @@ export async function recoverNotesWithClient(
 
         const newNonce = state.nonce + 1n
         const newCommitment = ev.args.new_commitment! as `0x${string}`
-        let refund = normSpent != null && committed > normSpent ? committed - normSpent : 0n
+        // FC-14: refund = unfilled stake + pro-rata protocol fee on the unexecuted portion
+        // (relay fee kept). Mirrors the contract's floor math using the ORIGINAL committed amount
+        // and the original protocol fee (both captured before the receipt is normalized below).
+        let refund = 0n
+        if (normSpent != null && committed > normSpent) {
+          const unexec = committed - normSpent
+          const protocolRefund = committed > 0n ? ((receipt?.protocolFee ?? 0n) * unexec) / committed : 0n
+          refund = unexec + protocolRefund
+        }
         let newBalance = oldBalance + refund
         if (normSpent == null) {
           // betRecords unreadable — back the refund out of the on-chain commitment if possible.
@@ -900,18 +1076,22 @@ export async function recoverNotesWithClient(
           if (normSpent != null) receipt.bet_amount = normSpent
         }
 
-        activity.push({
-          id: `partial-${ev.tx}-${betNull}`,
-          wallet: address,
-          kind: 'refund',
-          amount: refund,
-          createdAt: evTs,
-          txHash: ev.tx,
-          marketId: receipt?.marketId as `0x${string}` | undefined,
-          receiptId: receipt?.id,
-          receiptNullifier: betNull as `0x${string}`,
-          payout: refund,
-        })
+        // FC-14: only a genuine partial (real unfilled remainder) is a capital return worth showing;
+        // a fee-only short fill refunds 0 and must not clutter the feed (matches finalizePartialFill).
+        if (refund > 0n) {
+          activity.push({
+            id: `partial-${ev.tx}-${betNull}`,
+            wallet: address,
+            kind: 'refund',
+            amount: refund,
+            createdAt: evTs,
+            txHash: ev.tx,
+            marketId: receipt?.marketId as `0x${string}` | undefined,
+            receiptId: receipt?.id,
+            receiptNullifier: betNull as `0x${string}`,
+            payout: refund,
+          })
+        }
 
         state = {
           secret,
@@ -1060,22 +1240,66 @@ export async function recoverNotesWithClient(
     }
   }
 
-  // Gap-scan to find this wallet's deposit indices. Secrets are derived once and cached
-  // so the two replay passes prompt the wallet only on the first pass.
+  // FC-13: map each on-chain Deposited commitment to its deposit index + secret.
+  //  - V2 pass: derive the master seed ONCE (reusing the session seed when available), then derive
+  //    each index's secret locally for free — so an all-V2 wallet recovers with ONE signature.
+  //  - V1 fallback: only for commitments V2 can't match (legacy pre-FC-13 deposits); signs per
+  //    scanned index. For an all-V2 wallet this loop never runs.
+  // `deposits` is already filtered to THIS wallet, so deposits.length is the exact target count.
   const depositByIndex = new Map<number, (typeof deposits)[number]>()
   const secretByIndex = new Map<number, `0x${string}`>()
-  let consecutiveEmpty = 0
-  for (let index = 0; index < hardCap && consecutiveEmpty < gapLimit; index++) {
-    const secret = await deriveSecret(signMessageAsync, address, index)
-    secretByIndex.set(index, secret)
-    const deposit = deposits.find((d) => {
-      const amt = d.args.amount!
-      const c = computeCommitment(secret, amt, 0n, address)
-      return c.toLowerCase() === d.args.commitment!.toLowerCase()
-    })
-    if (!deposit) { consecutiveEmpty++; continue }
-    consecutiveEmpty = 0
-    depositByIndex.set(index, deposit)
+  const versionByIndex = new Map<number, 1 | 2>()
+  const matched = new Set<string>()
+  const total = deposits.length
+  const report = () => onProgress?.(matched.size, total)
+  const findDeposit = (secret: `0x${string}`) =>
+    deposits.find(
+      (d) =>
+        !matched.has(d.args.commitment!.toLowerCase()) &&
+        computeCommitment(secret, d.args.amount!, 0n, address).toLowerCase() ===
+          d.args.commitment!.toLowerCase(),
+    )
+
+  report()
+  // V2 pass — free after the single seed signature.
+  let seed: `0x${string}` | null = null
+  try {
+    seed = getMasterSeed
+      ? await getMasterSeed(signMessageAsync, address)
+      : await deriveMasterSeed(signMessageAsync, address)
+  } catch {
+    seed = null // user rejected the seed signature → rely on the V1 fallback below
+  }
+  if (seed) {
+    let consecutiveEmpty = 0
+    for (let index = 0; index < hardCap && matched.size < total && consecutiveEmpty < gapLimit; index++) {
+      const secret = deriveSecretV2(seed, index)
+      const deposit = findDeposit(secret)
+      if (!deposit) { consecutiveEmpty++; continue }
+      consecutiveEmpty = 0
+      depositByIndex.set(index, deposit)
+      secretByIndex.set(index, secret)
+      versionByIndex.set(index, 2)
+      matched.add(deposit.args.commitment!.toLowerCase())
+      report()
+    }
+  }
+
+  // V1 fallback — legacy deposits only (signs per scanned index).
+  if (matched.size < total) {
+    let consecutiveEmpty = 0
+    for (let index = 0; index < hardCap && matched.size < total && consecutiveEmpty < gapLimit; index++) {
+      if (depositByIndex.has(index)) continue // already claimed by the V2 pass
+      const secret = await deriveSecret(signMessageAsync, address, index)
+      const deposit = findDeposit(secret)
+      if (!deposit) { consecutiveEmpty++; continue }
+      consecutiveEmpty = 0
+      depositByIndex.set(index, deposit)
+      secretByIndex.set(index, secret)
+      versionByIndex.set(index, 1)
+      matched.add(deposit.args.commitment!.toLowerCase())
+      report()
+    }
   }
   const indices = [...depositByIndex.keys()].sort((a, b) => a - b)
 
@@ -1088,6 +1312,7 @@ export async function recoverNotesWithClient(
     await replayLineage(
       index, secretByIndex.get(index)!, depositByIndex.get(index)!, 'discover',
       { recovered: discardR, activity: discardA, soldByBet: discardSold },
+      versionByIndex.get(index)!,
     )
   }
 
@@ -1100,6 +1325,7 @@ export async function recoverNotesWithClient(
     await replayLineage(
       index, secretByIndex.get(index)!, depositByIndex.get(index)!, 'final',
       { recovered, activity, soldByBet: finalSold },
+      versionByIndex.get(index)!,
     )
   }
 
@@ -1356,9 +1582,14 @@ export function setChainFingerprint(fp: string): void {
  */
 export function resetAllLocalState(): void {
   if (typeof window === 'undefined') return
-  // Clear notes and activity
+  // Clear the in-memory caches and force a fresh hydrate next time.
   cachedNotes = null
   cachedActivity = null
+  hydrated = false
+  // FC-13: wipe the ENCRYPTED note/activity store in IndexedDB (best-effort; keeps the crypto key
+  // so a subsequent fresh deposit re-encrypts under it). Legacy plaintext copies, if any, too.
+  void removeEncrypted(STORAGE_KEY)
+  void removeEncrypted(ACTIVITY_STORAGE_KEY)
   localStorage.removeItem(STORAGE_KEY)
   localStorage.removeItem(ACTIVITY_STORAGE_KEY)
   localStorage.removeItem(LAST_BLOCK_KEY)
@@ -1369,4 +1600,29 @@ export function resetAllLocalState(): void {
     if (key?.startsWith(INDEX_KEY_PREFIX)) toRemove.push(key)
   }
   toRemove.forEach((k) => localStorage.removeItem(k))
+}
+
+/**
+ * Clear the WALLET CONNECTOR's persisted state (wagmi + WalletConnect/ConnectKit), separate from our
+ * own note cache. On a hard refresh wagmi restores the last connector from this storage; if that
+ * connector is broken (e.g. a WalletConnect session with an invalid project id), the restore hangs in
+ * a half-connected state — the connect gate persists and "Disconnect" just reopens the connect modal.
+ * Wiping it forces a clean slate so the next connect starts fresh. Caller should reload afterwards.
+ */
+export function resetWalletConnectorStorage(): void {
+  if (typeof window === 'undefined') return
+  const kill = (k: string) =>
+    k.startsWith('wagmi') ||
+    k.startsWith('wc@2') ||
+    k.startsWith('@w3m') ||
+    k.startsWith('@appkit') ||
+    k.startsWith('-walletlink') ||
+    k.toLowerCase().includes('walletconnect')
+  const toRemove: string[] = []
+  for (let i = 0; i < localStorage.length; i++) {
+    const key = localStorage.key(i)
+    if (key && kill(key)) toRemove.push(key)
+  }
+  toRemove.forEach((k) => localStorage.removeItem(k))
+  try { indexedDB.deleteDatabase('WALLET_CONNECT_V2_INDEXED_DB') } catch { /* best-effort */ }
 }

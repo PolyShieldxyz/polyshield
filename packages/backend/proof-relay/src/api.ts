@@ -15,6 +15,16 @@ import {
   relayConsolidate,
 } from "./relayer";
 import { computeMerkleProof } from "./merkle";
+import {
+  queryCatalog,
+  getMarketByCondition,
+  ingestByConditionId,
+  resolveMarketName,
+  searchMarkets,
+  fetchMidpoints,
+} from "./marketCatalog";
+import { recordEvents } from "./analytics";
+import { recordConsent, hasConsent, ConsentError, CONSENT_VERSION } from "./betaConsent";
 
 // Source IP is NEVER logged — see pino redact config in index.ts
 const logger = pino({ name: "proof-relay-api" });
@@ -531,6 +541,132 @@ export function createApp(): express.Application {
     }
     const limit = Math.min(Math.max(parseInt(String(req.query.limit ?? "1000"), 10) || 1000, 1), 5000);
     res.json({ events: _eventIndex.allEvents(limit) });
+  });
+
+  // ── FC-15: market catalog (public, anonymous data) ──────────────────────────
+  // Light rate-limit on the Gamma-touching/search surface so it can't be abused into upstream load.
+  const marketsLimiter = rateLimit({ windowMs: 60_000, max: 120, standardHeaders: true, legacyHeaders: false });
+
+  // Browse: paginated/sorted/filtered read from the local catalog (no Gamma call).
+  app.get("/markets", marketsLimiter, (req, res) => {
+    const { markets, total } = queryCatalog({
+      offset: parseInt(String(req.query.offset ?? "0"), 10) || 0,
+      limit: parseInt(String(req.query.limit ?? "60"), 10) || 60,
+      sort: req.query.sort ? String(req.query.sort) : undefined,
+      category: req.query.category ? String(req.query.category) : undefined,
+      q: req.query.q ? String(req.query.q) : undefined,
+    });
+    res.json({ markets, total });
+  });
+
+  // Name-only resolution for a conditionId, INCLUDING closed/ended markets (filtered out of the
+  // bettable catalog). Lets the portfolio label historical/settled/expired bets instead of showing a
+  // hex id. Separate from /markets/:conditionId (which is bettable-only + fetches the order book).
+  app.get("/market-name/:conditionId", marketsLimiter, async (req, res) => {
+    const cid = String(req.params.conditionId);
+    if (!/^0x[0-9a-fA-F]{64}$/.test(cid)) {
+      res.status(400).json({ error: "conditionId must be a 0x-prefixed 32-byte hex" });
+      return;
+    }
+    const name = await resolveMarketName(cid);
+    if (!name) {
+      res.status(404).json({ error: "name not found" });
+      return;
+    }
+    res.json({ name });
+  });
+
+  // Live search: local catalog first, then Gamma public-search (upserts long-tail). Registered
+  // BEFORE /markets/:conditionId so the literal path wins.
+  app.get("/markets/search", marketsLimiter, async (req, res) => {
+    const q = String(req.query.q ?? "").trim();
+    if (q.length < 2) {
+      res.json({ markets: [], wentLive: false });
+      return;
+    }
+    const limit = Math.min(Math.max(parseInt(String(req.query.limit ?? "50"), 10) || 50, 1), 100);
+    try {
+      res.json(await searchMarkets(q, limit));
+    } catch (err) {
+      logger.warn({ err: String(err) }, "market search failed");
+      res.json({ markets: [], wentLive: false });
+    }
+  });
+
+  // Odds overlay: batch CLOB midpoints for the visible markets' token ids.
+  app.get("/markets/prices", marketsLimiter, async (req, res) => {
+    const ids = String(req.query.ids ?? "").split(",").map((s) => s.trim()).filter(Boolean).slice(0, 100);
+    if (ids.length === 0) {
+      res.json({ prices: {} });
+      return;
+    }
+    try {
+      res.json({ prices: await fetchMidpoints(ids) });
+    } catch (err) {
+      logger.warn({ err: String(err) }, "midpoint fetch failed");
+      res.json({ prices: {} });
+    }
+  });
+
+  // Single market by conditionId — catalog hit, else ingest-on-miss from Gamma. Registered LAST.
+  app.get("/markets/:conditionId", marketsLimiter, async (req, res) => {
+    const cid = String(req.params.conditionId);
+    if (!/^0x[0-9a-fA-F]{64}$/.test(cid)) {
+      res.status(400).json({ error: "conditionId must be a 0x-prefixed 32-byte hex" });
+      return;
+    }
+    let market = getMarketByCondition(cid);
+    if (!market) {
+      try {
+        market = await ingestByConditionId(cid);
+      } catch { /* fall through to 404 */ }
+    }
+    if (!market) {
+      res.status(404).json({ error: "market not found" });
+      return;
+    }
+    res.json({ market });
+  });
+
+  // FC-15: anonymous aggregate analytics — counters only, NO wallet/IP/id (see analytics.ts).
+  app.post("/analytics", rateLimit({ windowMs: 60_000, max: 120, standardHeaders: true, legacyHeaders: false }), (req, res) => {
+    const body = req.body as { events?: Array<{ scope?: unknown; key?: unknown }> };
+    const events = Array.isArray(body?.events)
+      ? body.events
+          .map((e) => ({ scope: String(e?.scope ?? ""), key: String(e?.key ?? "") }))
+          .filter((e) => e.scope && e.key)
+      : [];
+    const recorded = events.length > 0 ? recordEvents(events) : 0;
+    res.json({ ok: true, recorded });
+  });
+
+  // Beta terms acknowledgement (see betaConsent.ts). Records a signed disclaimer per wallet at
+  // connect time. Rate-limited; the address it stores is no more sensitive than a public deposit.
+  const consentLimiter = rateLimit({ windowMs: 60_000, max: 30, standardHeaders: true, legacyHeaders: false });
+
+  app.get("/beta-consent/:address", consentLimiter, (req, res) => {
+    res.json({ consented: hasConsent(req.params.address), version: CONSENT_VERSION });
+  });
+
+  app.post("/beta-consent", consentLimiter, (req, res) => {
+    const body = req.body as { address?: unknown; signature?: unknown };
+    const address = String(body?.address ?? "");
+    const signature = String(body?.signature ?? "");
+    if (!address || !signature) {
+      res.status(400).json({ error: "address and signature required" });
+      return;
+    }
+    try {
+      const { address: addr } = recordConsent(address, signature, Date.now());
+      logger.info({ event: "beta-consent:recorded", version: CONSENT_VERSION }, "beta consent recorded");
+      res.json({ ok: true, address: addr, version: CONSENT_VERSION });
+    } catch (err) {
+      if (err instanceof ConsentError) {
+        res.status(400).json({ error: err.message });
+        return;
+      }
+      res.status(500).json({ error: "could not record consent" });
+    }
   });
 
   return app;

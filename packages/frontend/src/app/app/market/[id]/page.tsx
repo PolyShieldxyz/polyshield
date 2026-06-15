@@ -1,7 +1,7 @@
 'use client'
 
 import Link from 'next/link'
-import { Suspense, useEffect, useState } from 'react'
+import { Suspense, useEffect, useRef, useState } from 'react'
 import { useParams, useRouter, useSearchParams } from 'next/navigation'
 import { Icon, ICONS } from '@/components/ui/Icon'
 import { BetModal } from '@/components/app/BetModal'
@@ -175,16 +175,42 @@ function MarketDetailContent() {
     }
   }, [searchParams])
 
+  const [status, setStatus] = useState<'loading' | 'ok' | 'unavailable'>('loading')
+  const registeredRef = useRef(false)
+  const payloadRef = useRef<MarketPayload | null>(null)
+
   useEffect(() => {
     let cancelled = false
+    setStatus('loading')
+    registeredRef.current = false
     const load = async () => {
-      const res = await fetch(`/api/markets/${encodeURIComponent(id)}`, { cache: 'no-store' })
-      if (!res.ok) return
-      const data = await res.json() as MarketPayload
-      if (!cancelled) setPayload(data)
+      try {
+        const res = await fetch(`/api/markets/${encodeURIComponent(id)}`, { cache: 'no-store' })
+        if (!res.ok) {
+          if (!cancelled && !payloadRef.current) setStatus('unavailable')
+          return
+        }
+        const data = (await res.json()) as MarketPayload
+        if (cancelled) return
+        payloadRef.current = data
+        setPayload(data)
+        setStatus('ok')
+        // FC-15 (#5): ensure the signing layer can route this market before the user bets — register
+        // its real conditionId once on open (the signing layer fetches authoritative tokens itself).
+        if (!registeredRef.current && data.market?.conditionId) {
+          registeredRef.current = true
+          void fetch('/api/signing/register-market', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ conditionId: data.market.conditionId }),
+          }).catch(() => {})
+        }
+      } catch {
+        if (!cancelled && !payloadRef.current) setStatus('unavailable')
+      }
     }
     void load()
-    // Refresh order book, YES/NO percentage, volume etc. every 10s.
+    // Refresh order book, YES/NO percentage, volume etc. every 10s (route is force-dynamic now → real).
     const poll = window.setInterval(() => void load(), 10_000)
     return () => {
       cancelled = true
@@ -192,6 +218,8 @@ function MarketDetailContent() {
     }
   }, [id])
 
+  // Hook-safety fallback only — never rendered (the loading/unavailable guards below early-return
+  // before any fixture could show). The fixture is no longer a user-facing fallback (FC-15).
   const market = payload?.market ?? MARKETS.find((entry) => entry.id === id) ?? MARKETS[0]
   const book = payload?.book
   // Up/Down markets display "UP"/"DOWN"; everything else "YES"/"NO". The internal `side`
@@ -232,7 +260,9 @@ function MarketDetailContent() {
   // `price` — so the user's manual limit edits aren't clobbered every 10s when the polled
   // market price drifts. Reads the latest price at the moment the side flips.
   useEffect(() => {
-    setLimitCents(Math.max(1, Math.min(99, Math.round(price * 100))))
+    // Default to the current market price, kept to 2 decimals of a cent (Polymarket prices are
+    // fractional and can sit below 1¢ or above 99¢).
+    setLimitCents(Math.max(0.01, Math.min(99.99, Math.round(price * 10000) / 100)))
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [side])
 
@@ -241,6 +271,24 @@ function MarketDetailContent() {
     const next = new URLSearchParams(searchParams.toString())
     next.delete('modal')
     router.replace(next.toString() ? `/app/market/${id}?${next.toString()}` : `/app/market/${id}`)
+  }
+
+  // FC-15: honest states — no fixture market is ever shown. While the first load is in flight show a
+  // spinner; if the market can't be resolved, show an unavailable notice instead of a fake market.
+  if (!payload && status === 'loading') {
+    return (
+      <div style={{ padding: 48, textAlign: 'center' }}>
+        <div className="micro">LOADING MARKET…</div>
+      </div>
+    )
+  }
+  if (!payload && status === 'unavailable') {
+    return (
+      <div style={{ padding: 48, textAlign: 'center' }}>
+        <div className="body" style={{ marginBottom: 12 }}>This market is unavailable.</div>
+        <Link href="/app/markets" className="btn btn-sm btn-cyan" style={{ textDecoration: 'none' }}>← Back to markets</Link>
+      </div>
+    )
   }
 
   return (
@@ -464,10 +512,11 @@ function MarketDetailContent() {
                 </div>
                 {isLimit ? (
                   <div className="mt-3">
-                    <div className="micro">LIMIT PRICE (¢ / share, 1–99)</div>
+                    <div className="micro">LIMIT PRICE (¢ / share)</div>
                     <input
-                      type="number" min={1} max={99} value={limitCents}
-                      onChange={(e) => setLimitCents(Math.max(1, Math.min(99, Number(e.target.value) || 1)))}
+                      type="number" min={0.01} max={99.99} step={0.01} value={limitCents}
+                      onChange={(e) => setLimitCents(Number(e.target.value))}
+                      onBlur={(e) => setLimitCents(Math.max(0.01, Math.min(99.99, Number(e.target.value) || 0.01)))}
                       aria-label="Limit price in cents per share"
                       style={{ width: '100%', background: 'var(--bg-1)', border: '1px solid var(--line-strong)', borderRadius: 6, padding: '8px 12px', marginTop: 6, color: 'var(--text)', fontFamily: 'var(--mono)', fontSize: 14 }}
                     />

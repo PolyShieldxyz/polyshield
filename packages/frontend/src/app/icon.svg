@@ -1,0 +1,15 @@
+<svg width="32" height="32" viewBox="0 0 32 32" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="fav" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#3fd0e6"/>
+      <stop offset="1" stop-color="#9b6cf0"/>
+    </linearGradient>
+    <mask id="favm">
+      <path d="M16 4 L26.5 7.7 V15.8 C26.5 21.9 21.8 26.5 16 28.4 C10.2 26.5 5.5 21.9 5.5 15.8 V7.7 Z" fill="white"/>
+      <path d="M12.6 10 H17.2 C19.4 10 20.9 11.5 20.9 13.6 C20.9 15.7 19.4 17.2 17.2 17.2 H14.9 V21.8 H12.6 Z M14.9 12 V15.2 H17 C18 15.2 18.6 14.6 18.6 13.6 C18.6 12.6 18 12 17 12 Z" fill="black" fill-rule="evenodd"/>
+    </mask>
+  </defs>
+  <!-- Dark rounded tile so the V1 brand mark reads on light browser tabs; the "P" knockout shows the tile. -->
+  <rect width="32" height="32" rx="7" fill="#06080B"/>
+  <path d="M16 4 L26.5 7.7 V15.8 C26.5 21.9 21.8 26.5 16 28.4 C10.2 26.5 5.5 21.9 5.5 15.8 V7.7 Z" fill="url(#fav)" mask="url(#favm)"/>
+</svg>

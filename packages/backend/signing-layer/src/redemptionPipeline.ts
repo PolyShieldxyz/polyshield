@@ -67,7 +67,9 @@ const VAULT_ABI = [
   "function deployedToPolymarket() view returns (uint256)",
   "function acknowledgePolymarketReturn(uint256 amount) external",
   // M2: outcome_side now included in BetAuthorized event — avoids per-bet betRecords() RPC call.
-  "event BetAuthorized(bytes32 indexed nullifier, bytes32 market_id, bytes32 position_id, uint64 expected_shares, uint256 bet_amount, uint64 price, uint8 outcome_side, bytes32 new_commitment)",
+  // Must match the deployed Vault exactly (FC-14 appended protocolFee, relayFee) so the signature
+  // hash / decoding line up with the on-chain event.
+  "event BetAuthorized(bytes32 indexed nullifier, bytes32 market_id, bytes32 position_id, uint64 expected_shares, uint256 bet_amount, uint64 price, uint8 outcome_side, bytes32 new_commitment, uint64 protocolFee, uint64 relayFee)",
 ];
 
 const VAULT_ABI_RESOLVED = ["function marketResolvedAt(bytes32) view returns (uint64)"];

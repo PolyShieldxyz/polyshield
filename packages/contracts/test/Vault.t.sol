@@ -309,7 +309,9 @@ contract VaultTest is Test {
             100 * 1e6,
             50_000_000,
             0,           // outcome_side (matches _betAuthInputs)
-            COMMITMENT_2
+            COMMITMENT_2,
+            200_000,     // FC-14 protocolFee: 100e6 * 20bps / 10000 = $0.20
+            0            // FC-14 relayFee: relayGasFeeUSDC default 0
         );
         vault.authorizeBet(DUMMY_PROOF, inputs);
     }
@@ -414,6 +416,19 @@ contract VaultTest is Test {
         assertTrue(registry.isSpent(NULLIFIER_2));
         (,,,,,, BetStatus status,,,,) = vault.betRecords(NULLIFIER_1);
         assertEq(uint8(status), uint8(BetStatus.CREDITED));
+    }
+
+    // FC-14: settlement is terminal-executed → the bet's provisional protocol fee is RELEASED into
+    // the claimable feeAccumulator (and cleared from betProtocolFee).
+    function test_creditSettlement_releasesProtocolFee() public {
+        _setupFilledAndResolvedBet(); // $100 bet at 0.2% → protocolFee 200_000 (provisional)
+        assertEq(vault.feeAccumulator(), 0);
+        assertEq(vault.betProtocolFee(NULLIFIER_1), 200_000);
+        bytes32 root = _currentRoot();
+        (OperatorAttestation memory att, bytes memory sig) = _filledAtt();
+        vault.creditSettlement(DUMMY_PROOF, _settlementInputs(root), att, sig);
+        assertEq(vault.feeAccumulator(), 200_000);      // released as earned
+        assertEq(vault.betProtocolFee(NULLIFIER_1), 0); // cleared
     }
 
     function test_creditSettlement_revert_nullifierSpent() public {
@@ -730,6 +745,32 @@ contract VaultTest is Test {
         assertTrue(registry.isSpent(NULLIFIER_2));
         (,,,,,, BetStatus status,,,,) = vault.betRecords(NULLIFIER_1);
         assertEq(uint8(status), uint8(BetStatus.CANCELLED_CREDITED));
+    }
+
+    // FC-14: the protocol fee is PROVISIONAL at authorizeBet (held in betProtocolFee, NOT in the
+    // claimable feeAccumulator). A cancel refunds it to the user and clears it — feeAccumulator,
+    // which only holds claimable fees, is never touched (no underflow; SC-01 proper fix).
+    function test_betCancellationCredit_refundsProtocolFee() public {
+        _setupFailedBet(); // $100 bet → protocolFee = 100e6 * 20bps / 10000 = 200_000 (provisional)
+        assertEq(vault.feeAccumulator(), 0);             // relay fee only (0); protocol fee not yet claimable
+        assertEq(vault.betProtocolFee(NULLIFIER_1), 200_000);
+        bytes32 root = _currentRoot();
+        (OperatorAttestation memory att, bytes memory sig) = _failedAtt();
+        vault.betCancellationCredit(DUMMY_PROOF, _betCancelInputs(root), att, sig);
+        assertEq(vault.feeAccumulator(), 0);            // untouched — provisional fee was never claimable
+        assertEq(vault.betProtocolFee(NULLIFIER_1), 0); // refunded to the user, cleared
+    }
+
+    // FC-14: N/A (void) markets KEEP the protocol fee (the bet executed) → it's RELEASED from
+    // provisional into the claimable feeAccumulator.
+    function test_naCancellationCredit_keepsProtocolFee() public {
+        _setupNAMarket();
+        assertEq(vault.feeAccumulator(), 0);                  // provisional, not yet claimable
+        bytes32 root = _currentRoot();
+        (OperatorAttestation memory att, bytes memory sig) = _filledAtt();
+        vault.naCancellationCredit(DUMMY_PROOF, _naCancelInputs(root), att, sig);
+        assertEq(vault.feeAccumulator(), 200_000);            // released as earned (kept by the protocol)
+        assertEq(vault.betProtocolFee(NULLIFIER_1), 0);       // released, cleared
     }
 
     function test_betCancellationCredit_revert_alreadyCredited() public {
@@ -1408,6 +1449,31 @@ contract VaultTest is Test {
         assertEq(spent, 0);
     }
 
+    // FC-14: a genuine partial refunds the unfilled stake PLUS the pro-rata protocol fee to the user,
+    // and RELEASES the fee on the executed part into the claimable feeAccumulator. $100 bet,
+    // protocolFee 200_000 (provisional); spent 60 of 100 → 40% refunded (80_000), 60% earned (120_000).
+    function test_partialFillCredit_refundsProRataProtocolFee() public {
+        _authorizeBetAndGetNullifier();
+        assertEq(vault.feeAccumulator(), 0);                 // provisional, not yet claimable
+        bytes32 root = _currentRoot();
+        (OperatorAttestation memory att, bytes memory sig) = _partialAtt(PF_FILLED_SHARES, PF_SPENT_AMOUNT);
+        vault.partialFillCredit(DUMMY_PROOF, _partialInputs(root), att, sig);
+        assertEq(vault.feeAccumulator(), 120_000);            // earned (executed) part released to claimable
+        assertEq(vault.betProtocolFee(NULLIFIER_1), 0);       // resolved: 80_000 refunded, 120_000 released
+    }
+
+    // FC-14: a fee-only short fill (spent == bet, fewer shares) has zero unexecuted stake → NO
+    // protocol-fee refund; the WHOLE protocol fee is earned and released. Common every-market-buy case.
+    function test_partialFillCredit_feeOnlyShortfall_noProtocolRefund() public {
+        _authorizeBetAndGetNullifier();
+        assertEq(vault.feeAccumulator(), 0);                 // provisional, not yet claimable
+        bytes32 root = _currentRoot();
+        (OperatorAttestation memory att, bytes memory sig) = _partialAtt(PF_FILLED_SHARES, uint64(100 * 1e6));
+        vault.partialFillCredit(DUMMY_PROOF, _partialInputs(root), att, sig);
+        assertEq(vault.feeAccumulator(), 200_000);            // full fee earned (nothing refunded) → released
+        assertEq(vault.betProtocolFee(NULLIFIER_1), 0);       // resolved
+    }
+
     // Strict partial: filled_shares must be 0 < filled < expected_shares.
     function test_partialFillCredit_revert_invalidFilledShares_zero() public {
         _authorizeBetAndGetNullifier();
@@ -1732,24 +1798,29 @@ contract VaultTest is Test {
     // FEE (P2/P4): bet fee, withdrawal fee, minimums, setFeeParams, withdrawFees
     // =========================================================================
 
-    // Default config from initialize(): betFeeBps=5 (0.05%), withdrawalFeeUSDC=$0.10,
+    // Default config from initialize(): betFeeBps=20 (0.2%, FC-14), withdrawalFeeUSDC=$0.10,
     // minBet=$1, minWithdrawal=$1, relayGasFeeUSDC=0, feeRecipient=owner.
 
+    // FC-14: the protocol fee is PROVISIONAL at authorizeBet — recorded in betProtocolFee, NOT in the
+    // claimable feeAccumulator (only the relay fee, 0 here, is claimable immediately).
     function test_authorizeBet_accruesBetFee() public {
         bytes32 root = _depositAndGetRoot();
-        // bet_amount = $100 → fee = 100e6 * 5 / 10000 = 50_000 ($0.05)
+        // bet_amount = $100 → protocolFee = 100e6 * 20 / 10000 = 200_000 ($0.20, FC-14 default)
         vault.authorizeBet(DUMMY_PROOF, _betAuthInputs(root));
-        assertEq(vault.feeAccumulator(), 50_000);
+        assertEq(vault.feeAccumulator(), 0);                   // relay only (0); protocol fee provisional
+        assertEq(vault.betProtocolFee(NULLIFIER_1), 200_000);
     }
 
     function test_authorizeBet_relayGasFeeBundledIntoFee() public {
-        // Set a flat relay-gas reimbursement and confirm it adds on top of the bps fee.
+        // Set a flat relay-gas reimbursement; it's earned at submission so it's claimable immediately,
+        // while the bps protocol fee stays provisional (FC-14).
         vm.prank(owner);
         vault.setFeeParams(FeeConfig(5, 20_000, 1_000_000, 100_000, 1_000_000, owner));
         bytes32 root = _depositAndGetRoot();
-        // fee = 100e6 * 5 / 10000 + 20_000 = 50_000 + 20_000 = 70_000
+        // protocolFee = 100e6 * 5 / 10000 = 50_000 (provisional); relayFee = 20_000 (claimable now)
         vault.authorizeBet(DUMMY_PROOF, _betAuthInputs(root));
-        assertEq(vault.feeAccumulator(), 70_000);
+        assertEq(vault.feeAccumulator(), 20_000);          // relay fee only
+        assertEq(vault.betProtocolFee(NULLIFIER_1), 50_000); // protocol fee provisional
     }
 
     function test_authorizeBet_revertBelowMinBet() public {
@@ -1823,9 +1894,10 @@ contract VaultTest is Test {
         vm.prank(owner);
         vault.setFeeParams(FeeConfig(100, 0, 1_000_000, 100_000, 1_000_000, owner)); // 1%
         bytes32 root = _depositAndGetRoot();
-        // fee = 100e6 * 100 / 10000 = 1_000_000 ($1)
+        // protocolFee = 100e6 * 100 / 10000 = 1_000_000 ($1) — provisional until earned (FC-14)
         vault.authorizeBet(DUMMY_PROOF, _betAuthInputs(root));
-        assertEq(vault.feeAccumulator(), 1_000_000);
+        assertEq(vault.feeAccumulator(), 0);                       // relay only
+        assertEq(vault.betProtocolFee(NULLIFIER_1), 1_000_000);   // new bps applied, provisional
     }
 
     function test_setFeeParams_revertNotOwner() public {

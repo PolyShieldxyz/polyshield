@@ -1,7 +1,7 @@
 'use client'
 
 import Link from 'next/link'
-import { Suspense, useEffect, useMemo, useState } from 'react'
+import { Suspense, useEffect, useMemo, useRef, useState } from 'react'
 import { useAccount, useSignMessage } from 'wagmi'
 import { useRouter, useSearchParams } from 'next/navigation'
 import { SettlementModal } from '@/components/app/SettlementModal'
@@ -11,13 +11,15 @@ import { BetCancelRefundModal } from '@/components/app/BetCancelRefundModal'
 import { Icon, ICONS } from '@/components/ui/Icon'
 import { log } from '@/lib/logger'
 import { addNote, getNotes, recoverNotes, recoverNotesViaBackend, formatUsdc, type Note } from '@/lib/notes'
+import { getMasterSeed, hasMasterSeed } from '@/lib/secretSession'
+import { finalizePartialFill } from '@/lib/finalizePartial'
 import { BET_STATUS, fetchAttestation, fetchBetStatus, cancelPendingBet } from '@/lib/api'
 
 // FC-9 attestation reportType (off-chain operator fill report): 1=FILLED, 2=FAILED, 3=PARTIAL.
 const REPORT_FILLED = 1
 const REPORT_FAILED = 2
 const REPORT_PARTIAL = 3
-import { portfolioSummaryRows, usePortfolioState } from '@/lib/accountState'
+import { portfolioSummaryRows, usePortfolioState, type PortfolioState } from '@/lib/accountState'
 
 const VAULT_ADDRESS = (process.env.NEXT_PUBLIC_VAULT_ADDRESS ??
   '0x0000000000000000000000000000000000000000') as `0x${string}`
@@ -30,7 +32,84 @@ function fmtShares(scaled?: bigint): string {
 }
 
 function formatDate(timestamp: number): string {
-  return new Date(timestamp).toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' })
+  return new Date(timestamp).toLocaleString(undefined, {
+    month: 'short', day: 'numeric', year: 'numeric', hour: 'numeric', minute: '2-digit',
+  })
+}
+
+// On-chain TX links point at the PUBLIC chain explorer (Polygonscan), not our app explorer.
+const CHAIN_ID = Number(process.env.NEXT_PUBLIC_CHAIN_ID ?? '137')
+const EXPLORER_BASE =
+  CHAIN_ID === 137 ? 'https://polygonscan.com' : CHAIN_ID === 80002 ? 'https://amoy.polygonscan.com' : ''
+function txUrl(hash: string): string | null {
+  return EXPLORER_BASE ? `${EXPLORER_BASE}/tx/${hash}` : null
+}
+function TxLink({ hash }: { hash?: string }) {
+  if (!hash) return <>—</>
+  const short = `${hash.slice(0, 10)}…${hash.slice(-8)}`
+  const url = txUrl(hash)
+  return url ? (
+    <a href={url} target="_blank" rel="noopener noreferrer" style={{ color: 'var(--cyan)' }} title="View on Polygonscan">{short}</a>
+  ) : (
+    <>{short}</>
+  )
+}
+
+// Paginate any list to PAGE_SIZE rows. One hook call per table (fixed count, before any early return).
+const PAGE_SIZE = 10
+function usePager<T>(items: T[], pageSize = PAGE_SIZE) {
+  const [page, setPage] = useState(0)
+  const totalPages = Math.max(1, Math.ceil(items.length / pageSize))
+  const safePage = Math.min(page, totalPages - 1)
+  const pageItems = items.slice(safePage * pageSize, safePage * pageSize + pageSize)
+  return { pageItems, page: safePage, setPage, totalPages }
+}
+// `< 1 2 … n >` page numbers: first, last, and a window around the current page, with ellipses.
+function pageNumbers(current: number, total: number): (number | '…')[] {
+  const want = new Set<number>([0, total - 1, current - 1, current, current + 1])
+  const shown = [...want].filter((p) => p >= 0 && p < total).sort((a, b) => a - b)
+  const out: (number | '…')[] = []
+  let prev = -1
+  for (const p of shown) {
+    if (prev >= 0 && p - prev > 1) out.push('…')
+    out.push(p)
+    prev = p
+  }
+  return out
+}
+function PagerControls({ page, totalPages, onChange }: { page: number; totalPages: number; onChange: (p: number) => void }) {
+  if (totalPages <= 1) return null
+  return (
+    <div className="row gap-2" style={{ justifyContent: 'flex-end', alignItems: 'center', fontSize: 11, padding: '8px 16px' }}>
+      <button className="btn btn-sm btn-ghost" disabled={page === 0} onClick={() => onChange(page - 1)} aria-label="Previous page" style={{ minWidth: 28, justifyContent: 'center' }}>‹</button>
+      {pageNumbers(page, totalPages).map((p, i) =>
+        p === '…' ? (
+          <span key={`e${i}`} style={{ color: 'var(--text-3)' }}>…</span>
+        ) : (
+          <button
+            key={p}
+            className={`btn btn-sm ${p === page ? 'btn-cyan' : 'btn-ghost'}`}
+            onClick={() => onChange(p)}
+            style={{ minWidth: 28, justifyContent: 'center' }}
+          >
+            {p + 1}
+          </button>
+        ),
+      )}
+      <button className="btn btn-sm btn-ghost" disabled={page === totalPages - 1} onClick={() => onChange(page + 1)} aria-label="Next page" style={{ minWidth: 28, justifyContent: 'center' }}>›</button>
+    </div>
+  )
+}
+// Same control, wrapped as a full-width table row so it can live inside a <tbody>.
+function TablePagerRow({ page, totalPages, onChange, colSpan }: { page: number; totalPages: number; onChange: (p: number) => void; colSpan: number }) {
+  if (totalPages <= 1) return null
+  return (
+    <tr>
+      <td colSpan={colSpan} style={{ borderTop: '1px solid var(--line)' }}>
+        <PagerControls page={page} totalPages={totalPages} onChange={onChange} />
+      </td>
+    </tr>
+  )
 }
 
 // Next 15 requires any component calling useSearchParams() to be wrapped in a
@@ -63,71 +142,146 @@ function PortfolioContent() {
   // both 1e6-scaled). Drives the per-row "Fill %" and the held-shares display so a downsized
   // market order shows what truly executed rather than the committed (now upper-bound) estimate.
   const [betFills, setBetFills] = useState<Record<string, { filled: bigint; spent: bigint }>>({})
-  const { state, loading, refresh } = usePortfolioState(address)
+  const { state, loading, error, refresh } = usePortfolioState(address)
   const { signMessageAsync } = useSignMessage()
   const [recovering, setRecovering] = useState(false)
   const [recoverMsg, setRecoverMsg] = useState<string | null>(null)
-  const [cancelling, setCancelling] = useState<string | null>(null)
+  // FC-13: determinate recovery progress (done / total deposits) for the restore bar.
+  const [recoverProgress, setRecoverProgress] = useState<{ done: number; total: number } | null>(null)
+  // FC-13: set when on-chain shows more deposits than the local cache and the master seed is
+  // locked (so we can't silently sync) — surfaces a one-signature "Sync" affordance.
+  const [syncAvailable, setSyncAvailable] = useState(false)
+  // Receipts with a cancel in progress. Stays set from click until the row actually transitions to a
+  // terminal state (the attestation poll flips it to "Reclaim stake"), so the button shows a disabled
+  // "Cancelling…" the whole time — instead of snapping back to a clickable "Cancel" the moment the POST
+  // returns, which made it look like nothing happened and invited repeat clicks.
+  const [cancelSubmitted, setCancelSubmitted] = useState<Set<string>>(new Set())
+  const setCancelling = (id: string, on: boolean) =>
+    setCancelSubmitted((prev) => {
+      const next = new Set(prev)
+      if (on) next.add(id)
+      else next.delete(id)
+      return next
+    })
+  // Drives a periodic (and on-demand) re-fetch of per-bet on-chain status + operator attestation.
+  // Without this the attestation poll only ran when the OPEN-RECEIPT SET changed, so a status that
+  // appears later (e.g. a FAILED attestation seconds after a cancel, or a FILL) wasn't picked up until
+  // a page reload — the "took a long time to update" symptom.
+  const [pollTick, setPollTick] = useState(0)
+  useEffect(() => {
+    const id = window.setInterval(() => setPollTick((t) => t + 1), 15_000)
+    return () => window.clearInterval(id)
+  }, [])
+  // #5: receipt.id → resolved human-readable market name, for legacy/recovered receipts that
+  // predate marketName being stored on the note. Best-effort catalog lookup; never blocks render.
+  const [resolvedNames, setResolvedNames] = useState<Record<string, string>>({})
 
   // Cancel/recover a stuck pending bet (order never reached Polymarket, or a resting order to
   // abandon). The operator attests FAILED if there's no live order (→ reclaimable here), or
   // cancels the resting order on the CLOB and the fill tracker finalizes it (FAILED/PARTIAL).
   const handleCancelBet = async (receipt: Note) => {
     const n = (receipt.nullifier_of_bet ?? receipt.nullifier) as string
-    if (!n || cancelling) return
-    setCancelling(receipt.id)
+    if (!n || cancelSubmitted.has(receipt.id)) return // already cancelling — ignore repeat clicks
+    setCancelling(receipt.id, true)
     try {
       const r = await cancelPendingBet(n)
+      // 'finalized' (resting order cancelled + attested now) and 'failed'/'already-finalized' are all
+      // immediately reclaimable; only a genuinely-still-resting 'cancel-requested' is pending.
+      const reclaimableNow = r.outcome === 'failed' || r.outcome === 'already-finalized' || r.outcome === 'finalized'
       setRecoverMsg(
-        r.outcome === 'failed' || r.outcome === 'already-finalized'
+        reclaimableNow
           ? 'Bet cancelled — you can now reclaim your stake below.'
-          : 'Cancellation requested — the resting order is being cancelled; the reclaim/refund action will appear shortly.',
+          : 'Cancellation requested — finishing up; the reclaim action will appear in a moment.',
       )
       await refresh()
+      setPollTick((t) => t + 1) // re-fetch the bet's attestation now so the row flips without waiting for the poll
+      // Stay "Cancelling…" until the row transitions to a terminal state (the poll flips it to
+      // Reclaim). Safety net: if it never lands (rare), re-enable after 90s so the user can retry.
+      window.setTimeout(() => setCancelling(receipt.id, false), 90_000)
     } catch (e) {
       setRecoverMsg(`Cancel failed: ${e instanceof Error ? e.message : String(e)}`)
-    } finally {
-      setCancelling(null)
+      setCancelling(receipt.id, false) // failed → let the user retry
     }
   }
 
-  // Rebuild the local note cache from on-chain events (P3+ wallet-derived recovery). Needed
-  // after clearing the browser cache or switching devices — the secret is never persisted,
-  // so notes are re-derived from the wallet signature per deposit index and matched against
-  // chain events. Prompts the wallet to sign once per deposit index scanned.
-  const handleRecover = async () => {
+  // Rebuild the local note cache from on-chain events (FC-13 wallet-derived recovery). Needed
+  // after clearing the browser cache or switching devices — the secret is never persisted, so
+  // notes are re-derived from the wallet's single master-seed signature and matched against chain
+  // events (one signature for the whole wallet; legacy V1 notes, if any, cost one extra each).
+  // `silent` skips the user-facing messages — used by the auto-sync when the seed is already
+  // unlocked so a returning user never sees a needless "Restore" prompt.
+  const handleRecover = async (silent = false) => {
     if (!address || recovering) return
     setRecovering(true)
-    setRecoverMsg(null)
+    if (!silent) setRecoverMsg(null)
+    setRecoverProgress({ done: 0, total: 0 })
     try {
       const rpcUrl = process.env.NEXT_PUBLIC_CHAIN_RPC || process.env.NEXT_PUBLIC_POLYGON_RPC || undefined
+      const onProgress = (done: number, total: number) => setRecoverProgress({ done, total })
       // Prefer the backend recovery data (events served from the proof-relay's index — fast, no
       // client RPC scan). Fall back to the direct on-chain scan if the backend endpoint is
       // unavailable (e.g. index not yet ready). The secret-based matching is identical either way.
+      // getMasterSeed reuses an already-unlocked session seed, so an unlocked wallet adds 0 prompts.
       let recovered: Note[]
       try {
-        recovered = await recoverNotesViaBackend(address, signMessageAsync, VAULT_ADDRESS, rpcUrl)
+        recovered = await recoverNotesViaBackend(address, signMessageAsync, VAULT_ADDRESS, rpcUrl, undefined, undefined, onProgress, getMasterSeed)
       } catch (backendErr) {
         console.warn('[recover] backend recovery-data unavailable, falling back to chain scan:', backendErr)
-        recovered = await recoverNotes(address, signMessageAsync, VAULT_ADDRESS, rpcUrl)
+        recovered = await recoverNotes(address, signMessageAsync, VAULT_ADDRESS, rpcUrl, undefined, onProgress, getMasterSeed)
       }
       const existing = new Set(getNotes().map((n) => n.id))
       let added = 0
       for (const n of recovered) {
         if (!existing.has(n.id)) { addNote(n); added++ }
       }
-      setRecoverMsg(
-        recovered.length === 0
-          ? 'No notes found on-chain for this wallet.'
-          : `Restored ${recovered.length} note(s) from chain (${added} new).`,
-      )
+      setSyncAvailable(false)
+      if (!silent) {
+        setRecoverMsg(
+          recovered.length === 0
+            ? 'No notes found on-chain for this wallet.'
+            : `Restored ${recovered.length} note(s) from chain (${added} new).`,
+        )
+      }
       await refresh()
     } catch (e) {
-      setRecoverMsg(`Restore failed: ${e instanceof Error ? e.message : String(e)}`)
+      if (!silent) setRecoverMsg(`Restore failed: ${e instanceof Error ? e.message : String(e)}`)
     } finally {
       setRecovering(false)
+      setRecoverProgress(null)
     }
   }
+
+  // FC-13 silent reconcile: on load, compare the wallet's on-chain deposit count (public, no
+  // signature) against the local cache. If chain has more (e.g. a deposit from another device, or
+  // a wiped cache) AND the master seed is already unlocked this session, auto-recover with zero
+  // prompts. If the seed is locked, just surface a one-signature "Sync" affordance instead of
+  // silently prompting. Note STATUS drift (settled-but-shows-pending) is already healed every poll
+  // by reconcileSpentStatus in loadPortfolioState — this only covers brand-new on-chain notes.
+  useEffect(() => {
+    if (!address) return
+    let cancelled = false
+    void (async () => {
+      try {
+        const res = await fetch(`/api/recovery-data/${address}`, { cache: 'no-store' })
+        if (!res.ok || cancelled) return
+        const data = (await res.json()) as { deposits?: unknown[] }
+        const onChainDeposits = (data.deposits ?? []).length
+        const localDeposits = getNotes().filter(
+          (n) => n.kind === 'DEPOSIT' && n.owner_address?.toLowerCase() === address.toLowerCase(),
+        ).length
+        if (cancelled || onChainDeposits <= localDeposits) return
+        if (hasMasterSeed(address)) {
+          await handleRecover(true) // seed unlocked → silent, zero prompts
+        } else {
+          setSyncAvailable(true) // locked → offer a one-signature sync
+        }
+      } catch {
+        /* backend unavailable → no-op; manual Restore remains available */
+      }
+    })()
+    return () => { cancelled = true }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [address])
 
   useEffect(() => {
     log('page_view', { route: '/app/portfolio' })
@@ -182,8 +336,96 @@ function PortfolioContent() {
       }
     })()
     return () => { cancelled = true }
+    // pollTick re-runs this on a 15s interval (and on demand after a cancel) so a status/attestation
+    // that lands AFTER the receipts loaded (e.g. a FAILED attestation just after a cancel, or a fill)
+    // is picked up without a page reload.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [openReceiptKey])
+  }, [openReceiptKey, pollTick])
+
+  // FC-14: auto-finalize partial fills. Every market buy short-fills vs the fee-naive committed
+  // shares (the Polymarket taker fee), so it lands ACTIVE with a PARTIAL attestation and an inflated
+  // expected_shares until partialFillCredit normalizes it (required before settlement). Run that
+  // silently — the proof uses the in-memory V2 seed (no prompt) and is relayed (no wallet tx) — but
+  // ONLY when the seed is already unlocked, so we never surprise the user with a signature.
+  const finalizingRef = useRef<Set<string>>(new Set())
+  useEffect(() => {
+    if (!address || !hasMasterSeed(address)) return
+    const receipts = state?.openReceipts ?? []
+    let cancelled = false
+    void (async () => {
+      for (const r of receipts) {
+        if (cancelled) break
+        if (betOutcomes[r.id] !== REPORT_PARTIAL || betStatuses[r.id] !== BET_STATUS.ACTIVE) continue
+        if (finalizingRef.current.has(r.id)) continue
+        finalizingRef.current.add(r.id)
+        try {
+          if ((await finalizePartialFill(address, r, VAULT_ADDRESS, signMessageAsync)) && !cancelled) await refresh()
+        } catch (e) {
+          console.warn('[auto-finalize] partial credit failed:', e)
+        } finally {
+          finalizingRef.current.delete(r.id)
+        }
+      }
+    })()
+    return () => { cancelled = true }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [address, betOutcomes, betStatuses])
+
+  // #5: the conditionId of a bet — receipts carry the real one (raw_condition_id), closed-history
+  // rows carry it as marketId (threaded from the bet event in accountState). Used as the catalog
+  // lookup + resolvedNames key so EVERY row type (open / unfilled / lost / closed) shares one lookup.
+  const cidOfNote = (n: Note): string | undefined => (n.raw_condition_id ?? n.condition_id)?.toLowerCase()
+  const cidOfRow = (r: { marketId?: string }): string | undefined => r.marketId?.toLowerCase()
+  const isConditionId = (s?: string): s is string => !!s && /^0x[0-9a-f]{64}$/.test(s)
+
+  // Resolve human-readable names for any row that lacks a stored marketName (legacy notes, recovered
+  // notes, older closed bets). Keyed by conditionId so one fetch covers every row in that market.
+  // Fully best-effort and isolated — a slow/failed lookup never blocks the portfolio.
+  useEffect(() => {
+    const cids = new Set<string>()
+    for (const n of [...(state?.openReceipts ?? []), ...(state?.lostBets ?? [])]) {
+      const cid = cidOfNote(n)
+      if (!n.marketName && isConditionId(cid) && !resolvedNames[cid]) cids.add(cid)
+    }
+    for (const r of state?.closedBetHistory ?? []) {
+      const cid = cidOfRow(r)
+      if (!r.marketName && isConditionId(cid) && !resolvedNames[cid]) cids.add(cid)
+    }
+    if (cids.size === 0) return
+    let cancelled = false
+    void (async () => {
+      const entries = await Promise.all(
+        [...cids].map(async (cid) => {
+          try {
+            // /api/market-name resolves CLOSED/ended markets too (the bettable /api/markets 404s on them).
+            const res = await fetch(`/api/market-name/${cid}`, { cache: 'no-store' })
+            if (!res.ok) return null
+            const name = (await res.json())?.name as string | undefined
+            return name ? ([cid, name] as const) : null
+          } catch {
+            return null
+          }
+        }),
+      )
+      if (!cancelled) {
+        const found = entries.filter((e): e is readonly [string, string] => e !== null)
+        if (found.length > 0) setResolvedNames((prev) => ({ ...prev, ...Object.fromEntries(found) }))
+      }
+    })()
+    return () => { cancelled = true }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [state])
+
+  // Display label for a bet row: prefer the question captured at bet time, then a resolved catalog
+  // name (by conditionId), and only fall back to the opaque id if neither is available.
+  const marketLabel = (r: Note): string => {
+    const cid = cidOfNote(r)
+    return r.marketName ?? (cid ? resolvedNames[cid] : undefined) ?? r.marketId ?? r.id
+  }
+  const closedLabel = (r: { marketName?: string; marketId?: string; id: string }): string => {
+    const cid = cidOfRow(r)
+    return r.marketName ?? (cid ? resolvedNames[cid] : undefined) ?? r.marketId ?? r.id
+  }
 
   const summaryRows = useMemo(() => (state ? portfolioSummaryRows(state) : []), [state])
   const readyByReceiptId = useMemo(() => {
@@ -213,14 +455,50 @@ function PortfolioContent() {
     // such a bet is a held position even before its market resolves (and its PARTIAL attestation
     // is no longer the live state). Without this it fell through to "PENDING" in OPEN ORDERS.
     const onchainFilled = (betStatuses[receipt.id] ?? -1) === BET_STATUS.FILLED
-    const isPartial = outcome === REPORT_PARTIAL && !onchainFilled
+    const isPartialAttest = outcome === REPORT_PARTIAL && !onchainFilled
+    // A market buy spends the WHOLE stake (shares + Polymarket taker fee), so it gets a PARTIAL
+    // attestation even though there's nothing to refund — the fee just bought slightly fewer shares
+    // than the fee-naive committed estimate. Such a "fee-only" partial (spent ≥ stake → refund 0) is a
+    // FILLED position from the user's view, so show it as FILLED instead of a confusing "$0 Claim
+    // refund". (The silent auto-finalize still normalizes the on-chain record once the seed is unlocked
+    // — e.g. at settle time — so settlement stays correct.) Only a GENUINE partial (real unfilled
+    // remainder, refund > 0) keeps the "Claim refund" action.
+    const fill = betFills[receipt.id]
+    const feeOnlyFill =
+      isPartialAttest && !!fill && (receipt.bet_amount ?? 0n) > 0n && fill.spent >= (receipt.bet_amount ?? 0n)
+    const isPartial = isPartialAttest && !feeOnlyFill
     const isFailed = outcome === REPORT_FAILED
-    const isFilled = outcome === REPORT_FILLED || onchainFilled
+    const isFilled = outcome === REPORT_FILLED || onchainFilled || feeOnlyFill
     return { ready, isPartial, isFailed, isFilled, isPosition: ready || isFilled || isPartial }
   }
   const visibleReceipts = (state?.openReceipts ?? []).filter((r) => !lostBetIds.has(r.id))
-  const openPositions = visibleReceipts.filter((r) => classify(r).isPosition)
-  const openOrders = visibleReceipts.filter((r) => !classify(r).isPosition)
+  // Every section is sorted newest-first by creation time, then paginated to 10 rows. The pager hooks
+  // are called unconditionally here (fixed count) so they run before the `!address` early return.
+  const byNewest = <T extends { createdAt?: number }>(a: T[]): T[] =>
+    [...a].sort((x, y) => (y.createdAt ?? 0) - (x.createdAt ?? 0))
+  const openPositions = byNewest(visibleReceipts.filter((r) => classify(r).isPosition))
+  const openOrders = byNewest(visibleReceipts.filter((r) => !classify(r).isPosition))
+  const readyToSettleSorted = [...(state?.readyToSettle ?? [])].sort(
+    (a, b) => (b.receipt.createdAt ?? 0) - (a.receipt.createdAt ?? 0),
+  )
+  // Closed box merges lost positions (Notes) and settled/refunded history (activity rows) into one
+  // date-sorted list so the 10-per-page view is chronological across both.
+  type ClosedRow =
+    | { kind: 'lost'; createdAt: number; note: Note }
+    | { kind: 'history'; createdAt: number; row: PortfolioState['closedBetHistory'][number] }
+  const closedRows: ClosedRow[] = byNewest<ClosedRow>([
+    ...(state?.lostBets ?? []).map((n) => ({ kind: 'lost' as const, createdAt: n.createdAt, note: n })),
+    ...(state?.closedBetHistory ?? []).map((r) => ({ kind: 'history' as const, createdAt: r.createdAt, row: r })),
+  ])
+  const depositsSorted = byNewest(state?.depositHistory ?? [])
+  const withdrawalsSorted = byNewest(state?.withdrawalHistory ?? [])
+
+  const positionsPager = usePager(openPositions)
+  const ordersPager = usePager(openOrders)
+  const readyPager = usePager(readyToSettleSorted)
+  const closedPager = usePager(closedRows)
+  const depositsPager = usePager(depositsSorted)
+  const withdrawalsPager = usePager(withdrawalsSorted)
 
   const renderReceiptRow = (receipt: Note) => {
     const { ready, isPartial, isFailed, isFilled } = classify(receipt)
@@ -235,7 +513,9 @@ function PortfolioContent() {
     // user sees how much of their order executed.
     const expected = receipt.expectedShares ?? 0n
     const fill = betFills[receipt.id]
-    const heldShares = isPartial && fill && fill.filled > 0n ? fill.filled : expected
+    // Show the ACTUAL shares held whenever the operator reported a fill (covers both genuine partials
+    // and fee-only fills shown as FILLED); otherwise the committed estimate.
+    const heldShares = fill && fill.filled > 0n ? fill.filled : expected
     const fillLabel = isFilled
       ? '100%'
       : isFailed
@@ -245,8 +525,8 @@ function PortfolioContent() {
           : '—'
     return (
       <tr key={receipt.id}>
-        <td>{receipt.marketId ?? receipt.id}</td>
-        <td>{receipt.side ?? '—'}</td>
+        <td title={receipt.marketId ?? receipt.id}>{marketLabel(receipt)}</td>
+        <td>{receipt.sideLabel ?? receipt.side ?? '—'}</td>
         <td className="num" style={{ textAlign: 'right' }}>${formatUsdc(receipt.bet_amount ?? receipt.balance)}</td>
         <td className="num" style={{ textAlign: 'right' }}>{fmtShares(heldShares)}</td>
         <td className="num" style={{ textAlign: 'right' }}>{fillLabel}</td>
@@ -264,21 +544,26 @@ function PortfolioContent() {
             // Close is only meaningful once the bet actually filled (there are shares to sell).
             <button className="btn btn-sm" onClick={() => setCloseReceipt(receipt)}>Close</button>
           ) : (
-            <div className="row gap-2" style={{ justifyContent: 'flex-end', alignItems: 'center' }}>
-              <span className="small" style={{ fontSize: 10, color: 'var(--text-3)' }}>
-                {isFilled ? '—' : 'Waiting for fill…'}
-              </span>
-              {!isFilled && (
-                <button
-                  className="btn btn-sm"
-                  disabled={cancelling === receipt.id}
-                  title="Cancel this bet (e.g. its order never reached Polymarket) and reclaim your stake"
-                  onClick={() => void handleCancelBet(receipt)}
-                >
-                  {cancelling === receipt.id ? 'Cancelling…' : 'Cancel'}
-                </button>
-              )}
-            </div>
+            (() => {
+              const isCancelling = cancelSubmitted.has(receipt.id)
+              return (
+                <div className="row gap-2" style={{ justifyContent: 'flex-end', alignItems: 'center' }}>
+                  <span className="small" style={{ fontSize: 10, color: 'var(--text-3)' }}>
+                    {isFilled ? '—' : isCancelling ? 'Cancelling — please wait…' : 'Waiting for fill…'}
+                  </span>
+                  {!isFilled && (
+                    <button
+                      className="btn btn-sm"
+                      disabled={isCancelling}
+                      title="Cancel this bet and reclaim your stake"
+                      onClick={() => void handleCancelBet(receipt)}
+                    >
+                      {isCancelling ? 'Cancelling…' : 'Cancel'}
+                    </button>
+                  )}
+                </div>
+              )
+            })()
           )}
         </td>
       </tr>
@@ -308,10 +593,17 @@ function PortfolioContent() {
           <button
             onClick={() => void handleRecover()}
             disabled={!address || recovering}
-            className="btn btn-sm"
-            title="Re-derive your notes from on-chain events (after a cache clear or new device). Prompts a wallet signature per deposit index."
+            className={`btn btn-sm${syncAvailable ? ' btn-primary' : ''}`}
+            title="Re-derive your notes from on-chain events (after a cache clear or new device). One wallet signature for the whole wallet (FC-13 master seed)."
           >
-            <Icon d={ICONS.search} size={12} /> {recovering ? 'Restoring…' : 'Restore from chain'}
+            <Icon d={ICONS.search} size={12} />{' '}
+            {recovering
+              ? recoverProgress && recoverProgress.total > 0
+                ? `Restoring ${recoverProgress.done}/${recoverProgress.total}…`
+                : 'Restoring…'
+              : syncAvailable
+                ? 'Sync from chain'
+                : 'Restore from chain'}
           </button>
           <Link href="/app/deposit" className="btn btn-sm" style={{ textDecoration: 'none' }}>
             <Icon d={ICONS.arrowDown} size={12} /> Deposit
@@ -321,14 +613,28 @@ function PortfolioContent() {
           </Link>
         </div>
       </div>
+      {syncAvailable && !recovering && (
+        <div className="row" style={{ padding: '8px 24px', fontSize: 12, color: 'var(--text-2)' }}>
+          New on-chain activity detected for this wallet. Click “Sync from chain” (one signature) to update your view.
+        </div>
+      )}
       {recoverMsg && (
         <div className="row" style={{ padding: '8px 24px', fontSize: 12, color: 'var(--text-2)' }}>{recoverMsg}</div>
       )}
 
       <div style={{ padding: 24 }}>
-        {loading && (
+        {loading && !state && (
           <div className="panel" style={{ padding: 16, marginBottom: 16, color: 'var(--text-2)' }}>
             Loading portfolio state...
+          </div>
+        )}
+
+        {!loading && !state && error && (
+          <div className="panel" style={{ padding: 16, marginBottom: 16, borderColor: 'var(--red)' }}>
+            <div className="small" style={{ color: 'var(--red)', fontSize: 12 }}>
+              Couldn’t load your portfolio: {error}
+            </div>
+            <button className="btn btn-sm mt-2" onClick={() => void refresh()}>Retry</button>
           </div>
         )}
 
@@ -370,7 +676,8 @@ function PortfolioContent() {
                       </td>
                     </tr>
                   )}
-                  {openPositions.map(renderReceiptRow)}
+                  {positionsPager.pageItems.map(renderReceiptRow)}
+                  <TablePagerRow page={positionsPager.page} totalPages={positionsPager.totalPages} onChange={positionsPager.setPage} colSpan={7} />
                 </tbody>
               </table>
             </div>
@@ -401,7 +708,8 @@ function PortfolioContent() {
                       </td>
                     </tr>
                   )}
-                  {openOrders.map(renderReceiptRow)}
+                  {ordersPager.pageItems.map(renderReceiptRow)}
+                  <TablePagerRow page={ordersPager.page} totalPages={ordersPager.totalPages} onChange={ordersPager.setPage} colSpan={7} />
                 </tbody>
               </table>
             </div>
@@ -427,10 +735,10 @@ function PortfolioContent() {
               </div>
               {state.readyToSettle.length > 0 && (
                 <div className="col gap-2 mt-4">
-                  {state.readyToSettle.map((row) => (
+                  {readyPager.pageItems.map((row) => (
                     <div key={row.receipt.id} className="row" style={{ justifyContent: 'space-between', gap: 12, padding: '10px 12px', border: '1px solid var(--line)', borderRadius: 6 }}>
                       <div>
-                        <div style={{ fontSize: 13 }}>{row.receipt.marketId ?? row.receipt.id}</div>
+                        <div style={{ fontSize: 13 }}>{marketLabel(row.receipt)}</div>
                         <div className="small" style={{ fontSize: 11 }}>
                           Amount ${formatUsdc(row.receipt.bet_amount ?? row.receipt.balance)} · payout/share {row.payoutPerShare.toString()}
                         </div>
@@ -438,6 +746,7 @@ function PortfolioContent() {
                       <div className="num" style={{ color: 'var(--green)' }}>+${formatUsdc(row.claimAmount)}</div>
                     </div>
                   ))}
+                  <PagerControls page={readyPager.page} totalPages={readyPager.totalPages} onChange={readyPager.setPage} />
                 </div>
               )}
             </div>
@@ -474,30 +783,32 @@ function PortfolioContent() {
                       </td>
                     </tr>
                   )}
-                  {state.lostBets.map((receipt) => (
-                    <tr key={receipt.id}>
-                      <td>{receipt.marketId ?? receipt.id}</td>
-                      <td>{receipt.side ?? '—'}</td>
-                      <td className="num" style={{ textAlign: 'right' }}>${formatUsdc(receipt.bet_amount ?? receipt.balance)}</td>
-                      <td className="num" style={{ textAlign: 'right', color: 'var(--text-3)' }}>—</td>
-                      <td className="num" style={{ textAlign: 'right', color: 'var(--red)' }}>
-                        −${formatUsdc(receipt.bet_amount ?? receipt.balance)}
-                      </td>
-                      <td className="small">{formatDate(receipt.createdAt)}</td>
-                    </tr>
-                  ))}
-                  {state.closedBetHistory.map((row) => (
-                    <tr key={row.id}>
-                      <td>{row.marketId ?? row.id}</td>
-                      <td>{row.side ?? '—'}</td>
-                      <td className="num" style={{ textAlign: 'right' }}>${formatUsdc(row.betAmount)}</td>
-                      <td className="num" style={{ textAlign: 'right' }}>${formatUsdc(row.amount)}</td>
-                      <td className="num" style={{ textAlign: 'right', color: row.pnl >= 0n ? 'var(--green)' : 'var(--red)' }}>
-                        {row.pnl >= 0n ? '+' : '−'}${formatUsdc(row.pnl >= 0n ? row.pnl : -row.pnl)}
-                      </td>
-                      <td className="small">{formatDate(row.createdAt)}</td>
-                    </tr>
-                  ))}
+                  {closedPager.pageItems.map((item) =>
+                    item.kind === 'lost' ? (
+                      <tr key={item.note.id}>
+                        <td title={item.note.marketId ?? item.note.id}>{marketLabel(item.note)}</td>
+                        <td>{item.note.sideLabel ?? item.note.side ?? '—'}</td>
+                        <td className="num" style={{ textAlign: 'right' }}>${formatUsdc(item.note.bet_amount ?? item.note.balance)}</td>
+                        <td className="num" style={{ textAlign: 'right', color: 'var(--text-3)' }}>—</td>
+                        <td className="num" style={{ textAlign: 'right', color: 'var(--red)' }}>
+                          −${formatUsdc(item.note.bet_amount ?? item.note.balance)}
+                        </td>
+                        <td className="small">{formatDate(item.note.createdAt)}</td>
+                      </tr>
+                    ) : (
+                      <tr key={item.row.id}>
+                        <td title={item.row.marketId ?? item.row.id}>{closedLabel(item.row)}</td>
+                        <td>{item.row.side ?? '—'}</td>
+                        <td className="num" style={{ textAlign: 'right' }}>${formatUsdc(item.row.betAmount)}</td>
+                        <td className="num" style={{ textAlign: 'right' }}>${formatUsdc(item.row.amount)}</td>
+                        <td className="num" style={{ textAlign: 'right', color: item.row.pnl >= 0n ? 'var(--green)' : 'var(--red)' }}>
+                          {item.row.pnl >= 0n ? '+' : '−'}${formatUsdc(item.row.pnl >= 0n ? item.row.pnl : -item.row.pnl)}
+                        </td>
+                        <td className="small">{formatDate(item.row.createdAt)}</td>
+                      </tr>
+                    ),
+                  )}
+                  <TablePagerRow page={closedPager.page} totalPages={closedPager.totalPages} onChange={closedPager.setPage} colSpan={6} />
                 </tbody>
               </table>
             </div>
@@ -523,13 +834,14 @@ function PortfolioContent() {
                         </td>
                       </tr>
                     )}
-                    {state.depositHistory.map((row) => (
+                    {depositsPager.pageItems.map((row) => (
                       <tr key={row.id}>
                         <td className="num">${formatUsdc(row.amount)}</td>
                         <td className="small">{formatDate(row.createdAt)}</td>
-                        <td className="mono small">{row.txHash ? `${row.txHash.slice(0, 10)}…${row.txHash.slice(-8)}` : '—'}</td>
+                        <td className="mono small"><TxLink hash={row.txHash} /></td>
                       </tr>
                     ))}
+                    <TablePagerRow page={depositsPager.page} totalPages={depositsPager.totalPages} onChange={depositsPager.setPage} colSpan={3} />
                   </tbody>
                 </table>
               </div>
@@ -555,14 +867,15 @@ function PortfolioContent() {
                         </td>
                       </tr>
                     )}
-                    {state.withdrawalHistory.map((row) => (
+                    {withdrawalsPager.pageItems.map((row) => (
                       <tr key={row.id}>
                         <td className="num">${formatUsdc(row.amount)}</td>
                         <td className="small">Your wallet</td>
                         <td className="small">{formatDate(row.createdAt)}</td>
-                        <td className="mono small">{row.txHash ? `${row.txHash.slice(0, 10)}…${row.txHash.slice(-8)}` : '—'}</td>
+                        <td className="mono small"><TxLink hash={row.txHash} /></td>
                       </tr>
                     ))}
+                    <TablePagerRow page={withdrawalsPager.page} totalPages={withdrawalsPager.totalPages} onChange={withdrawalsPager.setPage} colSpan={4} />
                   </tbody>
                 </table>
               </div>

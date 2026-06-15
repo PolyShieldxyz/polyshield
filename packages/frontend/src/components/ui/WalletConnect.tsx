@@ -4,6 +4,7 @@ import { ConnectKitButton } from 'connectkit'
 import { useAccount } from 'wagmi'
 import { log } from '@/lib/logger'
 import { clearNoteCache, resetAllLocalState } from '@/lib/notes'
+import { clearSession } from '@/lib/secretSession'
 
 // Used in two places:
 // 1. Gate panel (app/layout.tsx) — shows "Connect Wallet" when not connected
@@ -29,9 +30,13 @@ export function WalletConnect({ variant = 'gate' }: { variant?: 'gate' | 'sideba
       // leaving notes/activity/deposit-index in localStorage would expose the prior
       // user's pseudonymous trading history to the next connector.
       clearNoteCache()
+      clearSession() // FC-13: drop the in-memory master seed on disconnect
       resetAllLocalState()
     } else if (isConnected && address && address !== prevAddress.current) {
       log('wallet_address_changed', { from: prevAddress.current, to: address })
+      // FC-13: drop the prior account's in-memory master seed on an account switch (the seed is
+      // address-keyed so it's never reused cross-account, but don't let it linger in memory).
+      clearSession()
     }
     prevConnected.current = isConnected
     prevAddress.current = address

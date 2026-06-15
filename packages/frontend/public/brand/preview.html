@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>PolyShield — brand marks</title>
+<style>
+  body { margin:0; font-family: system-ui, sans-serif; background:#06080B; color:#E6EAF0; }
+  h1 { font-size:18px; font-weight:600; padding:24px 32px 0; }
+  .sub { padding:4px 32px 24px; color:#8B94A2; font-size:13px; }
+  .grid { display:grid; grid-template-columns: repeat(2, 1fr); gap:1px; background:rgba(255,255,255,0.08); border-top:1px solid rgba(255,255,255,0.08); border-bottom:1px solid rgba(255,255,255,0.08); }
+  .cell { background:#0E141C; padding:28px 24px; }
+  .name { font-size:12px; color:#8B94A2; font-family: ui-monospace, monospace; margin-bottom:18px; letter-spacing:0.04em; }
+  .row { display:flex; align-items:center; gap:22px; margin-bottom:18px; }
+  .row.light { background:#E6EAF0; border-radius:8px; padding:14px 18px; }
+  .sz { display:flex; flex-direction:column; align-items:center; gap:6px; }
+  .sz small { font-size:10px; color:#69717F; font-family: ui-monospace, monospace; }
+  .wordmark { display:flex; align-items:center; gap:10px; margin-top:6px; }
+  .wordmark span { font-size:16px; font-weight:500; letter-spacing:-0.01em; }
+  .tile { background:#06080B; border-radius:7px; padding:6px; display:inline-flex; }
+</style>
+</head>
+<body>
+  <h1>PolyShield — brand marks (final)</h1>
+  <div class="sub">V1 = standalone brand mark + favicon (<code>src/app/icon.svg</code>). V2 = the mark beside the wordmark in nav/footer. Both are live in <code>Logo.tsx</code> (V2 when <code>withText</code>, V1 standalone).</div>
+  <div class="grid">
+    <div class="cell">
+      <div class="name">V1 · BRAND MARK + FAVICON (shield + "P")</div>
+      <div class="row">
+        <div class="sz"><img src="logo-v1-shield-p.svg" width="16" height="16"/><small>16</small></div>
+        <div class="sz"><img src="logo-v1-shield-p.svg" width="22" height="22"/><small>22</small></div>
+        <div class="sz"><img src="logo-v1-shield-p.svg" width="40" height="40"/><small>40</small></div>
+        <div class="sz"><img src="logo-v1-shield-p.svg" width="64" height="64"/><small>64</small></div>
+      </div>
+      <div class="row light">
+        <div class="sz"><img src="logo-v1-shield-p.svg" width="16" height="16"/><small>16</small></div>
+        <div class="sz"><img src="logo-v1-shield-p.svg" width="32" height="32"/><small>32</small></div>
+      </div>
+      <div class="name" style="margin-top:10px">FAVICON TILE (dark, reads on light tabs)</div>
+      <div class="row">
+        <span class="tile"><img src="favicon.svg" width="16" height="16"/></span>
+        <span class="tile"><img src="favicon.svg" width="32" height="32"/></span>
+      </div>
+    </div>
+    <div class="cell">
+      <div class="name">V2 · WORDMARK LOCKUP (shield + keyhole)</div>
+      <div class="row">
+        <div class="sz"><img src="logo-v2-shield-keyhole.svg" width="16" height="16"/><small>16</small></div>
+        <div class="sz"><img src="logo-v2-shield-keyhole.svg" width="22" height="22"/><small>22</small></div>
+        <div class="sz"><img src="logo-v2-shield-keyhole.svg" width="40" height="40"/><small>40</small></div>
+        <div class="sz"><img src="logo-v2-shield-keyhole.svg" width="64" height="64"/><small>64</small></div>
+      </div>
+      <div class="row light">
+        <div class="sz"><img src="logo-v2-shield-keyhole.svg" width="16" height="16"/><small>16</small></div>
+        <div class="sz"><img src="logo-v2-shield-keyhole.svg" width="32" height="32"/><small>32</small></div>
+      </div>
+      <div class="wordmark"><img src="logo-v2-shield-keyhole.svg" width="22" height="22"/><span>PolyShield</span></div>
+    </div>
+  </div>
+</body>
+</html>

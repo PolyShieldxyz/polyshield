@@ -23,6 +23,12 @@ function getFocusable(container: HTMLElement | null): HTMLElement[] {
 
 export function Modal({ open, title, eyebrow = 'APP', onClose, children, width = 760 }: ModalProps) {
   const dialogRef = useRef<HTMLDivElement | null>(null)
+  // Parents pass a fresh onClose closure every render, and they re-render on every keystroke. Keep it
+  // in a ref so the focus/key effect can call the latest WITHOUT listing onClose as a dependency —
+  // otherwise the effect re-ran on each keystroke and stole focus to the first focusable (the X
+  // button), the "typing jumps focus to the close button" bug.
+  const onCloseRef = useRef(onClose)
+  onCloseRef.current = onClose
 
   useEffect(() => {
     if (!open) return
@@ -30,13 +36,17 @@ export function Modal({ open, title, eyebrow = 'APP', onClose, children, width =
     const previousOverflow = document.body.style.overflow
     document.body.style.overflow = 'hidden'
 
+    // Focus the first real field on open (not the X button), so typing starts in the input.
     const focusables = getFocusable(dialogRef.current)
-    focusables[0]?.focus()
+    const firstField = focusables.find(
+      (el) => el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.tagName === 'SELECT',
+    )
+    ;(firstField ?? focusables[0])?.focus()
 
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key === 'Escape') {
         event.preventDefault()
-        onClose()
+        onCloseRef.current()
         return
       }
 
@@ -61,7 +71,9 @@ export function Modal({ open, title, eyebrow = 'APP', onClose, children, width =
       document.body.style.overflow = previousOverflow
       document.removeEventListener('keydown', onKeyDown)
     }
-  }, [open, onClose])
+    // Only (re)run when the modal opens/closes — NOT when onClose's identity changes each render.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open])
 
   if (!open) return null
 

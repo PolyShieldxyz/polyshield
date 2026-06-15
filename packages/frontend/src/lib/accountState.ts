@@ -147,8 +147,13 @@ export async function loadPortfolioState(wallet: `0x${string}`): Promise<Portfol
   const settlementEvents = activity.filter((event) => event.kind === 'settlement')
   const refundEvents = activity.filter((event) => event.kind === 'refund')
 
+  // The bet event carries the readable market name + the resolvable conditionId; thread both into the
+  // closed row so it shows a name instead of an opaque id (the settlement/refund event lacks them).
+  const betFor = (receiptId?: string) =>
+    receiptId ? betEvents.find((bet) => bet.receiptId === receiptId) : undefined
   const closedBetHistory = settlementEvents.map((event) => {
-    const committed = betEvents.find((bet) => bet.receiptId && bet.receiptId === event.receiptId)?.amount ?? 0n
+    const betEvent = betFor(event.receiptId)
+    const committed = betEvent?.amount ?? 0n
     // Effective cost basis = committed stake − partial-fill refunds already returned for this
     // receipt. A partial fill returns the unfilled remainder, so the SETTLED position truly cost
     // `spent` (= committed − refunded), not the committed stake. Netting here makes
@@ -159,7 +164,13 @@ export async function loadPortfolioState(wallet: `0x${string}`): Promise<Portfol
       .reduce((sum, r) => sum + r.amount, 0n)
     const betAmount = committed > refunded ? committed - refunded : committed
     const pnl = event.amount - betAmount
-    return { ...event, betAmount, pnl }
+    return {
+      ...event,
+      betAmount,
+      pnl,
+      marketName: event.marketName ?? betEvent?.marketName,
+      marketId: betEvent?.marketId ?? event.marketId,
+    }
   }).concat(
     // A refund returns the user's OWN stake — the unfilled remainder of a partial fill, or the
     // full stake of a failed bet — so it is a CAPITAL RETURN, not a gain/loss: P&L is 0. (The
@@ -168,8 +179,15 @@ export async function loadPortfolioState(wallet: `0x${string}`): Promise<Portfol
     // settles separately for the real P&L. Exact cost-basis netting of a partial-then-settled bet —
     // crediting the settlement against `spent` rather than the committed stake — is an FC-5 follow-up.)
     refundEvents.map((event) => {
-      const betAmount = betEvents.find((bet) => bet.receiptId && bet.receiptId === event.receiptId)?.amount ?? 0n
-      return { ...event, betAmount, pnl: 0n }
+      const betEvent = betFor(event.receiptId)
+      const betAmount = betEvent?.amount ?? 0n
+      return {
+        ...event,
+        betAmount,
+        pnl: 0n,
+        marketName: event.marketName ?? betEvent?.marketName,
+        marketId: betEvent?.marketId ?? event.marketId,
+      }
     }),
   )
 
@@ -200,10 +218,14 @@ export async function loadPortfolioState(wallet: `0x${string}`): Promise<Portfol
 export function usePortfolioState(wallet?: `0x${string}`): {
   state: PortfolioState | null
   loading: boolean
+  error: string | null
   refresh: () => Promise<void>
 } {
   const [state, setState] = useState<PortfolioState | null>(null)
   const [loading, setLoading] = useState(true)
+  // Surface load failures instead of silently leaving the page blank (a thrown
+  // loadPortfolioState used to leave state=null with no UI — the "only the nav bar renders" bug).
+  const [error, setError] = useState<string | null>(null)
 
   const refresh = useCallback(async () => {
     if (!wallet) {
@@ -214,7 +236,12 @@ export function usePortfolioState(wallet?: `0x${string}`): {
 
     setLoading(true)
     try {
-      setState(await loadPortfolioState(wallet))
+      const next = await loadPortfolioState(wallet)
+      setState(next)
+      setError(null)
+    } catch (e) {
+      console.error('[portfolio] loadPortfolioState failed:', e)
+      setError(e instanceof Error ? e.message : String(e))
     } finally {
       setLoading(false)
     }
@@ -238,7 +265,7 @@ export function usePortfolioState(wallet?: `0x${string}`): {
     }
   }, [wallet, refresh])
 
-  return { state, loading, refresh }
+  return { state, loading, error, refresh }
 }
 
 /**

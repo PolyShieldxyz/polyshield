@@ -10,7 +10,6 @@ import {
   computeCommitment,
   computeNullifier,
   computeRecipientHash,
-  deriveSecret,
   formatUsdc,
   markNoteSpent,
   reconcileSpentStatus,
@@ -18,6 +17,7 @@ import {
   selectNotesForAmount,
   type Note,
 } from '@/lib/notes'
+import { getNoteSecret } from '@/lib/secretSession'
 import { consolidateNotes } from '@/lib/consolidate'
 import { usePortfolioState } from '@/lib/accountState'
 import {
@@ -148,7 +148,7 @@ export default function WithdrawPage() {
       const recipientField = `0x${BigInt(recipient).toString(16).padStart(64, '0')}` as `0x${string}`
       const recipientHash = computeRecipientHash(recipient)
 
-      const secret = await deriveSecret(signMessageAsync, address, spendNote.depositIndex)
+      const secret = await getNoteSecret(signMessageAsync, address, spendNote.depositIndex, spendNote.derivationVersion ?? 1)
       setStatusMsg('Fetching Merkle path...')
       let merkle
       try {
@@ -238,6 +238,7 @@ export default function WithdrawPage() {
           spent: false,
           createdAt: Date.now(),
           txHash: nextTxHash,
+          derivationVersion: spendNote.derivationVersion ?? 1, // FC-13: inherit lineage version
         }
         addNote(nextNote)
       }

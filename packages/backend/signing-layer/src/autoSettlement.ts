@@ -10,6 +10,7 @@ import { submitMarketSellOrder, submitLimitSellOrder, getOrCreateClobClient, att
 import { getTrackedOrder, cancelTrackedOrder } from "./wsFillTracker";
 import { recordLimitOrder } from "./limitOrderStore";
 import { getAttestation } from "./attestationStore";
+import { syncOneMarket } from "./marketRegistry";
 import { config } from "./config";
 
 const logger = pino({ name: "auto-settlement" });
@@ -111,6 +112,8 @@ export function startAutoSettlementServer(
   });
 
   const cancelBetSchema = z.object({ nullifier_of_bet: HEX32 });
+  // FC-15: register a market by its real conditionId (bytes32) so it becomes routable on open.
+  const registerMarketSchema = z.object({ conditionId: HEX32 });
 
   /**
    * POST /claim-permission
@@ -264,6 +267,30 @@ export function startAutoSettlementServer(
     recordLimitOrder({ nullifier_of_bet, order_type, expiration: exp });
     logger.info({ nullifier_of_bet, order_type, expiration: exp }, "Limit-order intent recorded");
     res.json({ ok: true });
+  });
+
+  /**
+   * POST /register-market  (FC-15)
+   *
+   * Ensure a market is routable before the user can bet on it. Called when a market is opened
+   * (esp. live-searched / long-tail ones the periodic registry sync hasn't covered). Takes only the
+   * real conditionId; the signing layer fetches the AUTHORITATIVE tokenIds from Gamma itself, so a
+   * caller can't inject a bogus mapping. Idempotent. operatorAuth (the Next /api/signing proxy
+   * injects the token); a bad/unknown conditionId simply yields registered:false (Gamma returns none).
+   */
+  app.post("/register-market", operatorAuth, async (req, res) => {
+    const parsed = registerMarketSchema.safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({ error: "invalid inputs" });
+      return;
+    }
+    try {
+      const registered = await syncOneMarket(parsed.data.conditionId);
+      res.json({ ok: true, registered });
+    } catch (err) {
+      logger.warn({ err: String(err) }, "register-market failed");
+      res.status(502).json({ ok: false, error: "registration failed" });
+    }
   });
 
   /**

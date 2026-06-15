@@ -1,12 +1,12 @@
 'use client'
 import { useState, useEffect, useMemo, useRef } from 'react'
 import Link from 'next/link'
-import { SiteFooter } from '@/components/ui/SiteFooter'
 import { SectionHead } from '@/components/ui/SectionHead'
 import { Icon, ICONS } from '@/components/ui/Icon'
 import { AnimatedNumber } from '@/components/ui/AnimatedNumber'
 import { Sparkline } from '@/components/ui/Sparkline'
 import { Hash } from '@/components/ui/Hash'
+import { NETWORK_STATUS } from '@/lib/brand'
 
 /* ---------- Hero visual: animated cryptographic graph ---------- */
 function HeroVisual() {
@@ -191,7 +191,7 @@ const FEATURES = [
         <text x="10" y="24" fontFamily="JetBrains Mono" fontSize="9" fill="var(--red)" opacity="0.7">EXPOSED (today)</text>
         <rect x="10" y="34" width="140" height="30" rx="4" fill="oklch(0.70 0.18 25 / 0.06)" stroke="oklch(0.70 0.18 25 / 0.3)" />
         <text x="80" y="53" textAnchor="middle" fontFamily="JetBrains Mono" fontSize="9" fill="oklch(0.70 0.18 25)">wallet → polymarket fill</text>
-        <text x="10" y="94" fontFamily="JetBrains Mono" fontSize="9" fill="var(--green)" opacity="0.7">SHIELDED (polyshield)</text>
+        <text x="10" y="94" fontFamily="JetBrains Mono" fontSize="9" fill="var(--green)" opacity="0.7">SHIELDED (PolyShield)</text>
         <rect x="10" y="104" width="140" height="30" rx="4" fill="oklch(0.78 0.16 152 / 0.06)" stroke="oklch(0.78 0.16 152 / 0.3)" />
         <text x="80" y="123" textAnchor="middle" fontFamily="JetBrains Mono" fontSize="9" fill="oklch(0.78 0.16 152)">vault → polymarket fill</text>
         <text x="170" y="50" fontFamily="JetBrains Mono" fontSize="8" fill="rgba(255,255,255,0.3)">observed by anyone →</text>
@@ -321,7 +321,7 @@ function ArchitectureDiagram() {
 /* ---------- Security section ---------- */
 const SECURITY = [
   { icon: ICONS.proof, title: 'Soundness via ZK', body: 'Every state transition is gated by a circuit constraint. Invalid proofs are rejected on-chain. No admin backdoor.' },
-  { icon: ICONS.privacy, title: 'Open-source contracts', body: 'Smart contracts are open-source and MIT licensed. Independent audits are planned before mainnet deployment.' },
+  { icon: ICONS.privacy, title: 'Open-source contracts', body: 'Smart contracts are open-source and MIT licensed. This is beta software — review the threat model and deposit only what you can afford to lose.' },
   { icon: ICONS.lock, title: 'No custody of secrets', body: 'Your note preimage never leaves your browser. The vault holds USDC, not your identity material.' },
   { icon: ICONS.proof, title: 'Browser-side proving', body: 'Proof generation runs entirely in your browser via WASM. Expect 30 seconds to 2 minutes depending on device and circuit.' },
   { icon: ICONS.vault, title: 'Private note ownership', body: 'A note is only spendable by whoever knows the secret. Lose the note, lose access — no recovery.' },
@@ -330,30 +330,22 @@ const SECURITY = [
 
 /* ---------- Final CTA ---------- */
 function FinalCTA() {
-  const seated = 0, total = 200
-  const pct = (seated / total) * 100
   return (
     <div className="panel" style={{ padding: 48, textAlign: 'center' }}>
       <div className="pill pill-cyan" style={{ margin: '0 auto', display: 'inline-flex' }}>
         <span className="dot"></span>
-        {seated} / {total} SEATS CLAIMED
+        {NETWORK_STATUS}
       </div>
-      <h2 className="h2 mt-6" style={{ margin: 0 }}>Apply for testnet access.</h2>
+      <h2 className="h2 mt-6" style={{ margin: 0 }}>Trade privately on mainnet.</h2>
       <p className="body mt-4" style={{ maxWidth: 480, margin: '16px auto 0' }}>
-        We're onboarding a limited cohort to validate the full ZK proof flow on Polygon Amoy. Testnet USDC provided — no real funds required.
+        PolyShield is live on Polygon mainnet in an open beta. Connect your wallet,
+        deposit USDC, and place your first private bet. This is experimental
+        software — deposit only what you can afford to lose.
       </p>
-      <div style={{ maxWidth: 320, margin: '32px auto 0' }}>
-        <div style={{ height: 4, background: 'rgba(255,255,255,0.06)', borderRadius: 2 }}>
-          <div style={{ height: 4, width: `${pct}%`, background: 'var(--cyan)', borderRadius: 2 }} />
-        </div>
-        <div className="row mt-2" style={{ justifyContent: 'space-between', fontSize: 11, fontFamily: 'var(--mono)', color: 'var(--text-3)' }}>
-          <span>{seated} joined</span><span>{total - seated} remaining</span>
-        </div>
-      </div>
       <div className="row gap-3 mt-8" style={{ justifyContent: 'center' }}>
-        <Link href="/testnet" className="btn btn-primary" style={{ padding: '14px 32px', fontSize: 15 }}>
-          Join testnet <Icon d={ICONS.arrow} size={14} />
-        </Link>
+        <a href="/app/markets" className="btn btn-primary" style={{ padding: '14px 32px', fontSize: 15 }}>
+          Launch app <Icon d={ICONS.arrow} size={14} />
+        </a>
         <Link href="/how" className="btn" style={{ padding: '14px 24px', fontSize: 15 }}>How it works</Link>
         <Link href="/docs" className="btn btn-ghost" style={{ padding: '14px 24px', fontSize: 15 }}>Read the docs</Link>
       </div>
@@ -370,27 +362,27 @@ export default function LandingPage() {
           <div style={{ display: 'grid', gridTemplateColumns: '1.05fr 0.95fr', gap: 56, alignItems: 'center' }}>
             <div>
               <div className="pill pill-cyan" style={{ fontSize: 11 }}>
-                <span className="dot" />&nbsp;POLYGON AMOY TESTNET · PRIVATE BETA
+                <span className="dot" />&nbsp;{NETWORK_STATUS}
               </div>
               <h1 className="h1 mt-6">
                 Trade prediction<br />markets<span className="text-cyan">,</span> privately.
               </h1>
               <p className="body mt-6" style={{ maxWidth: 520, fontSize: 17 }}>
-                Polyshield is a zero-knowledge vault layer for Polymarket. Deposit USDC,
+                PolyShield is a zero-knowledge vault layer for Polymarket. Deposit USDC,
                 place trades from a shared anonymity set, and settle privately —
                 with cryptographic guarantees, not promises.
               </p>
               <div className="row gap-3 mt-8">
-                <Link href="/testnet" className="btn btn-primary">Join testnet <Icon d={ICONS.arrow} size={12} /></Link>
+                <a href="/app/markets" className="btn btn-primary">Launch app <Icon d={ICONS.arrow} size={12} /></a>
                 <Link href="/docs" className="btn">Read the docs</Link>
                 <Link href="/how" className="btn btn-ghost">How it works →</Link>
               </div>
               <div className="row gap-6 mt-12">
                 {[
-                  ['Vault volume', '—', 'testnet only'],
-                  ['Active testers', '< 200', 'private beta'],
+                  ['Network', 'Polygon', 'mainnet beta'],
+                  ['Per-address cap', '$50k', 'USDC'],
                   ['Avg proof time', '30s – 2min', 'browser WASM'],
-                  ['Proof types', '5', 'circuits live'],
+                  ['Proof types', '9', 'circuits live'],
                 ].map(([l, v, s]) => (
                   <div key={l as string}>
                     <div className="micro">{l}</div>
@@ -463,8 +455,6 @@ export default function LandingPage() {
           <FinalCTA />
         </div>
       </section>
-
-      <SiteFooter />
     </div>
   )
 }

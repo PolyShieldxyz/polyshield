@@ -178,7 +178,7 @@ This prevents any single depositor from monopolizing the vault's Polymarket bala
 ### Q10 — Note loss recovery
 
 **Status:** RESOLVED (2026-05-20)
-**Resolution:** Option A — ECIES encryption with the depositor's wallet key.
+**Resolution:** Option A — ECIES encryption with the depositor's wallet key. **Superseded for P3+ by wallet-derived secrets (FC-5/FC-13):** new notes are reconstructible from chain + a single wallet signature, so no ECIES note backup is needed. This ECIES path survives only as an optional fallback for any residual P1/P2 random-secret notes. (Note: the FC-13 *encrypted IndexedDB cache* is a separate mechanism — it protects the performance cache at rest, not a recovery backup.)
 
 The note `(secret, balance, nonce)` is encrypted client-side using ECIES with the depositor's secp256k1 public key (derived from their connected wallet). The ciphertext is stored in two places: browser localStorage (for immediate recovery) and IPFS (pinned by the Proof Relay as a free service, for cross-device recovery).
 
@@ -449,9 +449,11 @@ These items emerged from the Claude Design prototype. They are not blockers for 
 **Impact:** SDK, frontend
 **Source:** Design prototype (DepositStep3 "Download encrypted backup", "Export encrypted backup" buttons)
 
-**Resolution rationale:** Secrets are now wallet-derived deterministically by deposit index (the P3+ model, implemented in FC-5). A wallet with zero local state reconstructs every note (balances, open positions, deposits, withdrawals, P&L) from on-chain events plus a wallet signature via `recoverNotes()` (`frontend/src/lib/notes.ts`). The wallet *is* the backup, so there is no per-deposit random secret to preserve and therefore no backup-file format to specify. The localStorage note cache holds no secret and is a performance convenience only; if wiped it is rebuilt by `recoverNotes`. The deposit-index counter is likewise recoverable by scanning `Deposited(W, ...)` events.
+**Resolution rationale:** Secrets are now wallet-derived deterministically (FC-5, and FC-13 which replaced the per-index scheme with a one-signature master seed). A wallet with zero local state reconstructs every note (balances, open positions, deposits, withdrawals, P&L) from on-chain events plus a single wallet signature via `recoverNotes()` (`frontend/src/lib/notes.ts`). The wallet *is* the backup, so there is no per-deposit random secret to preserve and therefore no backup-file format to specify. The note cache holds no secret; under FC-13 it is persisted **encrypted in IndexedDB** (a performance convenience, never a source of truth) and rebuilt by `recoverNotes` if wiped. The deposit-index counter is likewise recoverable by scanning `Deposited(W, ...)` events.
 
-**Downstream reconciliation (flagged, not yet applied):** with wallet-derived secrets as the model, the P1/P2 random-secret + ECIES-backup path is legacy. Q10 (note loss recovery via ECIES), T17 (note preimage loss), and the P1/P2 vs P3+ split in `CLAUDE.md` should be reconciled to the wallet-derived-default model. The encrypted backup survives only as an optional fallback for any residual P1/P2 notes, not a v1 deliverable. See FC-5.
+**Note (FC-13):** the encrypted IndexedDB note cache is distinct from the Q10 ECIES backup. The IDB encryption protects the *performance cache* at rest (non-extractable AES-GCM key, no signature to read); it is not a recovery backup (recovery is from chain + wallet). The Q10 ECIES backup remains relevant *only* for residual P1/P2 random-secret notes.
+
+**Downstream reconciliation (applied via FC-13):** with wallet-derived secrets as the model, the P1/P2 random-secret + ECIES-backup path is legacy. T12 (note grinding) and T17 (note preimage loss) are updated to the wallet-derived/FC-13 model; Q10 (note loss recovery via ECIES) survives only as an optional fallback for any residual P1/P2 notes. See FC-13.
 
 **Original open question (now moot):** Q10 had resolved that notes should be backed up via ECIES with the user's wallet key; the file format was left unspecified. Wallet-derived secrets remove the need entirely.
 

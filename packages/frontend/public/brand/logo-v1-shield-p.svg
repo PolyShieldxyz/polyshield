@@ -1,0 +1,15 @@
+<svg width="64" height="64" viewBox="0 0 32 32" fill="none" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="PolyShield logo — shield with cut-out P">
+  <defs>
+    <linearGradient id="psg1" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#3fd0e6"/>
+      <stop offset="1" stop-color="#9b6cf0"/>
+    </linearGradient>
+  </defs>
+  <!-- Filled shield: reads at small sizes and on light backgrounds, unlike a stroke-only mark -->
+  <path d="M16 2.5 L27.5 6.6 V15.8 C27.5 22.6 22.3 27.6 16 29.7 C9.7 27.6 4.5 22.6 4.5 15.8 V6.6 Z"
+        fill="url(#psg1)"/>
+  <!-- Negative-space "P": brand initial + privacy "sealed" read. Cut in the background color. -->
+  <path d="M12.2 9 H17.4 C19.9 9 21.6 10.7 21.6 13.1 C21.6 15.5 19.9 17.2 17.4 17.2 H14.7 V22.6 H12.2 Z
+           M14.7 11.3 V14.9 H17.1 C18.3 14.9 19 14.2 19 13.1 C19 12 18.3 11.3 17.1 11.3 Z"
+        fill="#06080B" fill-rule="evenodd"/>
+</svg>

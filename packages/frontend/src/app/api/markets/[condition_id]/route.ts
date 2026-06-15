@@ -1,6 +1,14 @@
+/**
+ * GET /api/markets/:conditionId — single market for the detail page (FC-15).
+ * Market metadata comes from the proof-relay catalog (ingest-on-miss there); the live CLOB order
+ * book + tick size are fetched here (kept in lib/polymarket.ts). No fixture fallback — an honest 404
+ * when the market can't be resolved.
+ */
 import { NextRequest, NextResponse } from 'next/server'
-import { fetchLiveMarket, fetchBook, fetchTickSize } from '@/lib/polymarket'
-import { MARKETS } from '@/lib/marketsData'
+import { fetchBook, fetchTickSize, type LiveMarket } from '@/lib/polymarket'
+
+const RELAY_URL = process.env.PROOF_RELAY_URL ?? 'http://127.0.0.1:3002'
+export const dynamic = 'force-dynamic'
 
 const EMPTY_BOOK = {
   bids: [{ price: '0.49', size: '0.00' }],
@@ -8,31 +16,28 @@ const EMPTY_BOOK = {
   hash: `0x${'0'.repeat(64)}`,
 }
 
-// Single live Polymarket market by conditionId + its CLOB order book. Falls back to a
-// fixture only if Gamma can't resolve the conditionId.
 export async function GET(
   _req: NextRequest,
   { params }: { params: Promise<{ condition_id: string }> }, // Next 15: params is async
 ): Promise<NextResponse> {
   const { condition_id } = await params
 
-  const live = await fetchLiveMarket(condition_id)
-  if (live) {
-    // tickSize feeds L1 ceiling pricing (lib/pricing.ts) so the committed price snaps to the same
-    // tick the CLOB executes on. Default 0.001 matches the signing layer's budgetedBuyOrder.
-    const [book, tickSize] = await Promise.all([
-      live.yesTokenId ? fetchBook(live.yesTokenId) : Promise.resolve(null),
-      live.yesTokenId ? fetchTickSize(live.yesTokenId) : Promise.resolve(0.001),
-    ])
-    return NextResponse.json({ market: live, source: 'live', book: book ?? EMPTY_BOOK, tickSize })
+  let market: LiveMarket | null = null
+  try {
+    const res = await fetch(`${RELAY_URL}/markets/${encodeURIComponent(condition_id)}`, { cache: 'no-store' })
+    if (res.ok) market = ((await res.json()) as { market?: LiveMarket }).market ?? null
+  } catch {
+    /* fall through to 404 */
+  }
+  if (!market) {
+    return NextResponse.json({ error: 'This market is unavailable.' }, { status: 404 })
   }
 
-  // Degraded fallback (Gamma unreachable / non-binary conditionId).
-  const base =
-    MARKETS.find(
-      (m) =>
-        m.conditionId.toLowerCase() === condition_id.toLowerCase() ||
-        m.id.toLowerCase() === condition_id.toLowerCase(),
-    ) ?? MARKETS[0]
-  return NextResponse.json({ market: base, source: 'fixture', book: EMPTY_BOOK, tickSize: 0.001 })
+  // tickSize feeds L1 ceiling pricing (lib/pricing.ts) so the committed price snaps to the same tick
+  // the CLOB executes on; default 0.001 matches the signing layer's budgetedBuyOrder.
+  const [book, tickSize] = await Promise.all([
+    market.yesTokenId ? fetchBook(market.yesTokenId) : Promise.resolve(null),
+    market.yesTokenId ? fetchTickSize(market.yesTokenId) : Promise.resolve(0.001),
+  ])
+  return NextResponse.json({ market, source: 'live', book: book ?? EMPTY_BOOK, tickSize })
 }

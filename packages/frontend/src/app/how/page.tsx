@@ -2,11 +2,11 @@ import Link from 'next/link'
 
 /* ── Palette (mirrors styles/globals.css :root) ──────────────────────────── */
 const C = {
-  node: '#0E1218',
+  node: '#0E141C',
   line: 'rgba(255,255,255,0.14)',
   lineSoft: 'rgba(255,255,255,0.07)',
   text: '#E6EAF0',
-  text2: '#7A828F',
+  text2: '#8B94A2',
   cyan: 'oklch(0.82 0.13 210)',
   violet: 'oklch(0.70 0.15 290)',
   green: 'oklch(0.78 0.16 152)',
@@ -31,7 +31,7 @@ function ArchitectureDiagram() {
 
   return (
     <div style={{ overflowX: 'auto', border: '1px solid var(--line)', borderRadius: 12, background: 'linear-gradient(180deg, var(--bg-1), var(--bg))', padding: 8 }}>
-      <svg viewBox="0 0 920 430" width="100%" style={{ minWidth: 760, display: 'block' }} role="img" aria-label="Polyshield privacy architecture">
+      <svg viewBox="0 0 920 430" width="100%" style={{ minWidth: 760, display: 'block' }} role="img" aria-label="PolyShield privacy architecture">
         <defs>
           <marker id="arw" markerWidth="9" markerHeight="9" refX="6.5" refY="3" orient="auto">
             <path d="M0,0 L6.5,3 L0,6 Z" fill="rgba(255,255,255,0.45)" />
@@ -183,7 +183,7 @@ const THREATS = [
   { threat: 'Backend index de-anonymizes or forges notes', mitigated: true, how: 'Serves only public data; client matches by its own nullifier — worst case is incomplete recovery' },
   { threat: 'Forged deposit balance, double-spend, or inflated credit', mitigated: true, how: 'Blocked on-chain by the circuits + Vault-injected values, regardless of who sends the tx' },
   { threat: 'Calling a spend function from your OWN wallet', mitigated: false, how: 'Self-deanonymizes — the frontend never does this; it is a client discipline (threat T19)' },
-  { threat: 'That a wallet used Polyshield at all', mitigated: false, how: 'Vault.deposit() is a public ERC-20 transfer — only post-deposit activity is private' },
+  { threat: 'That a wallet used PolyShield at all', mitigated: false, how: 'Vault.deposit() is a public ERC-20 transfer — only post-deposit activity is private' },
   { threat: 'Owner can upgrade the contracts instantly (UUPS)', mitigated: false, how: 'Largest trust assumption — the owner key must be a multisig/HSM in production' },
 ]
 
@@ -193,7 +193,7 @@ export default function HowItWorksPage() {
       <div className="micro" style={{ color: 'var(--cyan)' }}>HOW IT WORKS</div>
       <h1 className="h2 mt-3" style={{ margin: 0 }}>Private prediction markets, step by step.</h1>
       <p className="body mt-4" style={{ maxWidth: 640 }}>
-        Polyshield uses zero-knowledge proofs to hide which depositor placed which bet. The vault is a single Polymarket
+        PolyShield uses zero-knowledge proofs to hide which depositor placed which bet. The vault is a single Polymarket
         account shared by everyone in the pool — so on-chain, every bet looks the same. Here is the full flow.
       </p>
 

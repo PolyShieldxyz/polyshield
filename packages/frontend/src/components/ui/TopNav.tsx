@@ -7,7 +7,9 @@ import { useEffect, useRef, useState } from 'react'
 import { usePathname } from 'next/navigation'
 import { Logo } from './Logo'
 import { Icon, ICONS } from './Icon'
+import { NETWORK_STATUS } from '@/lib/brand'
 import { clearNoteCache } from '@/lib/notes'
+import { clearSession } from '@/lib/secretSession'
 import { formatUsdc } from '@/lib/notes'
 import { usePortfolioState } from '@/lib/accountState'
 
@@ -16,7 +18,6 @@ const NAV_LINKS: [string, string][] = [
   ['/how', 'How It Works'],
   ['/docs', 'Docs'],
   ['/roadmap', 'Roadmap'],
-  ['/careers', 'Careers'],
 ]
 
 export function TopNav() {
@@ -54,7 +55,7 @@ export function TopNav() {
           </Link>
           <div className="pill pill-soft" style={{ fontSize: 10 }}>
             <span className="dot" style={{ background: 'var(--green)', boxShadow: '0 0 8px var(--green)' }}></span>
-            TESTNET · POLYGON AMOY
+            {NETWORK_STATUS}
           </div>
         </div>
         <div className="nav-links">
@@ -69,7 +70,6 @@ export function TopNav() {
           ))}
         </div>
         <div className="row gap-3">
-          <Link href="/testnet" className="btn btn-sm btn-ghost">Testnet</Link>
           <a href={launchHref} className="btn btn-sm btn-primary">
             Launch App <Icon d={ICONS.arrow} size={12} />
           </a>
@@ -88,6 +88,7 @@ function AppTopNav({ pathname }: { pathname: string }) {
   useEffect(() => {
     if (!isConnected) {
       clearNoteCache()
+      clearSession() // FC-13: drop the in-memory master seed when no wallet is connected
     }
   }, [isConnected])
 

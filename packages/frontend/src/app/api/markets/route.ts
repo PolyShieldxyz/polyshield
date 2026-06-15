@@ -1,13 +1,20 @@
-import { NextResponse } from 'next/server'
-import { fetchLiveMarkets } from '@/lib/polymarket'
-import { MARKETS } from '@/lib/marketsData'
+/**
+ * GET /api/markets — proxies the proof-relay market CATALOG (FC-15).
+ * Passes through offset/limit/sort/category/q. The catalog (proof-relay) is the cache and the
+ * single bettable-only source; this route does no Gamma call and no fixture fallback. Returns
+ * { markets, total }. On proof-relay outage it returns 503 so the UI shows an honest error.
+ */
+import { NextRequest, NextResponse } from 'next/server'
 
-// Live Polymarket market list (binary YES/NO, top by 24h volume). Falls back to the
-// local fixtures only if the Gamma API is unreachable, so the page is never empty.
-export const revalidate = 30
+const RELAY_URL = process.env.PROOF_RELAY_URL ?? 'http://127.0.0.1:3002'
+export const dynamic = 'force-dynamic' // always proxy; freshness is the catalog's job, not ISR
 
-export async function GET(): Promise<NextResponse> {
-  const live = await fetchLiveMarkets(48)
-  if (live.length > 0) return NextResponse.json(live)
-  return NextResponse.json(MARKETS) // degraded fallback
+export async function GET(req: NextRequest): Promise<NextResponse> {
+  try {
+    const res = await fetch(`${RELAY_URL}/markets${req.nextUrl.search}`, { cache: 'no-store' })
+    if (!res.ok) return NextResponse.json({ markets: [], total: 0 }, { status: res.status })
+    return NextResponse.json(await res.json())
+  } catch {
+    return NextResponse.json({ error: 'Markets are temporarily unavailable. Please retry shortly.' }, { status: 503 })
+  }
 }

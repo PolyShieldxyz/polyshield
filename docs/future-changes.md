@@ -257,15 +257,15 @@ To confirm at implementation time: exact `PartialFillPublicInputs` ordering agai
 
 ### What exists
 
-`frontend/src/lib/notes.ts` already implements `recoverNotes()`: it scans Vault events (`Deposited` filtered by depositor, `BetAuthorized`, `SettlementCredited`, `BetCancellationCredited`, `NACancellationCredited`, `Withdrawn`), re-derives each deposit's secret from the wallet signature per deposit index, matches commitments, and replays the note chain to rebuild balances, open `BET_RECEIPT` positions, and spent state. All client-side RPC reads, no server, no privacy loss.
+`frontend/src/lib/notes.ts` already implements `recoverNotes()`: it scans Vault events (`Deposited` filtered by depositor, `BetAuthorized`, `SettlementCredited`, `BetCancellationCredited`, `NACancellationCredited`, `Withdrawn`), re-derives each deposit's secret (FC-13: from the single master-seed signature, V1 per-index as fallback), matches commitments, and replays the note chain to rebuild balances, open `BET_RECEIPT` positions, and spent state. All client-side reads (events served by the backend index, FC-12), no server, no privacy loss.
 
-### Foundation: wallet-derived secrets (P3+)
+### Foundation: wallet-derived secrets
 
-Recovery only works because secrets are deterministic in P3+. The derivation is a protocol constant:
+Recovery only works because secrets are deterministic. **Superseded by FC-13:** new deposits use the V2 master-seed scheme — `master_seed = keccak256(wallet.sign("PolyShield master seed\nAddress: {W}\nVersion: 2"))`, then `secret_i = keccak256(master_seed ‖ uint32(i)) mod p` — so the whole wallet recovers from ONE signature. The legacy V1 constant is still honored for pre-FC-13 notes:
 
 `secret = keccak256(wallet.signMessage("PolyShield deposit derivation\nAddress: {W}\nIndex: {i}\nVersion: 1")) mod p`
 
-The message string and version must never change after mainnet deployment. In P1/P2 (random secrets) a cache wipe is unrecoverable without the ECIES backup, so the "rebuild everything from chain + wallet" guarantee is conditional on P3+. Recommendation: make P3+ the default before relying on recovery, and treat the encrypted backup as the only fallback for P1/P2 notes.
+Both message strings are frozen protocol constants and must never change after mainnet deployment. In P1/P2 (random secrets) a cache wipe is unrecoverable without the ECIES backup, so the "rebuild everything from chain + wallet" guarantee is conditional on wallet-derived secrets being the default. Recovery tries V2 first and falls back to V1 per index; see FC-13.
 
 ### Gaps to close so EVERYTHING actually rebuilds
 
@@ -499,4 +499,111 @@ The backend index serves only PUBLIC, anonymous on-chain data. It cannot link sp
 ### Remaining / hardening
 - Client-side trust check: verify the served `currentRoot` against the on-chain tree (not yet wired).
 - Past `MarketResolved` events aren't back-indexed for the Explorer (the event-index cursor finished before that event type was added); resets re-scan. Recovery is unaffected.
-- The local note cache can desync from chain if a settle tx lands but the tab is reloaded mid-flight before localStorage updates (shows a settled bet as "pending"); **Restore** reconciles it.
+- The local note cache can desync from chain if a settle tx lands but the tab is reloaded mid-flight before the cache updates (shows a settled bet as "pending"); the FC-13 silent reconcile (and manual **Restore/Sync**) reconcile it.
+
+---
+
+## FC-13: One-signature recovery (V2 master-seed derivation) + encrypted IndexedDB note cache (IMPLEMENTED 2026-06-14)
+
+Status: **implemented** (frontend only — NO circuit, contract, or backend changes). Authoritative spec for the change. Motivated by the recovery/UX pain: a cache wipe forced **one wallet signature per deposit index** (the index was baked into the V1 derivation message), and *every* bet/withdraw/consolidate re-signed because secrets were never kept. The note cache also lived in **plaintext localStorage** (trivially read by other scripts/extensions/sync tools, and easily wiped).
+
+This is a **sign-off-gated change** — it introduces a new derivation message string/version, which CLAUDE.md ("What Requires Project Agent Sign-Off") lists as requiring Project Agent approval. Approved by George (2026-06-14). Both message strings are now frozen protocol constants.
+
+### A. V2 master-seed derivation (one signature → all secrets)
+- New constant: `masterSeedMessageV2(W) = "PolyShield master seed\nAddress: {W}\nVersion: 2"` (frozen).
+- `master_seed = keccak256(wallet.sign(messageV2))`; `secret_i = keccak256(master_seed ‖ uint32(i)) mod p` — distinct per index, **pure local compute**, zero further signatures.
+- The seed is held **in memory only** for the session (`packages/frontend/src/lib/secretSession.ts`), never persisted to localStorage / IndexedDB / any server. Cleared on disconnect and on tab close. This preserves the "the secret is NOT persisted" invariant (CLAUDE.md): a returning user signs once per session; a stolen device yields no spendable key. Decision (George): memory-only over persisted-encrypted, accepting ~1 signature per page reload to keep the no-persist invariant.
+
+### B. Backward compatibility (legacy V1 notes keep working)
+- Each cached note carries `derivationVersion: 1 | 2`. Spend paths dispatch via `getNoteSecret(sign, addr, index, version)`; untagged pre-FC-13 notes default to **V1**.
+- **New deposits use V2.**
+- **Recovery tries V2 first, falls back to V1 per index** (`recoverNotesWithClient`): derive the master seed once (reusing an already-unlocked session seed via the injected `getMasterSeed`), map each on-chain `Deposited` commitment to its index by the free V2 derivation; only commitments V2 can't match fall back to per-index V1 signing. An all-V2 wallet recovers in **exactly one signature**; only genuine legacy indices cost one extra each. The resolved version is written onto each recovered note.
+
+### C. Encrypted IndexedDB note cache behind the existing synchronous API
+- The sensitive cache (`polyshield:notes`, `polyshield:activity` — commitments/balances/nonces/bet-receipt linkage) moves from plaintext localStorage to **IndexedDB encrypted with a non-extractable AES-GCM `CryptoKey`** (`packages/frontend/src/lib/cacheStore.ts`). The key is generated once and stored as an opaque `CryptoKey` object (`extractable: false`) — its raw bytes can never be exported.
+- The in-memory `cachedNotes`/`cachedActivity` remain the **synchronous** working set (all the existing sync getters are unchanged). `hydrateCache()` reads the encrypted store into memory once on app start (gated by `useNotesHydration()` in `app/app/layout.tsx`); writes update memory synchronously then fire-and-forget the encrypted persist. A one-time migration imports any legacy plaintext localStorage cache into the encrypted store and deletes the plaintext copies.
+- Operational counters that are non-sensitive and read synchronously by the chain-reset detector — `deposit_index`, `last_block`, `chain_fp` — intentionally stay in localStorage (deposit count is already public via `/recovery-data`).
+- **Threat model:** at-rest protection vs. casual inspection, extensions, and backup/sync scrapers — NOT a fully compromised device that can drive the page's own crypto. Acceptable because note secrets are never persisted regardless.
+
+### D. Silent background reconcile + E. determinate progress
+- The existing `reconcileSpentStatus` (no-secret, marks a cached note spent when its stored nullifier is on-chain spent) already heals the common "settled but shows pending" desync each poll. FC-13 adds: on portfolio load, compare the on-chain deposit count (public `/recovery-data`) to the local cache; if chain has more AND the session seed is unlocked, **auto-recover silently (zero prompts)**; if locked, surface a one-signature **"Sync from chain"** affordance instead of silently prompting.
+- `/recovery-data.deposits[]` gives the total up front → a determinate "Restoring N/total" progress bar (`onProgress` threaded through `recoverNotes`/`recoverNotesViaBackend` → `recoverNotesWithClient`).
+
+### Files
+- New: `lib/secretSession.ts`, `lib/cacheStore.ts`, `lib/useNotesHydration.ts`.
+- `lib/notes.ts`: V2 primitives (`deriveMasterSeed`/`deriveSecretV2`, `masterSeedMessageV2`), `deriveSecretV1` alias, `derivationVersion` on `Note`, IDB-backed `saveAll`/`saveActivity` + `hydrateCache`/`migrateLegacyLocalStorage`, recovery V2-first/V1-fallback + `onProgress`/`getMasterSeed`, `resetAllLocalState` wipes the encrypted store.
+- Consumers pass `getNoteSecret(..., note.derivationVersion ?? 1)` and stamp `derivationVersion` on created notes; disconnect paths call `clearSession()`.
+
+### Tests
+`secretSession.test.ts` (one-sig-per-session, version dispatch, lifecycle), `cacheStore.test.ts` (encrypt/decrypt round-trip + ciphertext-not-plaintext, via `fake-indexeddb`), and two `recovery.acceptance.test.ts` cases (all-V2 = exactly one signature; mixed V1+V2 tags each lineage). All existing recovery fixtures pass unchanged through the V1 fallback.
+
+### Non-goals
+No persisted master seed; no wallet-signature-derived cache key (random IDB key, so the portfolio hydrates with zero signatures); no removal of the V1 path; no circuit/contract/backend changes.
+
+---
+
+## FC-14: Partial-fill correctness + on-chain fee recording, proportional refunds, 0.2% fee (IMPLEMENTED 2026-06-14)
+
+Status: **implemented** (contracts + backend + frontend; **NO circuit/verifier change**). Requires a live-mainnet UUPS Vault upgrade + an owner `setFeeParams` tx. Touches "the protocol fee mechanism" (a CLAUDE.md sign-off item) — authorized by George 2026-06-14.
+
+### Problem
+1. **Every market buy showed as a >90% "partial fill" with a $0 "reclaim."** `bet_auth.circom` binds `expected_shares = ⌊bet_amount·1e8/price⌋` (fee-naive), but the Polymarket taker fee is paid from the same stake, so the achievable fill is always `≈ expected_shares·(1−fee)` → `filled < expected_shares` on every buy → PARTIAL; full stake spent → `refund = bet_amount − spent = 0`. The reconciliation (`partialFillCredit`, which normalizes `expected_shares → actual`) is mandatory before settlement (else the shared pool is over-credited), but it was surfaced as a confusing per-bet chore, and the **close path inherited the inflated `expected_shares`** → "full" closes mis-recorded as partial, leaving phantom shares.
+2. **Fee not recorded on-chain** → a governance rate change corrupted recovery (the client recomputed from the *current* `feeConfig`); and cancelled/partially-filled bets kept the full protocol fee even though the order didn't (fully) execute.
+
+### A. Partial-fill correctness (frontend-only)
+- **Auto-finalize** (`frontend/src/lib/finalizePartial.ts`, wired in `app/app/portfolio/page.tsx`): when a receipt is on-chain `ACTIVE` with a `PARTIAL` attestation **and the V2 master seed is already unlocked**, the client silently builds the `partial_credit` proof (in-memory seed → no prompt) and relays it (no wallet tx), normalizing the record to `FILLED`. A market buy just becomes **"Filled — N shares"**; no $0 reclaim. Genuine thin-book partials still refund the real remainder.
+- `expected_shares` is **kept as the committed cryptographic cap** (settlement/close only ever credit *down* from it via the operator-attested actual fill — bounds rogue-operator over-crediting of the shared pool). Option B (operator-authoritative shares) was rejected for that reason.
+- Close path needs no direct change — once `expected_shares` is normalized, `fullClose = (sold == expected)` is exact and phantom shares disappear.
+- **Honest quotes**: bet modal shows `≈ shares after ~Polymarket fee`; close modal shows proceeds **net of the sell taker fee**. Pre-fill figure is an estimate (`NEXT_PUBLIC_CLOB_TAKER_FEE_BPS`, 0 → gross); the exact count comes from the post-fill attestation.
+
+### B. On-chain fee recording + proportional refunds (contract upgrade)
+- The fee is split at `authorizeBet` into **`protocolFee = bet_amount·betFeeBps/10000`** and **`relayFee = relayGasFeeUSDC`**; the **sum** is still injected to `bet_auth` (bettor behavior unchanged). `protocolFee` is stored in a new `mapping(bytes32 => uint64) public betProtocolFee` (NOT in `BetRecord` — a 13-field struct getter blows the legacy-codegen stack; `__gap` 46→45). Both are emitted in **`BetAuthorized`** (recovery reads the exact fee → rate-change-proof, #1).
+- **Provisional vs claimable accounting (SC-01 proper fix).** `feeAccumulator` holds only **claimable** (non-refundable) fees: the **relay fee is added at `authorizeBet`** (earned at submission), but the **protocol fee is held provisionally in `betProtocolFee`** and is **released into `feeAccumulator` only when the bet reaches a terminal-executed state** — `creditSettlement`, a **full** `closePosition`, or `naCancellationCredit` (each via `_releaseProtocolFee`, idempotent: zeroes the entry). Because a refund never touches `feeAccumulator`, the prior underflow vector (refunding a fee the recipient already withdrew) is structurally impossible. `withdrawFees` is unchanged (bounded by `feeAccumulator`, now strictly-claimable).
+- **Refunds (relay fee always kept):** `betCancellationCredit` injects `bet_amount + protocolFee` (full — the bet never executed) and clears `betProtocolFee`; `feeAccumulator` is untouched. `partialFillCredit` injects `(bet_amount − spent) + ⌊protocolFee·(bet−spent)/bet⌋` (refunds the unexecuted part) and **releases the executed-part fee** to `feeAccumulator` (the library returns it; the wrapper does `feeAccumulator += earned`). **N/A (void) markets keep the protocol fee** (the bet executed) → released as earned.
+- **No verifier/circuit change** — `verifyBetCancel`/`verifyPartialCredit` still take one injected `uint64`; only its value changed (and the user-facing refund is identical to the first cut, so frontend/recovery are untouched by the SC-01 fix). Frontend (`BetCancelRefundModal`, `PartialFillCreditModal` via `fetchBetProtocolFee`) and recovery (`notes.ts`, reading `protocolFee` from the event) compute the identical floor-division refund.
+
+### C. Protocol fee → 0.2%
+`initialize` default `betFeeBps 5 → 20` (fresh deploys/docs). The **live** change is the operational `setFeeParams(betFeeBps=20)` owner tx (the proxy doesn't re-run `initialize`); the frontend reads `feeConfig` live.
+
+### D. #6 (document-only)
+Accrued `feeAccumulator` is not reserved against JIT deployment, so `withdrawFees` can transiently revert if capital is deployed. Accepted (owner-trusted recipient, small fees, `deploymentCap`-bounded). See `docs/threat-model.md`.
+
+### Files
+- Contracts: `VaultInputs.sol` (unchanged BetRecord), `Vault.sol` (fee split, `betProtocolFee` mapping + `__gap`, event, `initialize` 20, `_releaseProtocolFee` + release calls in the settle/close/N/A wrappers, `feeAccumulator += relayFee`), `VaultLogic.sol` (cancel/partial refund math; `closePosition` returns `fullClose`; `partialFillCredit` returns earned fee).
+- Backend: `proof-relay/src/eventIndex.ts` (BetAuthorized ABI + decode).
+- Frontend: `lib/api.ts` (`fetchBetProtocolFee`), `lib/notes.ts` (exact-fee recovery + proportional refund replay + `protocolFee` on the receipt + (de)serialize), `lib/finalizePartial.ts` (new), `app/app/portfolio/page.tsx` (auto-finalize effect), `components/app/{BetCancelRefundModal,PartialFillCreditModal,BetModal,ClosePositionModal}.tsx`.
+
+### Tests
+Foundry: cancel refunds `bet+protocolFee` & decrements `feeAccumulator`; partial refunds pro-rata; fee-only partial refunds 0; N/A keeps fee (`Vault.t.sol`, 4 new — 162 pass, `RealVerifier` green = no circuit impact). Vitest: exact-fee-from-event recovery immune to a later rate change (`recovery.acceptance.test.ts`); all legacy fixtures pass via the no-fee-fields fallback.
+
+### Deploy
+1. UUPS-upgrade the live Vault, then `setFeeParams(betFeeBps=20)`. 2. Ship backend (event ABI) + frontend with/after the upgrade (refund math depends on the new injected values + `betProtocolFee`).
+
+### Non-goals
+No circuit/verifier change; no operator-authoritative shares (cap preserved); no `relayGasFeeUSDC` rename; no #6 code change; bettor-facing fee model unchanged (protocol fee "on top"; PM fee off-the-top).
+
+---
+
+## FC-15: Live markets browsing overhaul — catalog + live search + smooth refresh + anonymous analytics (IMPLEMENTED 2026-06-14)
+
+Status: **implemented** (data/UX layer; **no on-chain/circuit/Vault change**). Prepping the markets page for live beta. Fixes: only ~88 markets fetched (no pagination), janky refresh (10s poll vs 30s ISR → stale/reordering), resolved/ended markets leaking in, silent fixture fallback, and a "shown ≠ routable" dead-end.
+
+### proof-relay = public market catalog (new `marketCatalog.ts` + endpoints)
+- SQLite `market_catalog` synced from Gamma every ~10 min (`syncCatalog`: volume + soon-resolving passes, offset-paginated to ~thousands), mapping ported from `frontend/src/lib/polymarket.ts`. **Bettable-only filter** at write AND read: binary (Yes/No or Up/Down) + `enableOrderBook` + `acceptingOrders` + `endDate>now` (kills resolved/ended leakage, even between syncs). Scheduled from `index.ts` (`MARKET_CATALOG_DISABLED=true` to skip for offline dev).
+- Endpoints (`api.ts`): `GET /markets` (paginated/sort/category/q from catalog, no Gamma call), `GET /markets/search` (catalog `LIKE` first → on sparse hits, Gamma **`public-search`** → upsert long-tail → merged), `GET /markets/prices` (batch CLOB midpoints = fast odds overlay), `GET /markets/:conditionId` (catalog, ingest-on-miss). Rate-limited.
+- **Anonymous analytics** (`analytics.ts`, `POST /analytics`): aggregate `(scope,key)→count` only — `market_view`/`tag_click`/`sort_change`/`category_click`/`search_query`/`search_live`. **No wallet/IP/id** (deanonymization guard); unknown scopes rejected; disclosed on the privacy page.
+
+### signing-layer routability (#5)
+- `marketRegistry.syncOneMarket(conditionId)` (Gamma fetch by conditionId → authoritative tokens → upsert) + `autoSettlement` `POST /register-market {conditionId}` (operator-auth). The frontend calls it on market-open (via the existing `/api/signing` proxy, which injects the operator token) so a live-searched / long-tail market is routable before the user can bet — the signing layer fetches the tokens itself (never trusts a client-supplied mapping). Periodic `syncMarkets()` still covers the bulk.
+
+### frontend
+- Markets page rebuilt on **react-query** (already a dep via wagmi — no new lib): paginated catalog browse (`keepPreviousData`, 60s refetch, load-more), **decoupled odds overlay** (`/api/markets/prices`, ~12s, merged in place → no row reorder), skeleton/empty/**error** states. **Search**: instant client filter of the loaded set every keystroke; debounced (~350ms, ≥3 chars) live `/api/markets/search` only when local hits `<5`, with a "Searching Polymarket…" indicator; merged + cached. Client also hides rows that flip ended/not-accepting between refreshes.
+- Detail page: register-market on open (#5); honest loading/unavailable states; **fixture fallback removed** from the rendered path (route is `force-dynamic`, so the 10s poll is now truly fresh — old 15s-ISR/10s-poll mismatch gone). `lib/analytics.ts` fires events (sendBeacon).
+- Next proxies: `/api/markets` (+ `search`, `prices`, `[condition_id]`), `/api/analytics`; `register-market` reuses `/api/signing/[...slug]`. `polymarket.ts` keeps only book/tick/history helpers; `fetchLiveMarkets` retired from the live path; no fixture fallback.
+
+### Tests / verification
+- proof-relay jest: `toCatalogRow` filters (rejects non-binary / no-orderbook / not-accepting / closed / ended; accepts Yes/No + Up/Down), `queryCatalog` read-time guard + sort + pagination, analytics increments + **privacy invariant** (table has only `scope,key,count` — no wallet/IP/id). signing-layer jest unchanged (57 pass). frontend `tsc` + 22 vitest + `next build` green. Contracts untouched.
+- **Remaining (manual):** live e2e on the dev stack (`pnpm dev:mock` + `dev:frontend`) — catalog syncs from real Gamma; open a live-searched market → it registers → place a (mock-CLOB) bet → routes with no dead-end.
+
+### Non-goals
+No on-chain/circuit/Vault change; not mirroring ALL Polymarket markets (large curated pool + live search for the tail); no per-user analytics (aggregate only); FC-11 settlement `conditionId` placeholder untouched.

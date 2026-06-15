@@ -120,8 +120,11 @@ contract Vault is
     // concrete limit post-deploy via setDeploymentCap to bound a compromised operator.
     uint256 public deploymentCap; // set to type(uint256).max in initialize()
 
-    // FEE (P2/P4): governance-mutable fee parameters + accrued-fee balance. feeAccumulator is
-    // USDC sitting in the pool that is owed to feeConfig.feeRecipient (claimable via withdrawFees).
+    // FEE (P2/P4): governance-mutable fee parameters + accrued-fee balance. feeAccumulator is the
+    // CLAIMABLE (final) fee balance owed to feeConfig.feeRecipient (withdrawFees). FC-14: it holds
+    // only NON-refundable fees — relay fees (earned at submission) plus protocol fees RELEASED at a
+    // terminal-executed state. Provisional (refundable) protocol fees live per-bet in betProtocolFee
+    // until earned, so a cancel/partial refund never decrements feeAccumulator (no underflow; SC-01).
     FeeConfig public feeConfig;
     uint256 public feeAccumulator;
 
@@ -132,11 +135,17 @@ contract Vault is
     // ctf.payout*(realConditionId). Trustless: writes verify conditionId % BN254_P == circuit_key.
     mapping(bytes32 => bytes32) public conditionIdOf;
 
+    // FC-14: protocol fee charged per bet (nullifier_of_bet => protocolFee, USDC micro-units).
+    // Refunded in full on a cancel and pro-rata on the unexecuted portion of a partial fill; the
+    // relay-gas portion is never refunded (it's emitted in BetAuthorized for recovery, not stored).
+    mapping(bytes32 => uint64) public betProtocolFee;
+
     /// @dev Reserved storage slots for future UUPS upgrades. Append new state by
     /// shrinking this gap; never reorder or remove the state variables declared above.
     /// FEE added FeeConfig (2 slots) + feeAccumulator (1 slot): __gap 50 -> 47.
     /// FC-11 added conditionIdOf (1 slot): __gap 47 -> 46.
-    uint256[46] private __gap;
+    /// FC-14 added betProtocolFee (1 slot): __gap 46 -> 45.
+    uint256[45] private __gap;
 
     // -------------------------------------------------------------------------
     // Errors
@@ -199,7 +208,11 @@ contract Vault is
         uint256 bet_amount,
         uint64 price,
         uint8 outcome_side,
-        bytes32 new_commitment
+        bytes32 new_commitment,
+        // FC-14: the fee split is recorded on-chain so recovery is exact across governance rate
+        // changes and cancel/partial paths can refund the protocol fee pro-rata.
+        uint64 protocolFee,
+        uint64 relayFee
     );
     event FundedPolymarketWallet(uint256 amount);
     event PolymarketReturnAcknowledged(uint256 amount, uint256 vaultUsdcBalance);
@@ -267,13 +280,14 @@ contract Vault is
         adminCancelTimelock = 86_400;          // 24 hours
         deploymentCap = type(uint256).max;     // unlimited until governance sets a cap (SEC-007)
 
-        // FEE defaults (governance-mutable via setFeeParams). betFeeBps = 5 (0.05%);
+        // FEE defaults (governance-mutable via setFeeParams). betFeeBps = 20 (0.2%, FC-14);
         // relay gas reimbursement starts at 0 (governance sets the live USDC rate);
         // $1 min bet (Polymarket floor); $0.10 withdrawal fee; $1 min withdrawal (testing).
         // NOTE: proxies upgraded (not freshly initialized) into this version must call
-        // setFeeParams once — initialize does not re-run on an existing proxy.
+        // setFeeParams once — initialize does not re-run on an existing proxy (the LIVE rate
+        // change to 0.2% is the operational setFeeParams tx, not this default).
         feeConfig = FeeConfig({
-            betFeeBps: 5,
+            betFeeBps: 20,
             relayGasFeeUSDC: 0,
             minBet: 1_000_000,
             withdrawalFeeUSDC: 100_000,
@@ -489,14 +503,24 @@ contract Vault is
         // current_balance - bet_amount - fee; a user cannot substitute a smaller fee (their
         // new_commitment would not match the injected value and verification fails). Applies
         // uniformly to every order type (FOK/FAK/GTC/GTD) — order type is an off-chain concern.
+        // FC-14: split the fee into its protocol (bps) and relay (flat) components. The injected
+        // value to the verifier is their SUM — identical to the prior behavior, so the bettor's
+        // proof/balance is unchanged. The relay fee is earned at submission (never refunded) so it's
+        // claimable immediately (feeAccumulator). The protocol fee is PROVISIONAL — refundable on a
+        // cancel/partial — so it is held per-bet in `betProtocolFee` and only released into the
+        // claimable `feeAccumulator` when the bet reaches a terminal-executed state (settle / full
+        // close / N/A). This keeps `feeAccumulator` = strictly-claimable, so a refund never
+        // decrements it (no underflow — see docs/threat-model.md, FC-14 SC-01).
         FeeConfig memory fc = feeConfig;
         if (inputs.bet_amount < fc.minBet) revert BelowMinimum();
-        uint64 fee = uint64(uint256(inputs.bet_amount) * fc.betFeeBps / 10_000) + fc.relayGasFeeUSDC;
+        uint64 protocolFee = uint64(uint256(inputs.bet_amount) * fc.betFeeBps / 10_000);
+        uint64 relayFee = fc.relayGasFeeUSDC;
+        uint64 fee = protocolFee + relayFee;
 
         if (!VaultInputs.verifyBetAuth(verifiers[BET_AUTH], proof, inputs, fee)) revert InvalidProof();
 
         _spendAndInsert(inputs.nullifier, inputs.new_commitment);
-        feeAccumulator += fee;
+        feeAccumulator += relayFee; // protocolFee stays provisional in betProtocolFee until earned
 
         betRecords[inputs.nullifier] = BetRecord({
             market_id: inputs.market_id,
@@ -511,6 +535,9 @@ contract Vault is
             filled_shares: 0,
             spent_amount: 0
         });
+        // FC-14: protocol fee stored in its own mapping (keeps BetRecord's getter small — a 13-field
+        // tuple getter blows the legacy-codegen stack). relayFee is recovery-only → event, not stored.
+        betProtocolFee[inputs.nullifier] = protocolFee;
         betCreatedAt[inputs.nullifier] = uint64(block.timestamp);
 
         emit BetAuthorized(
@@ -521,7 +548,9 @@ contract Vault is
             uint256(inputs.bet_amount),
             inputs.price,
             inputs.outcome_side,
-            inputs.new_commitment
+            inputs.new_commitment,
+            protocolFee,
+            relayFee
         );
     }
 
@@ -656,6 +685,20 @@ contract Vault is
         VaultLogic.creditSettlement(
             _ctx(), betRecords, pendingCredit, marketResolvedAt, verifiers[SETTLEMENT_CREDIT], proof, inputs, att, sig
         );
+        // FC-14: settlement is terminal-executed → the bet's provisional protocol fee is now EARNED.
+        // Release it into the claimable balance (no-op if 0 / already released by a prior partial).
+        _releaseProtocolFee(inputs.nullifier_of_bet);
+    }
+
+    /// @dev FC-14: move a bet's provisional protocol fee (betProtocolFee) into the claimable
+    /// feeAccumulator once it's earned (terminal-executed: settle / full close / N/A). Idempotent —
+    /// zeroes the entry so it can never be released or refunded twice.
+    function _releaseProtocolFee(bytes32 nullifier_of_bet) internal {
+        uint64 pf = betProtocolFee[nullifier_of_bet];
+        if (pf != 0) {
+            betProtocolFee[nullifier_of_bet] = 0;
+            feeAccumulator += pf;
+        }
     }
 
     // -------------------------------------------------------------------------
@@ -716,7 +759,10 @@ contract Vault is
         OperatorAttestation calldata att,
         bytes calldata sig
     ) external nonReentrant whenNotPaused {
-        VaultLogic.betCancellationCredit(_ctx(), betRecords, verifiers[BET_CANCEL], proof, inputs, att, sig);
+        // FC-14: a cancel refunds the full (provisional) protocol fee to the user and clears it from
+        // betProtocolFee (in the library). feeAccumulator is untouched — the protocol fee was never
+        // claimable, so there is nothing to decrement (and no underflow is possible).
+        VaultLogic.betCancellationCredit(_ctx(), betRecords, betProtocolFee, verifiers[BET_CANCEL], proof, inputs, att, sig);
     }
 
     // -------------------------------------------------------------------------
@@ -739,6 +785,8 @@ contract Vault is
         VaultLogic.naCancellationCredit(
             _ctx(), betRecords, conditionIdOf, ctf, verifiers[CANCEL_CREDIT], proof, inputs, att, sig
         );
+        // FC-14: an N/A (void) bet keeps the protocol fee (it executed) → release it as earned.
+        _releaseProtocolFee(inputs.nullifier_of_bet);
     }
 
     // -------------------------------------------------------------------------
@@ -763,7 +811,11 @@ contract Vault is
         OperatorAttestation calldata att,
         bytes calldata sig
     ) external nonReentrant whenNotPaused {
-        VaultLogic.closePosition(_ctx(), betRecords, marketResolvedAt, verifiers[POSITION_CLOSE], proof, inputs, att, sig);
+        // FC-14: a FULL close is terminal-executed → release the protocol fee as earned. A partial
+        // close leaves the record FILLED (remainder settles later), so the fee stays provisional.
+        bool fullClose =
+            VaultLogic.closePosition(_ctx(), betRecords, marketResolvedAt, verifiers[POSITION_CLOSE], proof, inputs, att, sig);
+        if (fullClose) _releaseProtocolFee(inputs.nullifier_of_bet);
     }
 
     // -------------------------------------------------------------------------
@@ -789,7 +841,9 @@ contract Vault is
         OperatorAttestation calldata att,
         bytes calldata sig
     ) external nonReentrant whenNotPaused {
-        VaultLogic.partialFillCredit(_ctx(), betRecords, verifiers[PARTIAL_CREDIT], proof, inputs, att, sig);
+        // FC-14: the library refunds the unexecuted protocol fee to the user and returns the EARNED
+        // remainder (fee on the executed part), which becomes claimable now (the bet is FILLED).
+        feeAccumulator += VaultLogic.partialFillCredit(_ctx(), betRecords, betProtocolFee, verifiers[PARTIAL_CREDIT], proof, inputs, att, sig);
     }
 
     // -------------------------------------------------------------------------

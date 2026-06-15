@@ -623,7 +623,20 @@ export async function submitFAKOrder(
       // If inconclusive, leave it un-attested (stuck pending → manual/reconcile) rather than risk a
       // false reclaim. An explicit unmatched/killed (genuine zero fill) still flows to FAILED below.
       const errText = String(resp["errorMsg"] ?? resp["error"] ?? "");
-      const explicitMiss = status === "unmatched" || status === "killed" || status === "cancelled" || /not[_ ]?filled/i.test(errText);
+      // An explicit CLOB REJECTION (HTTP 4xx, or a clear validation error like "min size: $1",
+      // "not enough balance", "invalid amount") means the order was NEVER placed — so a zero fill is
+      // certain, NOT a misread. Treat it as a definitive miss so it flows to attestTerminal → FAILED
+      // (reclaimable) instead of stranding the bet "indeterminate / needs reconcile" forever.
+      const respStatusNum = Number(resp["status"]);
+      const rejected =
+        (Number.isFinite(respStatusNum) && respStatusNum >= 400) ||
+        /invalid amount|min size|not enough|insufficient|too small|rejected|bad request/i.test(errText);
+      if (rejected) {
+        logger.warn({ nullifier: event.nullifier, resp }, "FAK order rejected by CLOB (explicit) — attesting FAILED so the stake is reclaimable");
+      }
+      const explicitMiss =
+        status === "unmatched" || status === "killed" || status === "cancelled" ||
+        /not[_ ]?filled/i.test(errText) || rejected;
       if (filledShares === 0n && !explicitMiss && !isMock) {
         logger.error({ nullifier: event.nullifier, resp }, "FAK fill indeterminate and not an explicit miss — NOT attesting (no false reclaim); needs reconcile");
         return;
@@ -728,6 +741,22 @@ async function resolveCloseToken(
 // old FOK (all-or-nothing) it may PARTIALLY fill; attestTerminal(side:SELL) signs SOLD for the
 // ACTUAL filled size (the Vault credits the proceeds and leaves the unsold remainder to settle).
 // A zero fill produces NO attestation — the position simply stays open.
+/** Best bid (1e6-scaled) for a token from the CLOB order book — the price a SELL can cross/fill at
+ * right now. Mirrors how the market BUY prices to cross the asks. Returns null on any failure (caller
+ * falls back to the passed floor). */
+async function fetchBestBidMicro(tokenId: string): Promise<bigint | null> {
+  try {
+    const clobHost = process.env.POLY_API_URL ?? "https://clob.polymarket.com";
+    const res = await fetch(`${clobHost}/book?token_id=${encodeURIComponent(tokenId)}`);
+    if (!res.ok) return null;
+    const book = (await res.json()) as { bids?: Array<{ price?: string; size?: string }> };
+    const best = (book.bids ?? []).reduce((m, b) => Math.max(m, Number(b?.price ?? 0) || 0), 0);
+    return best > 0 ? BigInt(Math.round(best * 1e6)) : null;
+  } catch {
+    return null;
+  }
+}
+
 export async function submitMarketSellOrder(
   req: CloseRequest,
   wallet: ethers.Wallet,
@@ -749,7 +778,7 @@ export async function submitMarketSellOrder(
   // Submit under the rate limiter; confirm an ambiguous fill OUTSIDE it (the confirm can poll ~20s
   // and must not hold the global order-submission limiter).
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  type SellCtx = { filledShares: bigint; ambiguous: boolean; client: any; orderID: string; conditionId: string; tokenId: string; status: string };
+  type SellCtx = { filledShares: bigint; ambiguous: boolean; client: any; orderID: string; conditionId: string; tokenId: string; status: string; sellPriceMicro: bigint };
   const ctx = await limiter.schedule<SellCtx | null>(async () => {
     try {
       const clobHost = process.env.POLY_API_URL ?? "https://clob.polymarket.com";
@@ -768,21 +797,27 @@ export async function submitMarketSellOrder(
         const resp = (await res.json()) as Record<string, unknown>;
         logger.info({ nullifier_of_bet: req.nullifier_of_bet, resp }, "CLOB market-SELL response (mock)");
         const filledShares = typeof resp["filledShares"] === "number" ? BigInt(Math.floor(resp["filledShares"] as number)) : 0n;
-        return { filledShares, ambiguous: false, client: null, orderID: "", conditionId: "", tokenId: req.position_id, status: String(resp["status"] ?? "") };
+        return { filledShares, ambiguous: false, client: null, orderID: "", conditionId: "", tokenId: req.position_id, status: String(resp["status"] ?? ""), sellPriceMicro: req.limit_price };
       }
 
       const { OrderType, Side } = await import("@polymarket/clob-client-v2");
       const client = await getOrCreateClobClient(wallet);
       if (!client) throw new Error("CLOB client unavailable");
       const { tokenId, conditionId } = await resolveCloseToken(req, provider);
+      // A MARKET (FAK) close must price at the current best BID to actually cross the book — mirroring
+      // the market BUY (budgetedBuyOrder), which prices to cross the asks. A fixed floor (e.g. 1¢)
+      // never fills a sub-1¢ market (the cause of the zero-fill close). req.limit_price is a protective
+      // FLOOR: never sell below it. Credit stays at the executed price (pool-safe: fill ≥ price).
+      const bestBid = await fetchBestBidMicro(tokenId);
+      const sellPriceMicro = bestBid && bestBid >= req.limit_price ? bestBid : req.limit_price;
       const resp = (await client.createAndPostOrder({
         tokenID: tokenId,
-        price: Number(req.limit_price) / 1e6,
+        price: Number(sellPriceMicro) / 1e6,
         size: Number(req.sold_shares) / 1e6,
         side: Side.SELL,
         orderType: OrderType.FAK,
       } as unknown as Parameters<typeof client.createAndPostOrder>[0])) as Record<string, unknown>;
-      logger.info({ nullifier_of_bet: req.nullifier_of_bet, resp }, "CLOB market-SELL response");
+      logger.info({ nullifier_of_bet: req.nullifier_of_bet, bestBid: bestBid?.toString(), sellPriceMicro: sellPriceMicro.toString(), resp }, "CLOB market-SELL response");
 
       const status = String(resp?.["status"] ?? "").toLowerCase();
       const errMsg = String(resp?.["errorMsg"] ?? resp?.["error"] ?? "");
@@ -790,15 +825,15 @@ export async function submitMarketSellOrder(
       const killed = status === "unmatched" || status === "killed" || status === "cancelled" || /NOT_FILLED/i.test(errMsg);
       if (resp?.["makingAmount"] !== undefined || resp?.["takingAmount"] !== undefined) {
         // Real Polymarket CLOB: matched amounts as decimal strings. For a SELL the order gives shares
-        // and takes USDC → makingAmount = shares SOLD (proceeds are computed below at the limit price,
-        // pool-safe). (Mirror of the BUY parsing; verify the SELL direction on testnet.)
-        return { filledShares: BigInt(Math.round(Number(resp["makingAmount"] ?? 0) * 1e6)), ambiguous: false, client, orderID, conditionId, tokenId, status };
+        // and takes USDC → makingAmount = shares SOLD (proceeds are computed below at sellPriceMicro,
+        // the executed best-bid price, pool-safe).
+        return { filledShares: BigInt(Math.round(Number(resp["makingAmount"] ?? 0) * 1e6)), ambiguous: false, client, orderID, conditionId, tokenId, status, sellPriceMicro };
       }
       if (resp?.["size_matched"] !== undefined) {
-        return { filledShares: BigInt(Math.floor(Number(resp["size_matched"]) * 1e6)), ambiguous: false, client, orderID, conditionId, tokenId, status };
+        return { filledShares: BigInt(Math.floor(Number(resp["size_matched"]) * 1e6)), ambiguous: false, client, orderID, conditionId, tokenId, status, sellPriceMicro };
       }
       // No matched size in the response and not explicitly killed → ambiguous; confirm OUTSIDE the limiter.
-      return { filledShares: 0n, ambiguous: !killed, client, orderID, conditionId, tokenId, status };
+      return { filledShares: 0n, ambiguous: !killed, client, orderID, conditionId, tokenId, status, sellPriceMicro };
     } catch (err: unknown) {
       const e = err as { status?: number; response?: { status?: number } };
       const httpStatus = e?.status ?? e?.response?.status;
@@ -823,8 +858,8 @@ export async function submitMarketSellOrder(
   // limit never over-credits the pool — NET of the CLOB taker fee. A market SELL is a taker, and
   // Polymarket deducts the fee from the proceeds, so the user bears it and the pool isn't short.
   // attestTerminal(side:SELL) signs SOLD for the actual fill; a zero fill → no attestation.
-  const grossProceeds = (filledShares * req.limit_price) / 1_000_000n;
-  const sellPriceFrac = Number(req.limit_price) / 1e6;
+  const grossProceeds = (filledShares * ctx.sellPriceMicro) / 1_000_000n;
+  const sellPriceFrac = Number(ctx.sellPriceMicro) / 1e6;
   const sellFee = await clobTakerFeeUsd(ctx.client, ctx.tokenId, (Number(filledShares) / 1e6) * sellPriceFrac, sellPriceFrac);
   const proceeds = grossProceeds > sellFee ? grossProceeds - sellFee : 0n;
   await attestTerminal(
@@ -1021,10 +1056,22 @@ export async function submitLimitOrder(
         const { OrderType, Side } = await import("@polymarket/clob-client-v2");
         const client = await getOrCreateClobClient(wallet);
         if (!client) { logger.error("limit order: clob client unavailable"); return; }
+        // Fee-aware sizing at the user's (tick-rounded) limit price — mirrors the market BUY. A limit
+        // that CROSSES on submission is a taker, so order_amount + taker_fee must fit the stake; with
+        // the full expected_shares the CLOB rejected "not enough balance to cover the fee estimate"
+        // and the bet wrongly FAILED. budgetedBuyOrder reserves the per-market fee (and floors to the
+        // CLOB-visible balance), buying slightly fewer shares — the user bears the fee from their stake
+        // per the fee model; expected_shares stays the committed cap and settlement/partial-credit
+        // reconciles the difference. (Frontend already tick-rounds the price, so the ceil is a no-op.)
+        const bo = await budgetedBuyOrder(provider, client, event);
+        logger.info(
+          { nullifier: event.nullifier, price: bo.price, size: bo.size, expectedShares: Number(event.expected_shares) / 1e6 },
+          "limit order sized (fee-aware)",
+        );
         resp = (await client.createAndPostOrder({
           tokenID: event.position_id,
-          price: Number(event.price) / 1e8, // on-chain price is 1e8-scaled (docs/zk-design.md)
-          size: Number(event.expected_shares) / 1e6, // CLOB BUY size = share COUNT, not the USDC amount
+          price: bo.price,
+          size: bo.size,
           side: Side.BUY,
           orderType: params.orderType === "GTD" ? OrderType.GTD : OrderType.GTC,
           expiration,

@@ -165,9 +165,9 @@ flowchart TB
     end
     subgraph BROWSER["🖥️ User browser — RESTORE (secret-dependent ⟹ client-only)"]
         R1["1. fetch /recovery-data (no client chain scan)"]:::fe
-        R2["2. secret_i = deriveSecret(wallet, i) per deposit index"]:::fe
+        R2["2. master_seed = sign once (V2); secret_i = keccak(master_seed‖i)"]:::fe
         R3["3. replay events; keep only those whose<br/>nullifier == OWN derived nullifier"]:::fe
-        R4["4. rebuild notes (incl. credit notes) → localStorage"]:::fe
+        R4["4. rebuild notes (incl. credit notes) → encrypted IndexedDB"]:::fe
         R1 --> R2 --> R3 --> R4
     end
 

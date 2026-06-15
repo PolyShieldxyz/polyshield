@@ -29,6 +29,13 @@ const EVENT_POLL_MS = Number(process.env.EVENT_POLL_MS ?? "15000");
 // interrupted long scan (the one-time historical catch-up on a tiny-getLogs-limit RPC) resumes
 // instead of restarting from the deploy block.
 const SCAN_WINDOW = Number(process.env.LOG_SCAN_WINDOW ?? "5000");
+// Deep safety re-scan. The forward cursor (lastBlock) only moves forward, so a one-time RPC getLogs
+// consistency gap (Ankr can return an incomplete window) advances it PAST an unreturned BetAuthorized
+// log → that bet is stranded ACTIVE forever (no order, no JIT funding, user funds stuck). To recover,
+// periodically re-scan a wide recent window WITHOUT moving the cursor. Idempotent: the per-bet
+// attestation / in-flight / on-chain-record checks below prevent any double-submit.
+const DEEP_RESCAN_MS = Number(process.env.DEEP_RESCAN_MS ?? "1800000");        // 30 min
+const DEEP_LOOKBACK_BLOCKS = Number(process.env.DEEP_LOOKBACK_BLOCKS ?? "100000"); // ~2.7 days on Polygon
 // Nullifiers whose processing we've already STARTED this process-lifetime. Prevents the
 // poller from re-submitting an order (especially a resting GTC/GTD that has no terminal
 // attestation yet) on a subsequent tick before its attestation lands.
@@ -55,7 +62,10 @@ const logger = pino({ name: "event-listener" });
 
 const VAULT_ABI = [
   // M2: outcome_side now included — avoids per-bet betRecords() RPC during settlement.
-  "event BetAuthorized(bytes32 indexed nullifier, bytes32 market_id, bytes32 position_id, uint64 expected_shares, uint256 bet_amount, uint64 price, uint8 outcome_side, bytes32 new_commitment)",
+  // MUST match the deployed Vault event EXACTLY — FC-14 appended (protocolFee, relayFee). A stale
+  // signature changes topic0, so vault.filters.BetAuthorized() matches ZERO logs and every bet is
+  // stranded (no order, no JIT funding). The two trailing uint64s don't shift args[0..7].
+  "event BetAuthorized(bytes32 indexed nullifier, bytes32 market_id, bytes32 position_id, uint64 expected_shares, uint256 bet_amount, uint64 price, uint8 outcome_side, bytes32 new_commitment, uint64 protocolFee, uint64 relayFee)",
   "function betRecords(bytes32 nullifier) view returns (bytes32 market_id, bytes32 condition_id, bytes32 position_id, uint64 expected_shares, uint64 bet_amount, uint8 outcome_side, uint8 status)",
 ];
 
@@ -142,20 +152,30 @@ async function processBetEvent(
 async function catchUpMissedBets(
   vault: ethers.Contract,
   wallet: ethers.Wallet,
-  provider: ethers.JsonRpcProvider
+  provider: ethers.JsonRpcProvider,
+  opts: { fromOverride?: number; persist?: boolean; label?: string } = {}
 ): Promise<void> {
-  logger.info("event-listener: scanning for missed BetAuthorized events...");
+  // persist=false (the deep sweep) re-scans a wide window without advancing the forward cursor.
+  const persist = opts.persist ?? true;
+  logger.info(opts.label ?? "event-listener: scanning for missed BetAuthorized events...");
   try {
     // API-009: clamp the persisted cursor to [0, currentBlock]. A corrupt or
     // oversized lastBlock (e.g. from a tampered/garbled state file, or after a
     // chain reset to a lower height) would otherwise push fromBlock past the
     // chain head and silently skip the entire history scan.
     const currentBlock = await provider.getBlockNumber();
-    const rawLastBlock = loadLastBlock();
-    const lastBlock = Math.min(Math.max(0, Number(rawLastBlock) || 0), currentBlock);
-    // Floor at the deploy block so a fresh cursor (lastBlock 0) doesn't scan from genesis.
-    const fromBlock = Math.max(DEPLOY_BLOCK, lastBlock - SAFETY_BUFFER);
-    logger.info({ fromBlock, lastBlock, currentBlock, rawLastBlock }, "event-listener: catchup scan range");
+    let fromBlock: number;
+    if (opts.fromOverride !== undefined) {
+      // Deep safety sweep: clamp the override to [DEPLOY_BLOCK, currentBlock].
+      fromBlock = Math.max(DEPLOY_BLOCK, Math.min(opts.fromOverride, currentBlock));
+      logger.info({ fromBlock, currentBlock, deep: true }, "event-listener: deep re-scan range");
+    } else {
+      const rawLastBlock = loadLastBlock();
+      const lastBlock = Math.min(Math.max(0, Number(rawLastBlock) || 0), currentBlock);
+      // Floor at the deploy block so a fresh cursor (lastBlock 0) doesn't scan from genesis.
+      fromBlock = Math.max(DEPLOY_BLOCK, lastBlock - SAFETY_BUFFER);
+      logger.info({ fromBlock, lastBlock, currentBlock, rawLastBlock }, "event-listener: catchup scan range");
+    }
 
     const filter = vault.filters.BetAuthorized();
     // Scan in WINDOWs, persisting the cursor after each, so an interrupted long catch-up (the one-time
@@ -214,7 +234,7 @@ async function catchUpMissedBets(
       // If a later window throws (a rate-limit propagated after the provider's retries), the cursor is
       // already saved up to here, so the next tick / a restart resumes instead of re-scanning from the
       // deploy block — which is what previously re-burned the whole range every 15s and saturated the RPC.
-      saveLastBlock(windowEnd);
+      if (persist) saveLastBlock(windowEnd);
       cursor = windowEnd + 1;
     }
   } catch (err) {
@@ -234,22 +254,38 @@ export function startEventListener(
   // catchUpMissedBets is idempotent (attestation store + in-flight set + on-chain bet-record
   // check), and queryFilter only returns mined logs (≥1 confirmation), so polling both
   // catches up missed bets and handles new ones. A re-entrancy guard prevents overlapping scans.
+  // One guard serializes the forward poll AND the deep sweep so they never overlap (they share the
+  // provider, and the per-bet dedup is the safety net either way).
   let scanning = false;
-  const tick = async () => {
+  const runScan = async (opts: { fromOverride?: number; persist?: boolean; label?: string } = {}) => {
     if (scanning) return;
     scanning = true;
     try {
-      await catchUpMissedBets(vault, wallet, provider);
+      await catchUpMissedBets(vault, wallet, provider, opts);
     } finally {
       scanning = false;
     }
   };
 
-  void tick(); // initial scan immediately
-  setInterval(() => void tick(), EVENT_POLL_MS);
+  void runScan(); // initial forward scan immediately
+  setInterval(() => void runScan(), EVENT_POLL_MS);
+
+  // Deep safety sweep: recover any bet the forward cursor skipped (RPC getLogs gap). Runs once at
+  // startup and on a slow timer; re-scans a wide recent window WITHOUT advancing the cursor.
+  const deepSweep = async () => {
+    const current = await provider.getBlockNumber().catch(() => 0);
+    if (!current) return;
+    await runScan({
+      fromOverride: current - DEEP_LOOKBACK_BLOCKS,
+      persist: false,
+      label: "event-listener: deep safety re-scan (cursor-skip recovery)",
+    });
+  };
+  void deepSweep(); // startup sweep — recovers bets stranded before this process started
+  setInterval(() => void deepSweep(), DEEP_RESCAN_MS);
 
   logger.info(
-    { vault: config.vaultContractAddress, pollMs: EVENT_POLL_MS },
-    "Polling for BetAuthorized events (getLogs; public RPC has no filter support)",
+    { vault: config.vaultContractAddress, pollMs: EVENT_POLL_MS, deepRescanMs: DEEP_RESCAN_MS, deepLookback: DEEP_LOOKBACK_BLOCKS },
+    "Polling for BetAuthorized events (getLogs; public RPC has no filter support) + deep cursor-skip recovery",
   );
 }

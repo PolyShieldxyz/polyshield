@@ -6,6 +6,7 @@ import { createApp, initMerkle, setMerkleCache, setEventIndex } from "./api";
 import { RetryingJsonRpcProvider } from "./merkle";
 import { CachedMerkleTree } from "./merkleTree";
 import { VaultEventIndex } from "./eventIndex";
+import { startMarketCatalogSync } from "./marketCatalog";
 
 const logger = pino({
   name: "proof-relay",
@@ -49,6 +50,10 @@ if (TREE_ADDRESS) {
 } else {
   logger.warn("TREE_ADDRESS not set — /merkle-path endpoint disabled");
 }
+
+// FC-15: mirror the active Polymarket market universe into the local catalog (~10 min loop) so the
+// markets page browses a large, bettable-only, cached set served by /markets. Public data only.
+startMarketCatalogSync();
 
 const app = createApp();
 // API-002/API-005: bind to loopback by default; override only via BIND_HOST.

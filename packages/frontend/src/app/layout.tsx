@@ -3,6 +3,7 @@ import { Inter, JetBrains_Mono } from 'next/font/google'
 import '@/styles/globals.css'
 import { Providers } from '@/providers'
 import { TopNav } from '@/components/ui/TopNav'
+import { SiteFooterGate } from '@/components/ui/SiteFooterGate'
 import { DevStatusBar } from '@/components/app/DevStatusBar'
 
 // FINDING: PRIV-002 / PERF-002 — self-host fonts via next/font instead of the
@@ -23,7 +24,7 @@ const jetbrainsMono = JetBrains_Mono({
 })
 
 export const metadata: Metadata = {
-  title: 'Polyshield — Private prediction market trading',
+  title: 'PolyShield — Private prediction market trading',
   description: 'Zero-knowledge vault layer for Polymarket. Deposit USDC, place trades from a shared anonymity set, and settle privately.',
 }
 
@@ -36,6 +37,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
         <Providers>
           <TopNav />
           <main id="main">{children}</main>
+          <SiteFooterGate />
           <DevStatusBar />
         </Providers>
       </body>

@@ -24,7 +24,7 @@ export function middleware(request: NextRequest) {
     // ZK asset dirs explicitly.
     // Shared top-level pages (not under /app) must serve as-is on the subdomain too —
     // otherwise e.g. /explorer rewrites to /app/explorer (404). These exist only at the root.
-    const SHARED_TOP_LEVEL = ['/explorer', '/docs', '/how', '/roadmap', '/careers', '/testnet']
+    const SHARED_TOP_LEVEL = ['/explorer', '/docs', '/how', '/roadmap']
     const isShared = SHARED_TOP_LEVEL.some((r) => pathname === r || pathname.startsWith(r + '/'))
     const skip =
       isShared ||
