@@ -50,8 +50,8 @@ packages/contracts/MockDeploy.s.sol
 
 # TypeScript build
 packages/backend/**/dist/
-packages/backend/mock-clob-server
-packages/backend/mock-env
+packages/backend/mock-clob-server/
+packages/backend/mock-env/
 
 # Next.js build cache
 packages/frontend/.next/
