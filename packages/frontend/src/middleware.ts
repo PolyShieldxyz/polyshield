@@ -5,6 +5,23 @@ export function middleware(request: NextRequest) {
   const hostname = request.headers.get('host') ?? ''
   const { pathname } = request.nextUrl
 
+  // ── API access control ────────────────────────────────────────────────────
+  // PolyShield does not offer a public API. The only internet-facing surface is
+  // these Next.js /api/* routes (the proof-relay / signing-layer / indexer backends
+  // are loopback-bound and only reachable through these server-side proxies). We
+  // restrict /api/* to our own dApp so third parties cannot call it:
+  //   - dev-only routes 404 outside development;
+  //   - cross-site browser requests are rejected;
+  //   - state-changing requests must be same-origin (or carry a matching Origin),
+  //     which blocks header-less scripted (curl) abuse of the mutating proxies.
+  // Server-to-server fetches from the route handlers to the backend do NOT pass
+  // through middleware, so internal traffic is unaffected.
+  if (pathname.startsWith('/api')) {
+    const apiResponse = guardApi(request, pathname, hostname)
+    if (apiResponse) return apiResponse
+    return NextResponse.next()
+  }
+
   // Local dev (localhost / 127.0.0.1 / any non-dot host): no subdomain routing.
   // Developers access /app/* directly.
   const isLocalDev =
@@ -52,6 +69,46 @@ export function middleware(request: NextRequest) {
   }
 
   return NextResponse.next()
+}
+
+/**
+ * Restrict /api/* to our own dApp. Returns a response to short-circuit (block) the
+ * request, or null to allow it to proceed.
+ */
+function guardApi(request: NextRequest, pathname: string, hostname: string): NextResponse | null {
+  // Dev-only routes are never available in production.
+  if (pathname.startsWith('/api/dev') && process.env.NEXT_PUBLIC_DEV_MODE !== 'true') {
+    return NextResponse.json({ error: 'not found' }, { status: 404 })
+  }
+
+  // Reject any cross-site browser request (another website calling our API).
+  const secFetchSite = request.headers.get('sec-fetch-site')
+  if (secFetchSite && secFetchSite !== 'same-origin' && secFetchSite !== 'same-site') {
+    return NextResponse.json({ error: 'forbidden' }, { status: 403 })
+  }
+
+  // State-changing requests must demonstrably originate from our own page. A same-origin
+  // fetch sends Sec-Fetch-Site: same-origin; a header-less direct call (e.g. curl) has
+  // neither that nor a matching Origin and is rejected. Reads (GET/HEAD) stay lenient so
+  // prefetch/navigation are unaffected; the cross-site check above still applies to them.
+  const method = request.method.toUpperCase()
+  if (method !== 'GET' && method !== 'HEAD' && method !== 'OPTIONS') {
+    const sameOrigin = secFetchSite === 'same-origin' || secFetchSite === 'same-site'
+    const origin = request.headers.get('origin')
+    let originOk = false
+    if (origin) {
+      try {
+        originOk = new URL(origin).host === hostname
+      } catch {
+        originOk = false
+      }
+    }
+    if (!sameOrigin && !originOk) {
+      return NextResponse.json({ error: 'forbidden' }, { status: 403 })
+    }
+  }
+
+  return null
 }
 
 export const config = {

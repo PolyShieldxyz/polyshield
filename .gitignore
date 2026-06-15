@@ -50,14 +50,36 @@ packages/backend/**/dist/
 packages/backend/mock-clob-server/
 packages/backend/mock-env/
 
+packages/backend/beta-consent.db
+packages/backend/beta-consent.db-shm
+packages/backend/beta-consent.db-wal
+packages/backend/catalog.db
+packages/backend/catalog.db-shm
+packages/backend/catalog.db-wal
+packages/backend/settlement.db
+
 # Next.js build cache
 packages/frontend/.next/
 packages/frontend/node_modules/
+packages/frontend/design-system/
+
+# Frontend API route handlers — PolyShield does not publish a public API. These server
+# routes document the (otherwise loopback-only) backend surface, so they are kept LOCALLY
+# for builds but never tracked on GitHub. NOTE: a fresh `git clone` will NOT contain these;
+# build/deploy from a working tree that has them on disk (see deploy runbook).
+packages/frontend/src/app/api/
 
 # Proving keys — large binary files, regenerate via pnpm circuits:deploy
 packages/frontend/public/zkeys/
 # Circuit WASM files — regenerate via pnpm circuits:deploy
 packages/frontend/public/circuits/*.wasm
+
+# Key material — defensive belt-and-suspenders so no private key/keystore is ever committed
+*.pem
+*.keystore
+*keystore*.json
+*-private.json
+*.secret
 
 # Misc
 .DS_Store

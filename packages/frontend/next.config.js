@@ -21,10 +21,60 @@ const nextConfig = {
     const value = isDev
       ? 'no-cache, must-revalidate'
       : 'public, max-age=31536000, immutable'
+
+    // FE-01: global security response headers. A wallet-signing privacy dApp must defend
+    // against clickjacking (an iframe overlay tricking a user into approving a tx) and against
+    // a script exfiltrating the de-anonymizing IndexedDB note cache. These headers are the
+    // baseline; the CSP is the strongest lever.
+    //
+    // CSP notes:
+    //  - script-src includes 'wasm-unsafe-eval' because snarkjs instantiates WASM in the
+    //    proof worker; without it every bet/withdraw/settle/consolidate proof fails.
+    //  - 'unsafe-inline' in script-src is retained for Next's hydration bootstrap; external
+    //    <script src> is still blocked (script-src 'self'). Tightening to a per-request nonce
+    //    is a follow-up; frame-ancestors/object-src/base-uri are the breakage-free wins now.
+    //  - connect-src allows https:/wss: so WalletConnect relays and the configurable RPC keep
+    //    working; extend/restrict via CSP_CONNECT_SRC. It still blocks plaintext (http:) exfil.
+    //  - the CSP is applied in production only — Next dev (HMR) needs 'unsafe-eval' + ws to
+    //    localhost, so we skip the CSP in dev but keep the other headers.
+    const connectSrc = process.env.CSP_CONNECT_SRC ?? "'self' https: wss:"
+    const csp = [
+      "default-src 'self'",
+      "base-uri 'self'",
+      "object-src 'none'",
+      "frame-ancestors 'none'",
+      "form-action 'self'",
+      "script-src 'self' 'unsafe-inline' 'wasm-unsafe-eval'",
+      "style-src 'self' 'unsafe-inline'",
+      "img-src 'self' data: https:",
+      "font-src 'self' data:",
+      `connect-src ${connectSrc}`,
+      "worker-src 'self' blob:",
+    ].join('; ')
+
+    const securityHeaders = [
+      { key: 'X-Frame-Options', value: 'DENY' },
+      { key: 'X-Content-Type-Options', value: 'nosniff' },
+      { key: 'Referrer-Policy', value: 'strict-origin-when-cross-origin' },
+      { key: 'Permissions-Policy', value: 'camera=(), microphone=(), geolocation=(), payment=()' },
+      { key: 'Cross-Origin-Opener-Policy', value: 'same-origin' },
+      ...(isDev
+        ? []
+        : [
+            { key: 'Strict-Transport-Security', value: 'max-age=63072000; includeSubDomains; preload' },
+            { key: 'Content-Security-Policy', value: csp },
+          ]),
+    ]
+
     return [
       {
         source: '/:dir(circuits|zkeys)/:path*',
         headers: [{ key: 'Cache-Control', value }],
+      },
+      {
+        // Apply security headers to every route.
+        source: '/:path*',
+        headers: securityHeaders,
       },
     ]
   },
