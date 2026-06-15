@@ -14,7 +14,7 @@
     "circuits:copy": "cd Benchmarking/groth16 && pnpm copy:artifacts",
     "circuits:fixtures": "cd Benchmarking/groth16 && pnpm generate:test-proofs",
     "circuits:all": "pnpm circuits:compile && pnpm circuits:setup && pnpm circuits:verifiers && pnpm circuits:copy && pnpm circuits:fixtures",
-    "circuits:spec:check": "cd packages/circuits && nargo check",
+    "circuits:spec:check": "cd packages/circuits/Noir && nargo check",
     "contracts:build": "cd packages/contracts && forge build",
     "contracts:test": "cd packages/contracts && forge test",
     "contracts:coverage": "cd packages/contracts && forge coverage",

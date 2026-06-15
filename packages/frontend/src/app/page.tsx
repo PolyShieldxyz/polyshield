@@ -342,8 +342,8 @@ function FinalCTA() {
         deposit USDC, and place your first private bet. This is experimental
         software — deposit only what you can afford to lose.
       </p>
-      <div className="row gap-3 mt-8" style={{ justifyContent: 'center' }}>
-        <a href="/app/markets" className="btn btn-primary" style={{ padding: '14px 32px', fontSize: 15 }}>
+      <div className="cta-row mt-8" style={{ justifyContent: 'center' }}>
+        <a href="/app/markets" className="btn btn-brand" style={{ padding: '14px 32px', fontSize: 15 }}>
           Launch app <Icon d={ICONS.arrow} size={14} />
         </a>
         <Link href="/how" className="btn" style={{ padding: '14px 24px', fontSize: 15 }}>How it works</Link>
@@ -372,8 +372,8 @@ export default function LandingPage() {
                 place trades from a shared anonymity set, and settle privately —
                 with cryptographic guarantees, not promises.
               </p>
-              <div className="row gap-3 mt-8">
-                <a href="/app/markets" className="btn btn-primary">Launch app <Icon d={ICONS.arrow} size={12} /></a>
+              <div className="cta-row mt-8">
+                <a href="/app/markets" className="btn btn-brand">Launch app <Icon d={ICONS.arrow} size={12} /></a>
                 <Link href="/docs" className="btn">Read the docs</Link>
                 <Link href="/how" className="btn btn-ghost">How it works →</Link>
               </div>

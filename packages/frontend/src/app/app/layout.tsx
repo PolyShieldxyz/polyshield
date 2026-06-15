@@ -4,11 +4,16 @@ import { useAccount, useSwitchChain, useDisconnect } from 'wagmi'
 import { WalletConnect } from '@/components/ui/WalletConnect'
 import { BetaConsentGate } from '@/components/app/BetaConsentGate'
 import { Logo } from '@/components/ui/Logo'
-import { clearNoteCache, resetAllLocalState, resetWalletConnectorStorage } from '@/lib/notes'
+import { clearNoteCache, getFreeNotes, resetAllLocalState, resetWalletConnectorStorage } from '@/lib/notes'
 import { clearSession } from '@/lib/secretSession'
 import { useNotesHydration } from '@/lib/useNotesHydration'
 import { useChainResetDetector } from '@/lib/accountState'
-import { initProver } from '@/lib/prover'
+import { initProver, preloadConsolidateCircuit } from '@/lib/prover'
+
+// A wallet with more than this many free (spendable) notes is fragmented enough that an upcoming
+// bet/withdrawal will likely exceed any single note and need a note-merge first. Above the
+// threshold we warm the large consolidate artifacts so that merge isn't a cold ~22 MB download.
+const CONSOLIDATE_PRELOAD_NOTE_THRESHOLD = 5
 
 // The chain the app expects (137 = Polygon in prod; 31337 = Anvil in dev). On any other
 // network, on-chain reads (USDC balance, allowance) silently return nothing.
@@ -46,6 +51,16 @@ export default function AppLayout({ children }: { children: React.ReactNode }) {
   useEffect(() => {
     initProver()
   }, [])
+
+  // Once notes have hydrated, lazily warm the heavy consolidate artifacts for fragmented wallets
+  // (many free notes ⇒ a spend will likely need a merge). Idempotent, so re-running on note
+  // changes is cheap; it shifts the ~22 MB download off the withdrawal/bet critical path.
+  useEffect(() => {
+    if (!notesReady || !address) return
+    if (getFreeNotes(address).length > CONSOLIDATE_PRELOAD_NOTE_THRESHOLD) {
+      preloadConsolidateCircuit()
+    }
+  }, [notesReady, address])
 
   useEffect(() => {
     // FINDING: PRIV-004 — only wipe persisted state on an actual connected→

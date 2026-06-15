@@ -183,9 +183,36 @@ const zkeyCache = new Map<CircuitName, Promise<Uint8Array>>()
 let _isReady = false
 const _readyCallbacks: Array<() => void> = []
 
-async function fetchAsset(url: string): Promise<Uint8Array> {
+// Progress reporting for the artifact-download phase. A "sink" is set by whoever drives a proof
+// (the Web Worker forwards it to the main thread; the main-thread fallback sets it directly), so
+// the UI can render a determinate "Downloading proving key…" bar. `phase: 'prove'` signals the
+// download is done and snarkjs is now crunching (an indeterminate phase).
+export interface AssetProgress {
+  phase: 'download' | 'prove'
+  loaded: number
+  total: number
+}
+
+let _progressSink: ((p: AssetProgress) => void) | null = null
+
+/** Install (or clear, with null) the prover progress sink. Used by the worker / main-thread runner. */
+export function setProverProgressSink(sink: ((p: AssetProgress) => void) | null): void {
+  _progressSink = sink
+}
+
+// Circuit artifacts range from ~0.5 MB (deposit.zkey) to ~22 MB (consolidate.zkey).
+// On a slow connection a cold download of the larger zkeys easily exceeds 30s, so the
+// timeout must be generous — a premature abort here surfaces to the user as a failed
+// withdrawal/bet, not a faster experience.
+const ASSET_FETCH_TIMEOUT_MS = 120_000
+
+async function fetchAsset(
+  url: string,
+  onProgress?: (loaded: number, total: number) => void,
+): Promise<Uint8Array> {
   const controller = new AbortController()
-  const timer = setTimeout(() => controller.abort(), 30_000)
+  let timedOut = false
+  const timer = setTimeout(() => { timedOut = true; controller.abort() }, ASSET_FETCH_TIMEOUT_MS)
   try {
     // DEV: `pnpm setup:circuits` overwrites e.g. bet_auth.wasm in place, but the browser may
     // already hold the old file cached as `immutable` (PERF-001 header) and will NOT revalidate
@@ -197,7 +224,39 @@ async function fetchAsset(url: string): Promise<Uint8Array> {
       process.env.NODE_ENV !== 'production' ? 'no-store' : 'default'
     const r = await fetch(url, { signal: controller.signal, cache })
     if (!r.ok) throw new Error(`[prover] Failed to fetch ${url}: HTTP ${r.status}`)
+
+    // Stream the body so we can report determinate download progress. Falls back to a single
+    // buffer read when progress isn't requested or the server omits Content-Length.
+    const total = Number(r.headers.get('content-length') ?? 0)
+    if (onProgress && r.body && total > 0) {
+      const reader = r.body.getReader()
+      const chunks: Uint8Array[] = []
+      let loaded = 0
+      onProgress(0, total)
+      for (;;) {
+        const { done, value } = await reader.read()
+        if (done) break
+        chunks.push(value)
+        loaded += value.length
+        onProgress(loaded, total)
+      }
+      const out = new Uint8Array(loaded)
+      let offset = 0
+      for (const c of chunks) { out.set(c, offset); offset += c.length }
+      return out
+    }
     return new Uint8Array(await r.arrayBuffer())
+  } catch (err) {
+    // On an AbortError the browser throws "The user aborted a request." — which is misleading
+    // here (the USER did not cancel; the download timed out / the connection dropped). Rewrite it
+    // into an actionable message so the withdraw/bet screen doesn't blame the user.
+    if (timedOut) {
+      throw new Error(`[prover] Timed out downloading ${url} after ${ASSET_FETCH_TIMEOUT_MS / 1000}s — check your connection and retry.`)
+    }
+    if (err instanceof DOMException && err.name === 'AbortError') {
+      throw new Error(`[prover] Download of ${url} was interrupted — check your connection and retry.`)
+    }
+    throw err
   } finally {
     clearTimeout(timer)
   }
@@ -210,10 +269,21 @@ async function fetchAsset(url: string): Promise<Uint8Array> {
 // the query string changes and the browser re-fetches. (Overridable via env for ad-hoc busting.)
 const CIRCUITS_VERSION = process.env.NEXT_PUBLIC_CIRCUITS_VERSION ?? '2-betnonce'
 
-function ensurePreloaded(name: CircuitName): void {
+type AssetKind = 'wasm' | 'zkey'
+
+function ensurePreloaded(
+  name: CircuitName,
+  onProgress?: (kind: AssetKind, loaded: number, total: number) => void,
+): void {
   const v = encodeURIComponent(CIRCUITS_VERSION)
-  if (!wasmCache.has(name)) wasmCache.set(name, fetchAsset(`/circuits/${name}.wasm?v=${v}`))
-  if (!zkeyCache.has(name)) zkeyCache.set(name, fetchAsset(`/zkeys/${name}.zkey?v=${v}`))
+  // Progress is wired only when a fetch is actually CREATED here. Already-cached assets
+  // (e.g. preloaded bet_auth/deposit, or a retried proof) resolve instantly with no download.
+  if (!wasmCache.has(name)) {
+    wasmCache.set(name, fetchAsset(`/circuits/${name}.wasm?v=${v}`, onProgress ? (l, t) => onProgress('wasm', l, t) : undefined))
+  }
+  if (!zkeyCache.has(name)) {
+    zkeyCache.set(name, fetchAsset(`/zkeys/${name}.zkey?v=${v}`, onProgress ? (l, t) => onProgress('zkey', l, t) : undefined))
+  }
 }
 
 // ABI-encode Groth16 proof as 256-byte hex string matching abi.decode in the Solidity adapter.
@@ -239,13 +309,30 @@ function signalToHex(sig: string): string {
 type SnarkjsInputs = Record<string, string | string[] | string[][]>
 
 async function prove(name: CircuitName, inputs: SnarkjsInputs): Promise<ProofResult> {
-  ensurePreloaded(name)
+  // Aggregate determinate download progress across this circuit's wasm + zkey so the UI shows a
+  // single combined percentage. Only assets that actually download report here (see ensurePreloaded).
+  const acc: Record<AssetKind, { loaded: number; total: number }> = {
+    wasm: { loaded: 0, total: 0 },
+    zkey: { loaded: 0, total: 0 },
+  }
+  ensurePreloaded(name, (kind, loaded, total) => {
+    acc[kind] = { loaded, total }
+    const sink = _progressSink
+    if (!sink) return
+    const totalBytes = acc.wasm.total + acc.zkey.total
+    const loadedBytes = acc.wasm.loaded + acc.zkey.loaded
+    if (totalBytes > 0) sink({ phase: 'download', loaded: loadedBytes, total: totalBytes })
+  })
+
   const [snarkjs, wasm, zkey] = await Promise.all([
     // Dynamic import keeps snarkjs out of the SSR bundle
     import('snarkjs'),
     wasmCache.get(name)!,
     zkeyCache.get(name)!,
   ])
+
+  // Download finished (or assets were already cached) — switch the UI to the proving phase.
+  _progressSink?.({ phase: 'prove', loaded: 0, total: 0 })
 
   const { proof, publicSignals } = await snarkjs.groth16.fullProve(
     // snarkjs accepts nested arrays (e.g. consolidate's merkle_path[4][32]) at runtime;
@@ -269,6 +356,16 @@ async function prove(name: CircuitName, inputs: SnarkjsInputs): Promise<ProofRes
 // them. Long-lived immutable caching (next.config.js headers) keeps repeat loads
 // instant.
 const PRELOAD_CIRCUITS: readonly CircuitName[] = ['deposit', 'bet_auth']
+
+/**
+ * Lazily fetch + cache the consolidate circuit artifacts (~22 MB zkey — the largest of any
+ * circuit) ahead of time. Idempotent and fire-and-forget: a no-op once cached (or once a fetch
+ * is already in flight). Call this when a wallet accumulates enough free notes that an upcoming
+ * bet/withdrawal is likely to require a note-merge, so that step isn't a cold ~22 MB download.
+ */
+export function preloadConsolidateCircuit(): void {
+  ensurePreloaded('consolidate')
+}
 
 /**
  * Fetch the entry-flow circuit .wasm and .zkey files in the background.
@@ -464,13 +561,16 @@ const PROOF_TIMEOUT_MS = 3 * 60 * 1000
  * Run a proof in a dedicated Web Worker to keep the UI responsive.
  * Falls back to main-thread execution if the worker fails to start.
  */
-export function generateProofInWorker(message: ProverWorkerMessage): Promise<ProofResult> {
+export function generateProofInWorker(
+  message: ProverWorkerMessage,
+  onProgress?: (p: AssetProgress) => void,
+): Promise<ProofResult> {
   return new Promise((resolve, reject) => {
     let worker: Worker
     try {
       worker = new Worker(new URL('../workers/prover.worker', import.meta.url), { type: 'module' })
     } catch {
-      resolve(runProofMainThread(message))
+      resolve(runProofMainThread(message, onProgress))
       return
     }
 
@@ -480,6 +580,11 @@ export function generateProofInWorker(message: ProverWorkerMessage): Promise<Pro
     }, PROOF_TIMEOUT_MS)
 
     worker.onmessage = (event: MessageEvent<ProverWorkerResult>) => {
+      // Progress ticks stream throughout the run; forward them WITHOUT tearing down the worker.
+      if (event.data.type === 'progress') {
+        onProgress?.({ phase: event.data.phase, loaded: event.data.loaded, total: event.data.total })
+        return
+      }
       clearTimeout(timeout)
       worker.terminate()
       if (event.data.type === 'done') {
@@ -496,23 +601,32 @@ export function generateProofInWorker(message: ProverWorkerMessage): Promise<Pro
         window.dispatchEvent(new CustomEvent('polyshield:prover-fallback'))
       }
       console.warn('[prover] Worker failed, falling back to main thread')
-      runProofMainThread(message).then(resolve, reject)
+      runProofMainThread(message, onProgress).then(resolve, reject)
     }
 
     worker.postMessage(message)
   })
 }
 
-function runProofMainThread(message: ProverWorkerMessage): Promise<ProofResult> {
-  switch (message.type) {
-    case 'bet_auth':       return generateBetAuthProof(message.inputs)
-    case 'withdrawal':     return generateWithdrawalProof(message.inputs)
-    case 'settlement':     return generateSettlementProof(message.inputs)
-    case 'bet_cancel':     return generateBetCancelProof(message.inputs)
-    case 'cancel_credit':  return generateCancelCreditProof(message.inputs)
-    case 'deposit':        return generateDepositProof(message.inputs)
-    case 'position_close': return generatePositionCloseProof(message.inputs)
-    case 'partial_credit': return generatePartialCreditProof(message.inputs)
-    case 'consolidate':    return generateConsolidateProof(message.inputs)
+async function runProofMainThread(
+  message: ProverWorkerMessage,
+  onProgress?: (p: AssetProgress) => void,
+): Promise<ProofResult> {
+  if (onProgress) setProverProgressSink(onProgress)
+  try {
+    switch (message.type) {
+      case 'bet_auth':       return await generateBetAuthProof(message.inputs)
+      case 'withdrawal':     return await generateWithdrawalProof(message.inputs)
+      case 'settlement':     return await generateSettlementProof(message.inputs)
+      case 'bet_cancel':     return await generateBetCancelProof(message.inputs)
+      case 'cancel_credit':  return await generateCancelCreditProof(message.inputs)
+      case 'deposit':        return await generateDepositProof(message.inputs)
+      case 'position_close': return await generatePositionCloseProof(message.inputs)
+      case 'partial_credit': return await generatePartialCreditProof(message.inputs)
+      case 'consolidate':    return await generateConsolidateProof(message.inputs)
+    }
+    throw new Error(`[prover] Unknown proof type: ${(message as { type: string }).type}`)
+  } finally {
+    if (onProgress) setProverProgressSink(null)
   }
 }

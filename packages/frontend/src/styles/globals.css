@@ -101,10 +101,18 @@ textarea:focus-visible, [role="link"]:focus-visible, [tabindex]:focus-visible {
 .mono { font-family: var(--mono); }
 
 /* Buttons */
-.btn { display: inline-flex; align-items: center; gap: 8px; padding: 10px 16px; border-radius: var(--r-2); border: 1px solid var(--line-strong); background: transparent; color: var(--text); font-size: 13px; cursor: pointer; transition: all .15s ease; line-height: 1; }
+.btn { display: inline-flex; align-items: center; gap: 8px; padding: 10px 16px; border-radius: var(--r-2); border: 1px solid var(--line-strong); background: transparent; color: var(--text); font-size: 13px; cursor: pointer; transition: all .15s ease; line-height: 1; white-space: nowrap; }
 .btn:hover { border-color: var(--line-bright); background: rgba(255,255,255,0.02); }
+/* Tactile press feedback: a 1px nudge on active makes every button feel responsive
+   to the tap. Disabled buttons opt out. Neutralized by prefers-reduced-motion below. */
+.btn:active:not(:disabled) { transform: translateY(1px); }
+.btn:disabled { opacity: 0.5; cursor: not-allowed; }
 .btn-primary { background: var(--text); color: #000; border-color: var(--text); font-weight: 500; }
 .btn-primary:hover { background: #fff; }
+/* Cyan brand CTA — reserved for the single hero/launch action so the brand color
+   does real work at the top of the funnel. Workhorse confirms stay .btn-primary (white). */
+.btn-brand { background: var(--cyan); color: #04161c; border-color: var(--cyan); font-weight: 500; }
+.btn-brand:hover { background: oklch(0.86 0.13 210); border-color: oklch(0.86 0.13 210); box-shadow: 0 0 0 3px var(--cyan-glow); }
 .btn-ghost { border-color: transparent; }
 .btn-ghost:hover { background: rgba(255,255,255,0.04); border-color: var(--line); }
 .btn-sm { padding: 6px 10px; font-size: 12px; }
@@ -121,9 +129,21 @@ textarea:focus-visible, [role="link"]:focus-visible, [tabindex]:focus-visible {
 .pill-amber { color: var(--amber); border-color: oklch(0.82 0.14 70 / 0.35); background: oklch(0.82 0.14 70 / 0.06); }
 .pill-red { color: var(--red); border-color: oklch(0.70 0.18 25 / 0.35); background: oklch(0.70 0.18 25 / 0.06); }
 
+/* CTA button rows (landing hero + closing CTA). Wraps on tablet, stacks to
+   full-width buttons on phones so labels never collide or wrap mid-word. */
+.cta-row { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+@media (max-width: 640px) {
+  .cta-row { flex-direction: column; align-items: stretch; }
+  .cta-row .btn { width: 100%; justify-content: center; }
+}
+
 /* Cards / panels */
 .panel { background: var(--surface); border: 1px solid var(--line); border-radius: var(--r-3); }
 .panel-strong { background: var(--surface-1); border: 1px solid var(--line-strong); border-radius: var(--r-3); }
+/* Browsable card: lifts and brightens its edge to cyan on hover so a grid of these
+   reads as an interactive surface rather than a wall of static divs. */
+.market-card { transition: border-color .15s ease, transform .15s ease, box-shadow .15s ease; }
+.market-card:hover { border-color: var(--cyan-dim); transform: translateY(-2px); box-shadow: var(--shadow-2); }
 .hairline-t { border-top: 1px solid var(--line); }
 .hairline-b { border-bottom: 1px solid var(--line); }
 .hairline-l { border-left: 1px solid var(--line); }
@@ -146,14 +166,19 @@ textarea:focus-visible, [role="link"]:focus-visible, [tabindex]:focus-visible {
 
 /* App layout */
 .app-shell { min-height: calc(100vh - 56px); }
-.sidebar { background: var(--bg-1); border-right: 1px solid var(--line); padding: 18px 14px; display: flex; flex-direction: column; gap: 4px; }
-.sb-group { padding: 14px 8px 6px; }
-.sb-item { display: flex; align-items: center; gap: 10px; padding: 7px 10px; border-radius: var(--r-2); font-size: 13px; color: var(--text-1); cursor: pointer; white-space: nowrap; }
-.sb-item:hover { background: rgba(255,255,255,0.03); color: var(--text); }
-.sb-item.active { background: rgba(255,255,255,0.05); color: var(--text); }
-.sb-item .icon { width: 14px; height: 14px; opacity: 0.7; }
-.sb-item.active .icon { opacity: 1; color: var(--cyan); }
-.sb-count { margin-left: auto; font-family: var(--mono); font-size: 10px; color: var(--text-3); }
+
+/* Skeleton loader: a real left-to-right shimmer (the old code referenced a
+   non-existent `pulse` keyframe, so skeletons sat at flat 0.5 opacity and never
+   animated). The ::after sweep reads as "loading" far better than opacity pulsing.
+   prefers-reduced-motion (below) neutralizes the sweep for motion-sensitive users. */
+.skeleton { position: relative; overflow: hidden; background: var(--surface); border: 1px solid var(--line); border-radius: var(--r-3); }
+.skeleton::after {
+  content: ""; position: absolute; inset: 0;
+  transform: translateX(-100%);
+  background: linear-gradient(90deg, transparent, rgba(255,255,255,0.045), transparent);
+  animation: shimmer 1.4s ease-in-out infinite;
+}
+@keyframes shimmer { 100% { transform: translateX(100%); } }
 
 /* Skeleton placeholder for images */
 .img-ph { background:

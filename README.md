@@ -79,7 +79,7 @@ Nine Circom circuits compiled with Groth16 (snarkjs, BN254). Proofs are generate
 | **PARTIAL_CREDIT** (7) | `circuits/groth16/partial_credit.circom` | Refund of the unfilled remainder of a partial limit-order fill (FC-4) |
 | **CONSOLIDATE** (8) | `circuits/groth16/consolidate.circom` | Merges up to 4 same-owner notes into 1 (FC-8) |
 
-> The Noir circuits in `circuits/bet_auth/`, `circuits/withdrawal/`, etc. are kept as a specification reference only. They are not compiled or used for proof generation. See [`packages/circuits/README.md`](packages/circuits/README.md) for details.
+> The Noir circuits live under `circuits/Noir/` (`circuits/Noir/bet_auth/`, `circuits/Noir/withdrawal/`, etc.) and are kept as a specification reference only. They are not compiled or used for proof generation. See [`packages/circuits/README.md`](packages/circuits/README.md) for details.
 
 ### Note structure
 

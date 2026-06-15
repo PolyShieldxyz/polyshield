@@ -20,7 +20,7 @@ Full architecture is in `docs/architecture.md`. ZK circuit specifications are in
 ```
 packages/
   contracts/     Solidity on Polygon (Vault, VaultInputs library, CommitmentMerkleTree, NullifierRegistry, 9× verifiers incl. deposit (FC-2), position_close (FC-1), partial_credit (FC-4), consolidate (FC-8))
-  circuits/      Circom/snarkjs circuits in groth16/; Noir .nr spec-only files in subdirs (not compiled)
+  circuits/      Circom/snarkjs circuits in groth16/; Noir .nr spec-only files in Noir/ (not compiled)
                  Active: bet_auth, settlement_credit, withdrawal, bet_cancel, cancel_credit, deposit (FC-2), position_close (FC-1), partial_credit (FC-4), consolidate (FC-8)
   backend/       Node.js (signing-layer, proof-relay, indexer, mock-clob-server, mock-env)
                  proof-relay is ALSO the backend index/cache (FC-12): CachedMerkleTree → /merkle-path,
@@ -58,7 +58,7 @@ README.md              Project overview and quick start
 - **Secret derivation (P3+ — wallet-derived):** Secrets are derived deterministically from wallet signatures. **V2 (FC-13, default for new deposits):** one master-seed signature per session derives every note secret locally — `master_seed = keccak256(wallet.sign("PolyShield master seed\nAddress: {W}\nVersion: 2"))`, then `secret_i = keccak256(master_seed ‖ uint32(i)) mod p`. The master seed is held **in memory only** (never persisted) by `secretSession.ts`; this collapses recovery + every spend in a session to one signature. **V1 (legacy):** `keccak256(wallet.signMessage("PolyShield deposit derivation\nAddress: {W}\nIndex: {i}\nVersion: 1")) mod p` — one signature per index; still honored for pre-FC-13 notes (per-note `derivationVersion` selects the path; untagged → V1). **Both message strings are frozen protocol constants — never change them after mainnet deployment.** Users never need to back up a secret in P3+. See `docs/zk-design.md` §3 and FC-13.
 - **Merkle tree:** Poseidon-hashed, depth 32, append-only. Rolling **1024-root** history window with O(1) `mapping(bytes32 => bool) knownRoots` membership (FC-3, implemented). `isKnownRoot` is a single mapping read; `insert` maintains the window via a `mapping(uint256 => bytes32) rootRing` keyed by `seq % ROOT_WINDOW`, evicting the oldest root on overflow. `currentRoot` is the single source of truth for the latest root (read it instead of `recentRoots`/`currentRootIndex`, which were removed). The window size is the `internal virtual _rootWindow()` (constant `ROOT_WINDOW = 1024` in production; a test subclass overrides it to exercise eviction). The changing root does NOT serialize transactions to one per block (see T8). Do not shrink the window below the client proving span (≈15–60 Polygon blocks) without Project Agent approval.
 - **Deposit binding (MANDATORY, T20):** The deposit commitment MUST be bound to the deposited amount and depositor via a mandatory deposit ZK proof. `deposit` is NOT trivial. The committed `balance` is otherwise unconstrained against the transferred `amount`, allowing a depositor to commit a larger balance than they paid and drain the pool. Add `circuits/deposit`: private `secret`; public `(commitment, amount, owner_address)`; constraint `commitment == Poseidon4(secret, amount, 0, owner_address)`. The Vault passes `owner_address = uint256(uint160(msg.sender))` and `amount` from the on-chain transfer, forcing `balance == amount`, `nonce == 0`, `owner == msg.sender`. No change to the Poseidon4 formula or the four existing circuits. See FC-2. Treat as a blocker for any deposit-handling code.
-- **ZK language:** Circom + snarkjs (BN254 / Groth16). Active circuits live in `packages/circuits/groth16/`; the Noir `.nr` files in the other subdirectories are a specification reference only — they are not compiled and not wired into any build step. New Circom circuits are built through the `Benchmarking/groth16/` pipeline (`src/cli/compile.ts`, `setupCircuits.ts`, `generateVerifiers.ts`). Register new circuits in `Benchmarking/groth16/src/constants.ts` (CIRCUIT_IDS) and `src/interfaces.ts` (CircuitId union) before compiling.
+- **ZK language:** Circom + snarkjs (BN254 / Groth16). Active circuits live in `packages/circuits/groth16/`; the Noir `.nr` files in `packages/circuits/Noir/` are a specification reference only — they are not compiled and not wired into any build step. New Circom circuits are built through the `Benchmarking/groth16/` pipeline (`src/cli/compile.ts`, `setupCircuits.ts`, `generateVerifiers.ts`). Register new circuits in `Benchmarking/groth16/src/constants.ts` (CIRCUIT_IDS) and `src/interfaces.ts` (CircuitId union) before compiling.
 - **ZK backend:** Groth16 (snarkjs) for both dev/testnet and mainnet. The frontend generates proofs via `snarkjs.groth16.fullProve()` using WASM artifacts compiled from Circom. On-chain verification uses snarkjs-generated Solidity verifier contracts. UltraHonk and UltraPLONK have been evaluated (see `docs/Q16-proving-backend-comparison.md`) and are not used. Do not introduce UltraPLONK or UltraHonk verifiers anywhere.
 - **Chain:** Polygon mainnet (Polymarket runs here). Testnet target: Polygon Amoy.
 - **Upgradeability = UUPS (OpenZeppelin, Solidity), all production contracts.** Every deployed contract — `Vault`, `CommitmentMerkleTree`, `NullifierRegistry`, `PoseidonT3Hasher`, and all 8 Groth16 verifier adapters — is a UUPS implementation behind an `ERC1967Proxy`. The proxy addresses are the permanent protocol addresses. Constructors are replaced by `initialize(...)` (`initializer`-guarded); implementations carry `constructor() { _disableInitializers(); }`. `_authorizeUpgrade` is gated by **plain `onlyOwner`, instant (no timelock)** — this is a deliberate decision and a major trust assumption: the owner can replace any contract's logic in a single tx (fund-drain / de-anon vector). The owner role MUST be a multisig/HSM in production. See `docs/threat-model.md` (T-UPGRADE) and `docs/architecture.md`. Mechanics: uses `@openzeppelin-upgradeable` mixins (`Ownable2StepUpgradeable`, `PausableUpgradeable`) + `ReentrancyGuardTransient` (EIP-1153; `evm_version = "cancun"` in `foundry.toml`, supported on Polygon since the Napoli hardfork). Each upgradeable contract reserves a trailing `__gap`; never reorder/insert state — append by shrinking the gap. `CommitmentMerkleTree`'s storage layout (`poseidon, vault, zeros[32], filledSubtrees[32], currentRoot, knownRoots, rootRing, nextIndex, rootCount, __gap`) is frozen. (FC-3 intentionally reset this layout — replacing the old `recentRoots[30], currentRootIndex` block — under the pre-mainnet test-only waiver of the frozen-layout rule, with a fresh redeploy and no migration; treat it as frozen again going forward.) Verifier adapters expose an owner-only `setBase(address)` to adopt a new VK without a full proxy migration (separate lever from the Vault's 48h-timelocked `proposeVerifier`/`acceptVerifier` slot swap). Deploy via the proxy pattern in `script/Deploy.s.sol` / `MockDeploy.s.sol` using `script/DeployLib.sol` (predicts the Vault proxy address to resolve the Vault↔Tree↔Registry init cycle). Do not reintroduce constructors or change `_authorizeUpgrade` gating without Project Agent approval.
@@ -82,7 +82,7 @@ README.md              Project overview and quick start
 
 ## ZK Proofs: Quick Reference
 
-Seven proof types. The **active Circom source** is in `packages/circuits/groth16/`; the `.nr` files in subdirectories are specification-only and are NOT compiled. Build new circuits through `Benchmarking/groth16/` (see `packages/circuits/README.md`). Full specs in `docs/zk-design.md`.
+Seven proof types. The **active Circom source** is in `packages/circuits/groth16/`; the `.nr` files in `packages/circuits/Noir/` are specification-only and are NOT compiled. Build new circuits through `Benchmarking/groth16/` (see `packages/circuits/README.md`). Full specs in `docs/zk-design.md`.
 
 | Proof | Circom source (active) | Verifier slot | Key public inputs |
 |---|---|---|---|
@@ -101,7 +101,7 @@ Seven proof types. The **active Circom source** is in `packages/circuits/groth16
 **Commitment formula (all circuits):** `Poseidon4(secret, balance, nonce, owner_address)` — uses circomlib `poseidon.circom` template, matching `NoteCommitment()` in `groth16/lib/note.circom`.
 **Nullifier formula (all circuits):** `Poseidon2(secret, nonce)`.
 
-> The Noir `.nr` files in `circuits/bet_auth/`, `circuits/settlement_credit/`, etc. are **not compiled, not used for proof generation, and not wired into any build step**. They are kept as a human-readable specification reference only.
+> The Noir `.nr` files in `circuits/Noir/` (e.g. `circuits/Noir/bet_auth/`, `circuits/Noir/settlement_credit/`) are **not compiled, not used for proof generation, and not wired into any build step**. They are kept as a human-readable specification reference only.
 
 ---
 
@@ -250,7 +250,7 @@ pnpm generate:verifiers     # snarkjs → *Verifier.sol (contracts/generated/)
 #   contracts/generated/*Verifier.sol      → packages/contracts/src/verifiers/
 
 # Noir spec-reference only (not the live build — see packages/circuits/README.md):
-# cd packages/circuits && nargo check   (validates Noir spec files for consistency)
+# cd packages/circuits/Noir && nargo check   (validates Noir spec files for consistency)
 
 # ── Backend ──────────────────────────────────────────────────────────────────
 cd packages/backend
@@ -363,11 +363,11 @@ bet status valid (C1)? → condition resolved (C2)? → all numerators zero?
 **Note:** The `.nr` files listed below are **specification reference only** and are not compiled or used for proof generation. The authoritative Circom circuits in `packages/circuits/groth16/` use `bytes32(0)` (Field `0`) as the zero leaf, matching `CommitmentMerkleTree.sol`. Fixing the Noir spec files is useful for documentation consistency but does not affect any running code. Execute only if maintaining the Noir specs as an accurate spec document matters.
 
 **Files (spec-only, not compiled):**
-- `packages/circuits/bet_auth/src/test.nr`
-- `packages/circuits/withdrawal/src/test.nr`
-- `packages/circuits/settlement_credit/src/test.nr`
-- `packages/circuits/bet_cancel/src/test.nr`
-- `packages/circuits/cancel_credit/src/test.nr`
+- `packages/circuits/Noir/bet_auth/src/test.nr`
+- `packages/circuits/Noir/withdrawal/src/test.nr`
+- `packages/circuits/Noir/settlement_credit/src/test.nr`
+- `packages/circuits/Noir/bet_cancel/src/test.nr`
+- `packages/circuits/Noir/cancel_credit/src/test.nr`
 
 In each file, replace the zero-leaf initializer:
 ```noir

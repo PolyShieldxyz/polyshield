@@ -30,7 +30,7 @@ import { USDC_ABI, VAULT_ABI } from '@/lib/vaultAbi'
 
 const VAULT_ADDRESS = (process.env.NEXT_PUBLIC_VAULT_ADDRESS ?? '0x0000000000000000000000000000000000000000') as `0x${string}`
 const USDC_ADDRESS  = (process.env.NEXT_PUBLIC_USDC_ADDRESS  ?? '0x0000000000000000000000000000000000000000') as `0x${string}`
-import { generateProofInWorker } from '@/lib/prover'
+import { generateProofInWorker, type AssetProgress } from '@/lib/prover'
 import { log, proofSummary } from '@/lib/logger'
 
 const ZERO_COMMITMENT = `0x${'00'.repeat(32)}` as `0x${string}`
@@ -63,6 +63,8 @@ export default function WithdrawPage() {
   const [status, setStatus] = useState<'idle' | 'running' | 'success' | 'error'>('idle')
   const [statusMsg, setStatusMsg] = useState('')
   const [txHash, setTxHash] = useState('')
+  // Determinate download progress (0–100) for the proving-key fetch; null when not downloading.
+  const [downloadPct, setDownloadPct] = useState<number | null>(null)
 
   const cashNote = state?.cashNote ?? null
   const cashBalance = state?.cashBalance ?? 0n
@@ -125,6 +127,21 @@ export default function WithdrawPage() {
     setStatus('running')
     setStatusMsg('Preparing withdrawal proof...')
     setTxHash('')
+    setDownloadPct(null)
+
+    // Determinate progress for the (sometimes large) proving-key download. The first proof of a
+    // session pulls the circuit artifacts; on a slow link this is the longest single step, so show
+    // a real percentage instead of a generic "Generating proof…" that looks like a hang.
+    const onProverProgress = (p: AssetProgress) => {
+      if (p.phase === 'download' && p.total > 0) {
+        const pct = Math.min(100, Math.round((p.loaded / p.total) * 100))
+        setDownloadPct(pct)
+        setStatusMsg(`Downloading proving key… ${pct}%`)
+      } else {
+        setDownloadPct(null)
+        setStatusMsg('Generating proof…')
+      }
+    }
 
     try {
       // Chain-authoritative spent check: heal any locally-stale notes (already spent on-chain) before
@@ -141,7 +158,9 @@ export default function WithdrawPage() {
           signMessageAsync,
           notes: sel.selection.notes,
           onProgress: setStatusMsg,
+          onDownloadProgress: onProverProgress,
         })
+        setDownloadPct(null)
       }
 
       const recipient = address
@@ -189,7 +208,8 @@ export default function WithdrawPage() {
           recipient_hash: recipientHash,
           new_commitment: newCommitment,
         },
-      })
+      }, onProverProgress)
+      setDownloadPct(null)
 
       const inputs: RelayWithdrawalInputs = {
         merkle_root: merkle.root,
@@ -251,6 +271,7 @@ export default function WithdrawPage() {
       const message = err instanceof Error ? err.message : String(err)
       setStatus('error')
       setStatusMsg(message)
+      setDownloadPct(null)
       log('withdraw_relay_error', { error: message, recipient: address, amountInput })
     }
   }
@@ -355,9 +376,28 @@ export default function WithdrawPage() {
                 <span className="small" style={{ color: status === 'error' ? 'var(--red)' : 'var(--text-1)' }}>
                   {statusMsg}
                 </span>
-                {status === 'running' && <span className="mono" style={{ fontSize: 11 }}>processing...</span>}
+                {status === 'running' && (
+                  <span className="mono" style={{ fontSize: 11 }}>
+                    {downloadPct !== null ? `${downloadPct}%` : 'processing...'}
+                  </span>
+                )}
                 {status === 'success' && <Icon d={ICONS.check} size={14} className="text-green" />}
               </div>
+              {downloadPct !== null && (
+                <div
+                  className="mt-2"
+                  style={{ height: 4, borderRadius: 4, background: 'var(--bg-1)', overflow: 'hidden' }}
+                >
+                  <div
+                    style={{
+                      width: `${downloadPct}%`,
+                      height: '100%',
+                      background: 'var(--green)',
+                      transition: 'width 120ms linear',
+                    }}
+                  />
+                </div>
+              )}
               {txHash && (
                 <div className="mono mt-2" style={{ fontSize: 10, color: 'var(--text-2)' }}>
                   tx: {txHash.slice(0, 10)}...{txHash.slice(-8)}

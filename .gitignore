@@ -34,12 +34,9 @@ node_modules/
 
 # Noir build artifacts
 packages/circuits/**/target/
-packages/circuits/bet_auth
-packages/circuits/bet_cancel
-packages/circuits/cancel_credit
-packages/circuits/settlement_credit
-packages/circuits/withdrawal
-packages/circuits/lib
+# Noir spec circuits now live under packages/circuits/Noir/ and are tracked as a
+# specification reference; only their build outputs (target/, bench_out/) are ignored.
+packages/circuits/Noir/**/bench_out/
 
 
 # Foundry artifacts

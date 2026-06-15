@@ -23,7 +23,7 @@ import {
   relayConsolidate,
   waitForTransactionConfirmation,
 } from './api'
-import { generateProofInWorker } from './prover'
+import { generateProofInWorker, type AssetProgress } from './prover'
 
 const ZERO_HEX32 = `0x${'00'.repeat(32)}` as `0x${string}`
 const ZERO_PATH = Array<string>(32).fill('0')
@@ -35,6 +35,8 @@ export interface ConsolidateParams {
   notes: Note[]
   /** Optional progress callback for UI ("merging notes…"). */
   onProgress?: (msg: string) => void
+  /** Optional determinate proving-artifact download progress (for a "Downloading proving key…" bar). */
+  onDownloadProgress?: (p: AssetProgress) => void
 }
 
 /**
@@ -43,7 +45,7 @@ export interface ConsolidateParams {
  * be spent by a normal single-input bet/withdrawal.
  */
 export async function consolidateNotes(params: ConsolidateParams): Promise<Note> {
-  const { wallet, signMessageAsync, notes, onProgress } = params
+  const { wallet, signMessageAsync, notes, onProgress, onDownloadProgress } = params
   if (notes.length < 2) throw new Error('consolidateNotes requires at least 2 notes')
   if (notes.length > MAX_CONSOLIDATE_INPUTS) throw new Error(`consolidateNotes accepts at most ${MAX_CONSOLIDATE_INPUTS} notes`)
 
@@ -111,7 +113,7 @@ export async function consolidateNotes(params: ConsolidateParams): Promise<Note>
       nullifier: nullifierArr,
       new_commitment: mergedCommitment,
     },
-  })
+  }, onDownloadProgress)
 
   onProgress?.('Submitting merge…')
   const { txHash } = await relayConsolidate(proof, {

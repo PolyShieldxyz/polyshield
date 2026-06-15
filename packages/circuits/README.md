@@ -2,6 +2,17 @@
 
 This directory contains two sets of ZK circuits for Polyshield. Only the Groth16 set is active in the current build.
 
+```
+packages/circuits/
+  groth16/   ← ACTIVE: Circom/Groth16 circuits compiled & proven in production
+  Noir/      ← REFERENCE ONLY: Noir (.nr) spec circuits — not compiled, not wired into any build
+  README.md
+  package.json
+```
+
+> **All Noir circuits live under `Noir/`.** They are a specification reference only — see
+> [Reference only: Noir / UltraPLONK (`Noir/`)](#reference-only-noir--ultraplonk-noir) below.
+
 ---
 
 ## Active: Groth16 / Circom (`groth16/`)
@@ -79,11 +90,25 @@ cd packages/contracts && forge build && forge test --match-contract RealVerifier
 
 ---
 
-## Reference only: Noir / UltraPLONK (`bet_auth/`, `withdrawal/`, etc.)
+## Reference only: Noir / UltraPLONK (`Noir/`)
 
 > **Not compiled. Not used for proof generation. Do not run `nargo compile` and copy outputs into the build.**
 
-The Noir circuits in the top-level subdirectories (`bet_auth/`, `withdrawal/`, `settlement_credit/`, `bet_cancel/`, `cancel_credit/`, `lib/`) are kept as a canonical specification reference. They describe the same protocol logic as the Circom circuits and are useful for:
+All Noir circuits live under the `Noir/` subdirectory:
+
+```
+Noir/
+  Nargo.toml               — Noir workspace (members: lib, bet_auth, settlement_credit, withdrawal, bet_cancel, cancel_credit)
+  lib/                     — shared Noir lib (package name `merkle`)
+  bet_auth/                — main.nr + test.nr + Prover.toml
+  settlement_credit/
+  withdrawal/
+  bet_cancel/
+  cancel_credit/
+  bench.sh                 — legacy UltraPLONK-vs-UltraHonk benchmark script (requires nargo; not part of the build)
+```
+
+These Noir circuits are kept as a canonical specification reference. They describe the same protocol logic as the Circom circuits and are useful for:
 
 - Reading the constraint logic in a higher-level language
 - Cross-checking the Circom implementation

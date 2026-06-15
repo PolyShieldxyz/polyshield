@@ -41,11 +41,16 @@ export type ProverWorkerMessage =
 export type ProverWorkerResult =
   | { type: 'done';  result: ProofResult }
   | { type: 'error'; message: string }
+  | { type: 'progress'; phase: 'download' | 'prove'; loaded: number; total: number }
 
 self.onmessage = async (event: MessageEvent<ProverWorkerMessage>) => {
   try {
-    const { generateBetAuthProof, generateWithdrawalProof, generateSettlementProof, generateBetCancelProof, generateCancelCreditProof, generateDepositProof, generatePositionCloseProof, generatePartialCreditProof, generateConsolidateProof } =
-      await import('../lib/prover')
+    const mod = await import('../lib/prover')
+    // Forward artifact-download progress to the main thread so it can render a determinate bar.
+    mod.setProverProgressSink((p) =>
+      self.postMessage({ type: 'progress', phase: p.phase, loaded: p.loaded, total: p.total } satisfies ProverWorkerResult),
+    )
+    const { generateBetAuthProof, generateWithdrawalProof, generateSettlementProof, generateBetCancelProof, generateCancelCreditProof, generateDepositProof, generatePositionCloseProof, generatePartialCreditProof, generateConsolidateProof } = mod
 
     let result: ProofResult
 

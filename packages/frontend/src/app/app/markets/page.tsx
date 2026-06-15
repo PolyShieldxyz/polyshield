@@ -37,7 +37,7 @@ function MarketCard({ market }: { market: MarketEntry }) {
       onClick={() => track([{ scope: 'market_view', key: market.id }])}
       style={{ textDecoration: 'none' }}
     >
-      <div className="panel" style={{ padding: 0, overflow: 'hidden', cursor: 'pointer', transition: 'border-color .15s' }}>
+      <div className="panel market-card" style={{ padding: 0, overflow: 'hidden', cursor: 'pointer' }}>
         <div style={{ padding: '16px 18px 12px' }}>
           <div className="row" style={{ justifyContent: 'space-between', marginBottom: 10 }}>
             <span className="pill pill-soft" style={{ fontSize: 9 }}>{market.cat}</span>
@@ -122,7 +122,7 @@ function MarketListRow({ market }: { market: MarketEntry }) {
 }
 
 function CardSkeleton() {
-  return <div className="panel" style={{ height: 184, opacity: 0.5, animation: 'pulse 1.4s ease-in-out infinite' }} />
+  return <div className="skeleton" style={{ height: 184 }} />
 }
 
 export default function MarketsPage() {
