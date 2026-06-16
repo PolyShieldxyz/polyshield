@@ -112,6 +112,42 @@ function TablePagerRow({ page, totalPages, onChange, colSpan }: { page: number; 
   )
 }
 
+// STATE-001: first-run guidance for a fresh account — one focused card with the 3-step path
+// and a primary Deposit CTA, instead of six stacked empty "No X yet" tables.
+function FirstRunPanel() {
+  const steps: [string, string, string][] = [
+    ['1', 'Deposit USDC', 'Funds enter a shared anonymity pool — not linkable to any bet you place.'],
+    ['2', 'Place a private bet', 'A zero-knowledge proof authorizes the bet. Your wallet never appears on-chain.'],
+    ['3', 'Settle & withdraw', 'Claim winnings and withdraw back to your own wallet, privately.'],
+  ]
+  return (
+    <div className="panel-strong mt-4" style={{ padding: 28, maxWidth: 720, margin: '16px auto 0' }}>
+      <div className="micro" style={{ color: 'var(--cyan)' }}>GET STARTED</div>
+      <h3 className="h3 mt-2" style={{ margin: 0 }}>Your private vault is ready.</h3>
+      <p className="body mt-2" style={{ marginTop: 8 }}>
+        You haven’t deposited yet. Here’s how PolyShield works, end to end:
+      </p>
+      <div className="col gap-3 mt-4">
+        {steps.map(([n, title, desc]) => (
+          <div key={n} className="row gap-3" style={{ alignItems: 'flex-start' }}>
+            <div className="center num" style={{ width: 28, height: 28, flexShrink: 0, borderRadius: '50%', border: '1px solid var(--line-strong)', fontSize: 13, color: 'var(--cyan)' }}>{n}</div>
+            <div>
+              <div style={{ fontSize: 14, fontWeight: 500 }}>{title}</div>
+              <div className="small mt-1" style={{ fontSize: 12 }}>{desc}</div>
+            </div>
+          </div>
+        ))}
+      </div>
+      <div className="row gap-3 mt-6">
+        <Link href="/app/deposit" className="btn btn-brand" style={{ textDecoration: 'none' }}>
+          <Icon d={ICONS.arrowDown} size={14} /> Deposit USDC
+        </Link>
+        <Link href="/app/markets" className="btn btn-ghost" style={{ textDecoration: 'none' }}>Browse markets</Link>
+      </div>
+    </div>
+  )
+}
+
 // Next 15 requires any component calling useSearchParams() to be wrapped in a
 // Suspense boundary, or `next build` fails. Content lives in PortfolioContent.
 export default function PortfolioPage() {
@@ -216,7 +252,13 @@ function PortfolioContent() {
     if (!silent) setRecoverMsg(null)
     setRecoverProgress({ done: 0, total: 0 })
     try {
-      const rpcUrl = process.env.NEXT_PUBLIC_CHAIN_RPC || process.env.NEXT_PUBLIC_POLYGON_RPC || undefined
+      // Direct-scan fallback RPC: dev hits the local chain; prod routes through the same-origin
+      // /api/rpc proxy (server-only key) instead of a keyed RPC embedded in the bundle. The primary
+      // path (recoverNotesViaBackend) doesn't touch this anyway.
+      const rpcUrl =
+        process.env.NEXT_PUBLIC_DEV_MODE === 'true'
+          ? process.env.NEXT_PUBLIC_CHAIN_RPC || process.env.NEXT_PUBLIC_POLYGON_RPC || undefined
+          : '/api/rpc'
       const onProgress = (done: number, total: number) => setRecoverProgress({ done, total })
       // Prefer the backend recovery data (events served from the proof-relay's index — fast, no
       // client RPC scan). Fall back to the direct on-chain scan if the backend endpoint is
@@ -493,6 +535,15 @@ function PortfolioContent() {
   const depositsSorted = byNewest(state?.depositHistory ?? [])
   const withdrawalsSorted = byNewest(state?.withdrawalHistory ?? [])
 
+  // STATE-001: a brand-new account (no deposits, no bets, no history) gets a single guiding
+  // first-run card instead of six stacked empty tables. Any activity flips to the full layout.
+  const hasActivity =
+    (state?.openReceipts.length ?? 0) > 0 ||
+    (state?.closedBetHistory.length ?? 0) > 0 ||
+    (state?.lostBets.length ?? 0) > 0 ||
+    (state?.depositHistory.length ?? 0) > 0 ||
+    (state?.withdrawalHistory.length ?? 0) > 0
+
   const positionsPager = usePager(openPositions)
   const ordersPager = usePager(openOrders)
   const readyPager = usePager(readyToSettleSorted)
@@ -650,6 +701,10 @@ function PortfolioContent() {
               ))}
             </div>
 
+            {!hasActivity ? (
+              <FirstRunPanel />
+            ) : (
+            <>
             {/* Positions = bets that actually filled (you hold shares): settle / close / claim. */}
             <div className="panel mt-4" style={{ padding: 0, overflow: 'hidden' }}>
               <div className="row hairline-b" style={{ padding: '12px 16px', justifyContent: 'space-between' }}>
@@ -880,6 +935,8 @@ function PortfolioContent() {
                 </table>
               </div>
             </div>
+            </>
+            )}
           </>
         )}
       </div>

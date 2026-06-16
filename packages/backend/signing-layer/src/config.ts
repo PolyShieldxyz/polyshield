@@ -21,6 +21,10 @@ export const config = {
   // points this at the mock CLOB's /ws/user; production uses the Polymarket endpoint.
   polyWsUrl: optionalEnv("POLY_WS_URL", "wss://ws-subscriptions-clob.polymarket.com/ws/user"),
   polygonRpcUrl: requireEnv("POLYGON_RPC_URL"),
+  // The proof-relay's base URL (compose-internal). When set, the signing layer sources BetAuthorized
+  // events from the relay's event index (which it already maintains) instead of re-scanning the chain,
+  // with a chain getLogs fallback. Empty → always scan the chain (the prior behaviour).
+  proofRelayUrl: optionalEnv("PROOF_RELAY_URL", ""),
   vaultContractAddress: requireEnv("VAULT_CONTRACT_ADDRESS"),
   signingLayerOperatorAddress: requireEnv("SIGNING_LAYER_OPERATOR_ADDRESS"),
   ctfAddress: optionalEnv("CTF_ADDRESS", "0x4D97DCd97eC945f40cF65F87097ACe5EA0476045"),
@@ -65,7 +69,9 @@ export const config = {
   bufferLowWaterUsdc: BigInt(optionalEnv("BUFFER_LOW_WATER_USDC", "0") || "0"),
   bufferTargetUsdc: BigInt(optionalEnv("BUFFER_TARGET_USDC", "0") || "0"),
   bufferHighWaterUsdc: BigInt(optionalEnv("BUFFER_HIGH_WATER_USDC", "0") || "0"),
-  bufferManagerPollMs: parseInt(optionalEnv("BUFFER_MANAGER_POLL_MS", "30000"), 10),
+  // Slow idle-drift safety poll only; active-period top-ups are event-nudged after each JIT funding
+  // (C3, see bufferManager.triggerBufferCheck), so this no longer needs a tight cadence.
+  bufferManagerPollMs: parseInt(optionalEnv("BUFFER_MANAGER_POLL_MS", "600000"), 10),
   // FALLBACK CLOB taker-fee reserve (bps of the market-BUY notional), used ONLY when the exact
   // per-market fee can't be fetched from the CLOB. The real Polymarket taker fee is VARIABLE —
   // price-dependent (∝ p·(1−p)) and per-market/category (per-token rate; some categories fee-free) —

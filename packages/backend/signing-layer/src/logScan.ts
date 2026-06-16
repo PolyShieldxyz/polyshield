@@ -38,6 +38,18 @@ export function isRateLimit(err: unknown): boolean {
  * loop forever) — callers that page logs handle those via queryFilterChunked.
  */
 export class RetryingJsonRpcProvider extends ethers.JsonRpcProvider {
+  // `staticNetwork: true` makes ethers detect the chain ONCE and then treat it as fixed. Without it,
+  // ethers re-issues `eth_chainId` to re-validate the network around operations (tx population, fee
+  // estimation, etc.) — a steady stream of redundant calls on an always-on signing layer. The chain
+  // never changes under us, so caching it is correct and removes that traffic.
+  constructor(
+    url?: string | ethers.FetchRequest,
+    network?: ethers.Networkish,
+    options?: ethers.JsonRpcApiProviderOptions,
+  ) {
+    super(url, network, { staticNetwork: true, ...options });
+  }
+
   async send(method: string, params: Array<unknown> | Record<string, unknown>): Promise<unknown> {
     let attempt = 0;
     for (;;) {

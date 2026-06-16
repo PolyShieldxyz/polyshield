@@ -1,41 +1,60 @@
-import { useId } from 'react'
+import type { CSSProperties } from 'react'
 
 interface LogoProps {
   size?: number
   withText?: boolean
+  /** Draw-on the gold inclusion path + "verify" the leaf. Off in nav; on for hero/loading. */
+  animate?: boolean
 }
 
-// Shared shield silhouette (viewBox 0 0 32 32). Filled — survives small sizes and light backgrounds.
-const SHIELD = 'M16 2.5 L27.5 6.6 V15.8 C27.5 22.6 22.3 27.6 16 29.7 C9.7 27.6 4.5 22.6 4.5 15.8 V6.6 Z'
-// V1: brand initial "P" (evenodd keeps the bowl counter open). Used as the standalone brand mark.
-const CUT_P = 'M12.2 9 H17.4 C19.9 9 21.6 10.7 21.6 13.1 C21.6 15.5 19.9 17.2 17.4 17.2 H14.7 V22.6 H12.2 Z M14.7 11.3 V14.9 H17.1 C18.3 14.9 19 14.2 19 13.1 C19 12 18.3 11.3 17.1 11.3 Z'
-// V2: keyhole (privacy). Used as the mark beside the "PolyShield" wordmark.
-const CUT_KEYHOLE = 'M16 9.5 A3.2 3.2 0 0 1 17.7 15.4 L19 22 H13 L14.3 15.4 A3.2 3.2 0 0 1 16 9.5 Z'
+/* PolyShield mark — a Merkle proof pyramid held inside a shield (proof + protection).
+   Gold = your inclusion path (root → mid → leaf, the last edge leaning right); indigo = the
+   shield + sibling hashes. Colors read from the P5 tokens (--accent gold, --brand indigo) with
+   hex fallbacks so the mark also renders standalone. viewBox 0 0 64 64. */
+const SHIELD = 'M32 5 L55 13 V31 C55 44 45 53 32 58 C19 53 9 44 9 31 V13 Z'
+const GOLD = 'var(--accent, #f1c45e)'
+const INDIGO = 'var(--brand, #8285eb)'
+// the single gold polyline: root → mid-left → leaf (last segment leans RIGHT)
+const PATH = 'M32 17 L24 30 L29 43'
 
-export function Logo({ size = 22, withText = true }: LogoProps) {
-  const uid = useId()
-  const gid = `lg-${uid}`
-  const mid = `lm-${uid}`
-  // V2 keyhole when shown next to the name; V1 "P" as the standalone brand mark.
-  const cut = withText ? CUT_KEYHOLE : CUT_P
+export function Logo({ size = 22, withText = true, animate = false }: LogoProps) {
   return (
     <div className="row gap-3" style={{ alignItems: 'center' }}>
-      <svg width={size} height={size} viewBox="0 0 32 32" fill="none" aria-hidden>
-        <defs>
-          <linearGradient id={gid} x1="0" y1="0" x2="1" y2="1">
-            <stop offset="0" stopColor="oklch(0.84 0.13 210)" />
-            <stop offset="1" stopColor="oklch(0.66 0.15 290)" />
-          </linearGradient>
-          {/* White = visible shield, black = knocked-out cut → the cut is transparent on any background. */}
-          <mask id={mid}>
-            <path d={SHIELD} fill="white" />
-            <path d={cut} fill="black" fillRule="evenodd" />
-          </mask>
-        </defs>
-        <path d={SHIELD} fill={`url(#${gid})`} mask={`url(#${mid})`} />
+      <svg width={size} height={size} viewBox="0 0 64 64" fill="none" aria-hidden>
+        {/* Shield — faint indigo fill + outline so the tree reads inside it. */}
+        <path d={SHIELD} fill="var(--brand-soft, rgba(130,133,235,0.06))" stroke={INDIGO} strokeWidth="2.4" strokeLinejoin="round" />
+        {/* Sibling hashes (the rest of the tree) — indigo. */}
+        <g stroke={INDIGO} strokeWidth="1.6" strokeLinecap="round">
+          <line x1="32" y1="17" x2="40" y2="30" />
+          <line x1="24" y1="30" x2="20" y2="43" />
+          <line x1="40" y1="30" x2="36" y2="43" />
+          <line x1="40" y1="30" x2="44" y2="43" />
+        </g>
+        <g fill={INDIGO}>
+          <circle cx="40" cy="30" r="2.4" />
+          <circle cx="20" cy="43" r="2.4" />
+          <circle cx="36" cy="43" r="2.4" />
+          <circle cx="44" cy="43" r="2.4" />
+        </g>
+        {/* Gold inclusion path — the hero. pathLength=1 lets it "draw on" when animate. */}
+        <path
+          d={PATH}
+          fill="none"
+          stroke={GOLD}
+          strokeWidth="2.6"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+          pathLength={1}
+          className={animate ? 'logo-draw' : undefined}
+        />
+        <g fill={GOLD}>
+          <circle cx="32" cy="17" r="3.6" />
+          <circle cx="24" cy="30" r="3" />
+          <circle cx="29" cy="43" r="4" className={animate ? 'logo-verify' : undefined} />
+        </g>
       </svg>
       {withText && (
-        <span style={{ fontSize: 15, letterSpacing: '-0.01em', fontWeight: 500 }}>
+        <span style={{ fontSize: 15, letterSpacing: '-0.01em', fontWeight: 500 } as CSSProperties}>
           PolyShield
         </span>
       )}

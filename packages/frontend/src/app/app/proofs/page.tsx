@@ -16,7 +16,7 @@ const TYPE_COLOR: Record<string, string> = {
   DEPOSIT: 'var(--cyan)',
   BET_AUTH: 'var(--violet)',
   SETTLE_CRED: 'var(--green)',
-  CANCEL_CRED: 'oklch(0.80 0.15 70)',
+  CANCEL_CRED: 'oklch(0.80 0.15 55)',
   WITHDRAW: 'var(--text-2)',
 }
 

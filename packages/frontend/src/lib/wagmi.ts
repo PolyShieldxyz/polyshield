@@ -2,6 +2,7 @@ import { polygon, polygonAmoy, mainnet } from 'wagmi/chains'
 import { http, createConfig, type Transport } from 'wagmi'
 import { defineChain } from 'viem'
 import { getDefaultConfig } from 'connectkit'
+import { polygonReadRpc } from './rpc'
 
 const IS_DEV = process.env.NEXT_PUBLIC_DEV_MODE === 'true'
 const DEV_RPC = process.env.NEXT_PUBLIC_CHAIN_RPC || 'http://127.0.0.1:8545'
@@ -30,12 +31,12 @@ const chains = IS_DEV
 const transports: Record<number, Transport> = IS_DEV
   ? {
       [anvilChain.id]: http(DEV_RPC),
-      [polygon.id]: http(process.env.NEXT_PUBLIC_POLYGON_RPC || undefined),
+      [polygon.id]: http(polygonReadRpc()),
       [polygonAmoy.id]: http(),
       [mainnet.id]: http(MAINNET_RPC),
     }
   : {
-      [polygon.id]: http(process.env.NEXT_PUBLIC_POLYGON_RPC || undefined),
+      [polygon.id]: http(polygonReadRpc()),
       [polygonAmoy.id]: http(),
       [mainnet.id]: http(MAINNET_RPC),
     }

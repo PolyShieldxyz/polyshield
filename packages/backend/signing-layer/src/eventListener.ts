@@ -8,7 +8,7 @@ import { getAttestation } from "./attestationStore";
 import { isOrderTracked } from "./wsFillTracker";
 import { resolveToken, marketMetaForKey } from "./marketRegistry";
 import { upsertTrackedMarket } from "./trackedMarkets";
-import { queryFilterChunked } from "./logScan";
+import { scanHead, fetchBetAuthorized, BetAuthorizedRecord } from "./vaultEventSource";
 import { config } from "./config";
 
 // Persist the scan cursor in the DATA VOLUME (next to settlement.db) so a container recreate doesn't
@@ -41,8 +41,9 @@ const DEEP_LOOKBACK_BLOCKS = Number(process.env.DEEP_LOOKBACK_BLOCKS ?? "100000"
 // attestation yet) on a subsequent tick before its attestation lands.
 const inFlight = new Set<string>();
 
-// queryFilterChunked now lives in logScan.ts — rate-limit-aware (backs off on a 429 instead of
-// halving, which on a metered RPC like Alchemy would only multiply the requests).
+// BetAuthorized events come from vaultEventSource — the proof-relay's event index when available
+// (no per-service getLogs), falling back to a direct chain scan. The cursor/window/deep-sweep logic
+// below is unchanged; only the source of the events moved.
 
 function loadLastBlock(): number {
   try {
@@ -144,10 +145,54 @@ async function processBetEvent(
   await submitFAKOrder(orderEvent, wallet, provider);
 }
 
+/** Process one BetAuthorized record: dedup, confirm the on-chain bet exists, then submit the order. */
+async function handleBetRecord(
+  r: BetAuthorizedRecord,
+  vault: ethers.Contract,
+  wallet: ethers.Wallet,
+  provider: ethers.JsonRpcProvider,
+): Promise<void> {
+  const nullifier = r.nullifier;
+  try {
+    // FC-9: on-chain status is no longer advanced by report* (those are gone), so an ACTIVE on-chain
+    // status no longer means "not yet handled" — the order may already be filled. Dedupe on the
+    // off-chain attestation store: a persisted attestation means the order reached a terminal state.
+    if (getAttestation(nullifier)) return;
+    // Within-process dedup: don't re-submit a bet we've already started handling on a prior tick.
+    if (inFlight.has(nullifier)) return;
+    // Don't re-submit a resting GTC/GTD limit order that's already tracked (no terminal attestation yet).
+    if (isOrderTracked(nullifier)) return;
+
+    // Confirm the bet exists on-chain (bytes32(0) market_id ⇒ no record). A BetAuthorized event only
+    // exists for a mined, non-reverted tx, so this is belt-and-suspenders, but cheap and keeps the
+    // submit gated on the authoritative on-chain record.
+    const rec = await vault.betRecords(nullifier);
+    const market_id = rec[0] as string;
+    if (!market_id || market_id === ethers.ZeroHash) return;
+
+    inFlight.add(nullifier); // mark before submitting; kept on error to avoid double-submit
+    logger.warn({ nullifier }, "event-listener: found un-attested bet — processing");
+    await processBetEvent(
+      nullifier,
+      r.market_id,
+      r.position_id,
+      r.outcome_side,
+      r.expected_shares,
+      r.bet_amount,
+      r.price,
+      r.new_commitment,
+      wallet,
+      provider,
+    );
+  } catch (err) {
+    logger.error({ err, nullifier }, "event-listener: catchup failed for bet");
+  }
+}
+
 /**
- * On startup, scan all historical BetAuthorized events and re-submit any that
- * still have ACTIVE status (i.e. the signing layer missed them on a previous run).
- * This handles chain restarts and signing layer restarts without data loss.
+ * Scan for BetAuthorized events and submit any un-attested order. Events are sourced from the
+ * proof-relay event index when available (no per-service getLogs), falling back to a direct chain
+ * scan. Handles chain/signing-layer restarts without data loss (idempotent dedup in handleBetRecord).
  */
 async function catchUpMissedBets(
   vault: ethers.Contract,
@@ -159,81 +204,37 @@ async function catchUpMissedBets(
   const persist = opts.persist ?? true;
   logger.info(opts.label ?? "event-listener: scanning for missed BetAuthorized events...");
   try {
-    // API-009: clamp the persisted cursor to [0, currentBlock]. A corrupt or
-    // oversized lastBlock (e.g. from a tampered/garbled state file, or after a
-    // chain reset to a lower height) would otherwise push fromBlock past the
-    // chain head and silently skip the entire history scan.
-    const currentBlock = await provider.getBlockNumber();
+    // The head to scan up to + where to read events from. Using the INDEX head (when available) keeps
+    // the cursor from advancing past blocks the index hasn't ingested (which would skip a bet).
+    const { head, source } = await scanHead(provider);
     let fromBlock: number;
     if (opts.fromOverride !== undefined) {
-      // Deep safety sweep: clamp the override to [DEPLOY_BLOCK, currentBlock].
-      fromBlock = Math.max(DEPLOY_BLOCK, Math.min(opts.fromOverride, currentBlock));
-      logger.info({ fromBlock, currentBlock, deep: true }, "event-listener: deep re-scan range");
+      // Deep safety sweep: clamp the override to [DEPLOY_BLOCK, head].
+      fromBlock = Math.max(DEPLOY_BLOCK, Math.min(opts.fromOverride, head));
+      logger.info({ fromBlock, head, source, deep: true }, "event-listener: deep re-scan range");
     } else {
+      // API-009: clamp the persisted cursor to [0, head] — a corrupt/oversized lastBlock would
+      // otherwise push fromBlock past the head and silently skip the whole scan.
       const rawLastBlock = loadLastBlock();
-      const lastBlock = Math.min(Math.max(0, Number(rawLastBlock) || 0), currentBlock);
+      const lastBlock = Math.min(Math.max(0, Number(rawLastBlock) || 0), head);
       // Floor at the deploy block so a fresh cursor (lastBlock 0) doesn't scan from genesis.
       fromBlock = Math.max(DEPLOY_BLOCK, lastBlock - SAFETY_BUFFER);
-      logger.info({ fromBlock, lastBlock, currentBlock, rawLastBlock }, "event-listener: catchup scan range");
+      logger.info({ fromBlock, lastBlock, head, source, rawLastBlock }, "event-listener: catchup scan range");
     }
 
-    const filter = vault.filters.BetAuthorized();
-    // Scan in WINDOWs, persisting the cursor after each, so an interrupted long catch-up (the one-time
-    // historical scan on a tiny-getLogs-limit RPC like Alchemy free) RESUMES from the last window
-    // instead of restarting from the deploy block (which would re-burn the whole scan + RPC budget).
+    // Scan in WINDOWs, persisting the cursor after each, so an interrupted long catch-up RESUMES from
+    // the last window instead of restarting from the deploy block.
     let cursor = fromBlock;
-    while (cursor <= currentBlock) {
-      const windowEnd = Math.min(cursor + SCAN_WINDOW - 1, currentBlock);
-      const logs = await queryFilterChunked(vault, filter, cursor, windowEnd);
-      if (logs.length) logger.info({ count: logs.length, from: cursor, to: windowEnd }, "event-listener: historical BetAuthorized events found");
+    while (cursor <= head) {
+      const windowEnd = Math.min(cursor + SCAN_WINDOW - 1, head);
+      const { records } = await fetchBetAuthorized(vault, cursor, windowEnd, source === "index");
+      if (records.length) logger.info({ count: records.length, from: cursor, to: windowEnd, source }, "event-listener: BetAuthorized events found");
 
-      for (const log of logs) {
-      const parsed = vault.interface.parseLog({ topics: log.topics as string[], data: log.data });
-      if (!parsed) continue;
-
-      const nullifier = parsed.args[0] as string;
-      try {
-        // FC-9: on-chain status is no longer advanced by report* (those are gone),
-        // so an ACTIVE on-chain status no longer means "not yet handled" — the order
-        // may already be filled. Dedupe on the off-chain attestation store instead:
-        // a persisted attestation means the order already reached a terminal state,
-        // so re-submitting would double-place on the CLOB.
-        if (getAttestation(nullifier)) continue;
-        // Within-process dedup: don't re-submit a bet we've already started handling on a
-        // prior tick (its terminal attestation may not be written yet, e.g. a resting order).
-        if (inFlight.has(nullifier)) continue;
-        // Don't re-submit a resting GTC/GTD limit order that's already tracked (it has no
-        // terminal attestation yet, so the checks above wouldn't catch it) — would double-place.
-        if (isOrderTracked(nullifier)) continue;
-
-        // Skip bets that don't exist on-chain (e.g. reverted tx). The bet record's
-        // market_id is bytes32(0) when no record was written.
-        const rec = await vault.betRecords(nullifier);
-        const market_id = rec[0] as string;
-        if (!market_id || market_id === ethers.ZeroHash) continue;
-
-        inFlight.add(nullifier); // mark before submitting; kept on error to avoid double-submit
-        logger.warn({ nullifier }, "event-listener: found un-attested bet — processing");
-        await processBetEvent(
-          nullifier,
-          parsed.args[1] as string,   // market_id
-          parsed.args[2] as string,   // position_id
-          Number(parsed.args[6]),     // outcome_side
-          parsed.args[3] as bigint,   // expected_shares
-          parsed.args[4] as bigint,   // bet_amount
-          parsed.args[5] as bigint,   // price
-          parsed.args[7] as string,   // new_commitment (index 7 after outcome_side at index 6)
-          wallet,
-          provider
-        );
-      } catch (err) {
-        logger.error({ err, nullifier }, "event-listener: catchup failed for bet");
+      for (const r of records) {
+        await handleBetRecord(r, vault, wallet, provider);
       }
-      }
-      // Persist progress per WINDOW (the SCANNED HEAD of this window, not the last event's block).
-      // If a later window throws (a rate-limit propagated after the provider's retries), the cursor is
-      // already saved up to here, so the next tick / a restart resumes instead of re-scanning from the
-      // deploy block — which is what previously re-burned the whole range every 15s and saturated the RPC.
+      // Persist progress per WINDOW (the SCANNED HEAD of this window). If a later window throws, the
+      // cursor is already saved up to here, so the next tick / a restart resumes.
       if (persist) saveLastBlock(windowEnd);
       cursor = windowEnd + 1;
     }

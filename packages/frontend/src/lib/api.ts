@@ -14,7 +14,6 @@ const devLog = process.env.NEXT_PUBLIC_DEV_MODE === 'true'
 export interface DevStatus {
   anvil: boolean
   proofRelay: boolean
-  indexer: boolean
   mockClob: boolean
   vaultAddress: string | null
   usdcAddress: string | null
@@ -109,13 +108,6 @@ export const BET_STATUS = {
   RESTING: 8,
 } as const
 
-export interface SettlementRecord {
-  conditionId: string
-  positionId: string
-  payout_per_share: number
-  block_number: number
-  outcome: number
-}
 
 export interface MerkleProof {
   path: string[]
@@ -452,21 +444,12 @@ export async function fetchBetStatus(
   return r.status
 }
 
-export async function fetchSettlement(marketId: string): Promise<SettlementRecord | null> {
-  devLog('[polyshield:api] fetching settlement for', marketId)
-  try {
-    return await get(`/api/settlement/${encodeURIComponent(marketId)}`) as SettlementRecord
-  } catch {
-    return null
-  }
-}
-
 export async function fetchDevStatus(): Promise<DevStatus> {
   try {
     return await get('/api/dev/status') as DevStatus
   } catch {
     return {
-      anvil: false, proofRelay: false, indexer: false, mockClob: false,
+      anvil: false, proofRelay: false, mockClob: false,
       vaultAddress: null, usdcAddress: null, chainId: null, devMode: false,
     }
   }

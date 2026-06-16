@@ -2,7 +2,7 @@ import { ethers } from "ethers";
 import pino from "pino";
 import { config } from "./config";
 import { signingLayerNonceManager } from "./nonceManager";
-import { runOnFundingChain } from "./jitFunding";
+import { runOnFundingChain, setAfterFundingHook } from "./jitFunding";
 import { getDepositWalletExecutor, wrapUsdcToPusd } from "./depositWalletExecutor";
 
 const logger = pino({ name: "buffer-manager" });
@@ -34,6 +34,34 @@ const VAULT_ABI = ["function fundPolymarketWallet(uint256 amount) external"];
 
 let _timer: ReturnType<typeof setInterval> | null = null;
 let _running = false; // re-entrancy guard: skip a tick if the previous one is still in flight
+let _provider: ethers.JsonRpcProvider | null = null;
+let _wallet: ethers.Wallet | null = null;
+
+/** Run a single guarded top-up check. Shared by the slow safety poll AND the event nudge (C3). */
+async function runTick(): Promise<void> {
+  if (_running || !_provider || !_wallet) return;
+  _running = true;
+  try {
+    await topUpOnce(_provider, _wallet);
+  } catch (err) {
+    // DeployCapExceeded / InsufficientVaultLiquidity / any revert or RPC error — never crash the
+    // signing layer; the next tick retries once the cap/liquidity recovers.
+    logger.warn({ err: String(err) }, "buffer manager tick failed (continuing)");
+  } finally {
+    _running = false;
+  }
+}
+
+/**
+ * C3 (event-driven top-up): nudge a buffer check NOW. Called fire-and-forget after a JIT funding event
+ * (i.e. around betting activity, the only thing that depletes the buffer), so the background timer can
+ * stay slow instead of polling the deposit-wallet balance on a tight loop while nothing is happening.
+ * Safe to call from anywhere: topUpOnce enqueues on the shared funding chain, so it can't double-fund.
+ */
+export function triggerBufferCheck(): void {
+  if (!_provider || !_wallet) return; // buffer manager not started / disabled
+  void runTick();
+}
 
 export function startBufferManager(provider: ethers.JsonRpcProvider, operatorWallet: ethers.Wallet): void {
   const low = config.bufferLowWaterUsdc;
@@ -61,25 +89,18 @@ export function startBufferManager(provider: ethers.JsonRpcProvider, operatorWal
     );
   }
 
-  const tick = async () => {
-    if (_running) return;
-    _running = true;
-    try {
-      await topUpOnce(provider, operatorWallet);
-    } catch (err) {
-      // DeployCapExceeded / InsufficientVaultLiquidity / any revert or RPC error — never crash the
-      // signing layer; the next tick retries once the cap/liquidity recovers.
-      logger.warn({ err: String(err) }, "buffer manager tick failed (continuing)");
-    } finally {
-      _running = false;
-    }
-  };
+  _provider = provider;
+  _wallet = operatorWallet;
 
-  void tick(); // run once immediately at startup
-  _timer = setInterval(() => void tick(), config.bufferManagerPollMs);
+  // C3: re-check the buffer right after each JIT funding event (every bet routes through it), so the
+  // background timer below is only a slow idle-drift safety net rather than a constant balance poll.
+  setAfterFundingHook(() => triggerBufferCheck());
+
+  void runTick(); // run once immediately at startup
+  _timer = setInterval(() => void runTick(), config.bufferManagerPollMs);
   logger.info(
     { low: low.toString(), target: target.toString(), pollMs: config.bufferManagerPollMs },
-    "buffer manager started (FC-6 / Option 4 base buffer)",
+    "buffer manager started (FC-6 / Option 4 base buffer; event-nudged top-up + slow safety poll)",
   );
 }
 

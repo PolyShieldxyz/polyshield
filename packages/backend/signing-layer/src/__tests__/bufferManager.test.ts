@@ -21,6 +21,7 @@ jest.mock("../config", () => ({
 // Pass-through funding mutex (serialization is exercised by jitFunding's own logic).
 jest.mock("../jitFunding", () => ({
   runOnFundingChain: jest.fn(<T>(fn: () => Promise<T>) => fn()),
+  setAfterFundingHook: jest.fn(),
 }));
 
 const sendMock = jest.fn(

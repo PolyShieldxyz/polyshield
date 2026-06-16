@@ -105,6 +105,17 @@ export function initRelayer(relayerKey: string, vaultAddress: string, provider: 
   logger.info({ relayerAddress: wallet.address, vaultAddress }, "relayer:init");
 }
 
+// ── Post-confirm hook (C1: sync-on-relay) ────────────────────────────────────
+// The relay submits EVERY state-changing tx (authorizeBet, credits, withdraw, consolidate, …), each
+// of which inserts a leaf / emits a vault event. So the moment our own tx confirms we KNOW new chain
+// state exists — no need to rediscover it on a timer. index.ts registers a hook here that nudges the
+// merkle cache + event index (a cheap incremental getLogs over the 1-2 new blocks). The background
+// poll then only exists as a slow safety reconcile (and to catch user `deposit()` txs we don't relay).
+let _onRelayConfirmed: (() => void) | null = null;
+export function setOnRelayConfirmed(cb: () => void): void {
+  _onRelayConfirmed = cb;
+}
+
 // ── Nonce-aware tx sender ─────────────────────────────────────────────────────
 
 const NONCE_ERROR_PATTERNS = ["nonce too low", "nonce too high", "replacement underpriced", "NONCE_EXPIRED", "already known", "invalid nonce"];
@@ -155,6 +166,9 @@ function trackReceipt(label: string, tx: ethers.TransactionResponse, startMs: nu
       blockNumber: receipt?.blockNumber ?? null,
       duration_ms: Date.now() - startMs,
     }, `${label}:confirmed`);
+    // C1: our tx just inserted a leaf / emitted an event — nudge the caches now instead of waiting
+    // for the slow reconcile poll. Best-effort; the reconcile catches anything this misses.
+    try { _onRelayConfirmed?.(); } catch { /* never let cache sync break receipt handling */ }
   }).catch((err: unknown) => {
     logger.warn({ event: `${label}:receipt_error`, txHash: tx.hash, err: String(err) }, `${label}:receipt_error`);
   });

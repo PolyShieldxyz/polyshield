@@ -6,6 +6,7 @@ import { parseUnits } from 'viem'
 import { FlowShell } from '@/components/app/FlowShell'
 import { KV } from '@/components/app/KV'
 import { Icon, ICONS } from '@/components/ui/Icon'
+import { AmountInput } from '@/components/ui/AmountInput'
 import { VAULT_ABI, USDC_ABI } from '@/lib/vaultAbi'
 import {
   computeCommitment, computeNullifier,
@@ -13,7 +14,7 @@ import {
 } from '@/lib/notes'
 import { getNoteSecret } from '@/lib/secretSession'
 import { fetchSpentNullifiers } from '@/lib/api'
-import { generateDepositProof } from '@/lib/prover'
+import { generateProofInWorker } from '@/lib/prover'
 
 const IS_DEV = process.env.NEXT_PUBLIC_DEV_MODE === 'true'
 const VAULT_ADDRESS = (process.env.NEXT_PUBLIC_VAULT_ADDRESS ?? '0x0000000000000000000000000000000000000000') as `0x${string}`
@@ -46,12 +47,12 @@ function MerkleInsertionVisual({ pct }: { pct: number }) {
         const x = 20 + i * 40
         const isNew = i === 6
         const opacity = isNew ? pct / 100 : 1
-        const color = isNew ? 'oklch(0.85 0.13 210)' : i < 5 ? 'rgba(255,255,255,0.5)' : 'rgba(255,255,255,0.2)'
+        const color = isNew ? 'oklch(0.85 0.13 85)' : i < 5 ? 'rgba(255,255,255,0.5)' : 'rgba(255,255,255,0.2)'
         return (
           <g key={i}>
-            {isNew && pct < 100 && <circle cx={x} cy={140} r={8} fill="oklch(0.82 0.13 210 / 0.2)" />}
+            {isNew && pct < 100 && <circle cx={x} cy={140} r={8} fill="oklch(0.82 0.13 85 / 0.2)" />}
             <circle cx={x} cy={140} r="5" fill={color} opacity={opacity} />
-            {isNew && <text x={x} y={170} textAnchor="middle" fontFamily="JetBrains Mono" fontSize="9" fill="oklch(0.82 0.13 210)">NEW</text>}
+            {isNew && <text x={x} y={170} textAnchor="middle" fontFamily="JetBrains Mono" fontSize="9" fill="oklch(0.82 0.13 85)">NEW</text>}
           </g>
         )
       })}
@@ -82,7 +83,8 @@ function Step0({
     <div style={{ display: 'grid', gridTemplateColumns: '1.2fr 1fr', gap: 32 }}>
       <div>
         <div className="micro">DEPOSIT AMOUNT</div>
-        <h3 className="h3 mt-3" style={{ margin: 0 }}>How much USDC?</h3>
+        {/* COPY-001: distinct from the FlowShell "Deposit USDC" title — a prompt, not a repeat. */}
+        <h3 className="h3 mt-3" style={{ margin: 0 }}>How much would you like to deposit?</h3>
         <p className="body mt-3">Funds enter the shared anonymity pool. They are not linkable to any future bets you authorize from them.</p>
         <div className="mt-6">
           <div className="row" style={{ justifyContent: 'space-between' }}>
@@ -108,10 +110,10 @@ function Step0({
           </div>
           <div style={{ display: 'flex', alignItems: 'center', background: 'var(--bg-1)', border: `1px solid ${insufficient && amount > 0 ? 'var(--red)' : 'var(--line-strong)'}`, borderRadius: 6, padding: '0 14px', marginTop: 8 }}>
             <span className="mono" style={{ color: 'var(--text-2)', marginRight: 8, fontSize: 20 }}>$</span>
-            {/* FINDING: A11Y-002 aria-label (no associated <label>); A11Y-001 dropped inline outline:none so the global :focus-visible ring applies. */}
-            <input type="number" value={amount} onChange={(e) => setAmount(Math.max(0, +e.target.value || 0))}
-              aria-label="Deposit amount in USDC"
-              style={{ background: 'transparent', border: 'none', color: 'var(--text)', fontFamily: 'var(--mono)', fontSize: 28, padding: '16px 0', width: '100%' }} />
+            {/* String-backed money input (see AmountInput) — a controlled type=number dropped digits. */}
+            <AmountInput value={amount} onValueChange={(n) => setAmount(Math.max(0, n))}
+              ariaLabel="Deposit amount in USDC"
+              style={{ fontSize: 28, padding: '16px 0' }} />
             <span className="mono" style={{ color: 'var(--text-2)', fontSize: 14, letterSpacing: '0.06em' }}>USDC</span>
           </div>
           {belowMin && (
@@ -155,12 +157,12 @@ function Step0({
 
 // ── Step 1: approve + deposit transactions ───────────────────────────────────
 
-type TxPhase = 'approve' | 'wait-approve' | 'deposit' | 'wait-deposit' | 'done'
+type TxPhase = 'prove' | 'approve' | 'wait-approve' | 'deposit' | 'wait-deposit' | 'done'
 
 function Step1({
   amount, commitment, onDone,
   phase, setPhase, approveTx, depositTx, txError,
-  doApprove, doDeposit,
+  doApprove, doDeposit, doProve, proofPct, provingPhase,
 }: {
   amount: number
   commitment: string
@@ -172,16 +174,39 @@ function Step1({
   txError: string | null
   doApprove: () => void | Promise<void>
   doDeposit: () => void | Promise<void>
+  doProve: () => void | Promise<void>
+  proofPct: number
+  provingPhase: 'download' | 'prove' | null
 }) {
+  // The ZK deposit-binding proof (FC-2) is generated client-side and can take a while — especially the
+  // first time, when the proving key still has to download. It is the FIRST tracked step: the deposit
+  // transaction carries the proof, so nothing on-chain can happen until it's in hand.
   const checks: [string, TxPhase[]][] = [
-    ['USDC spend approved',       ['wait-approve', 'deposit', 'wait-deposit', 'done']],
+    ['Deposit proof generated',    ['approve', 'wait-approve', 'deposit', 'wait-deposit', 'done']],
+    ['USDC spend approved',        ['wait-approve', 'deposit', 'wait-deposit', 'done']],
     ['Deposit transaction signed', ['wait-deposit', 'done']],
     ['Broadcast to RPC',           ['wait-deposit', 'done']],
     ['Included in block',          ['done']],
     ['Merkle leaf appended',       ['done']],
   ]
 
-  const pct = { approve: 0, 'wait-approve': 20, deposit: 40, 'wait-deposit': 65, done: 100 }[phase]
+  // On-chain progress (drives the Merkle visual). The proof phase is pre-chain, so it reads 0 here.
+  const txPct = ({ prove: 0, approve: 0, 'wait-approve': 20, deposit: 40, 'wait-deposit': 65, done: 100 } as Record<TxPhase, number>)[phase]
+  const inProof = phase === 'prove'
+  // During proof generation the bar shows the proof-work %; afterwards it tracks the on-chain submit.
+  const barPct = inProof ? proofPct : txPct
+  const statusLabel = inProof
+    ? (provingPhase === 'prove' ? 'generating proof…' : 'downloading proving key…')
+    : phase === 'approve' ? 'waiting for approval…'
+    : phase === 'wait-approve' ? 'confirming approval…'
+    : phase === 'deposit' ? 'submitting deposit…'
+    : phase === 'wait-deposit' ? 'confirming deposit…'
+    : 'complete'
+
+  useEffect(() => {
+    if (phase === 'prove') void doProve()
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [phase])
 
   useEffect(() => {
     if (phase === 'deposit') void doDeposit()
@@ -196,34 +221,36 @@ function Step1({
   return (
     <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 32 }}>
       <div>
-        <div className="micro">VAULT SUBMIT · ON-CHAIN</div>
-        <h3 className="h3 mt-3" style={{ margin: 0 }}>Submitting deposit on-chain.</h3>
-        <p className="body mt-3">The commitment hash is appended to the vault&apos;s Merkle tree. Deposit amount is public; your balance details are not.</p>
+        <div className="micro">{inProof ? 'ZERO-KNOWLEDGE PROOF · IN BROWSER' : 'VAULT SUBMIT · ON-CHAIN'}</div>
+        <h3 className="h3 mt-3" style={{ margin: 0 }}>{inProof ? 'Generating your deposit proof.' : 'Submitting deposit on-chain.'}</h3>
+        <p className="body mt-3">{inProof
+          ? 'A zero-knowledge proof binds your hidden balance to the deposited amount. It runs entirely in your browser — your secret never leaves this device. The first time, the proving key downloads (cached afterwards).'
+          : 'The commitment hash is appended to the vault’s Merkle tree. Deposit amount is public; your balance details are not.'}</p>
         {txError && (
           <div className="panel mt-3" style={{ padding: 14, borderColor: 'var(--red)', background: 'oklch(0.70 0.18 25 / 0.06)' }}>
-            <div className="small" style={{ color: 'var(--red)', fontSize: 12 }}>Transaction failed: {txError}</div>
-            <button className="btn btn-sm mt-2" onClick={() => void (phase === 'approve' || phase === 'wait-approve' ? doApprove() : doDeposit())}>Retry</button>
+            <div className="small" style={{ color: 'var(--red)', fontSize: 12 }}>{inProof ? 'Proof generation failed' : 'Transaction failed'}: {txError}</div>
+            <button className="btn btn-sm mt-2" onClick={() => void (phase === 'prove' ? doProve() : phase === 'approve' || phase === 'wait-approve' ? doApprove() : doDeposit())}>Retry</button>
           </div>
         )}
         <div className="panel mt-4" style={{ padding: 20 }}>
           <div className="row" style={{ justifyContent: 'space-between' }}>
-            <span className="mono" style={{ fontSize: 12, color: 'var(--cyan)' }}>
-              {phase === 'approve' ? 'waiting for approval…' : phase === 'wait-approve' ? 'confirming approval…' : phase === 'deposit' ? 'submitting deposit…' : phase === 'wait-deposit' ? 'confirming deposit…' : 'complete'}
-            </span>
-            <span className="mono" style={{ fontSize: 12 }}>{pct}%</span>
+            <span className="mono" style={{ fontSize: 12, color: 'var(--cyan)' }}>{statusLabel}</span>
+            <span className="mono" style={{ fontSize: 12 }}>{barPct}%</span>
           </div>
           <div style={{ height: 4, background: 'rgba(255,255,255,0.06)', borderRadius: 2, marginTop: 8 }}>
-            <div style={{ height: 4, width: `${pct}%`, background: 'var(--cyan)', borderRadius: 2, transition: 'width .5s ease' }} />
+            <div style={{ height: 4, width: `${barPct}%`, background: 'var(--cyan)', borderRadius: 2, transition: 'width .4s ease' }} />
           </div>
           <div className="col gap-2 mt-4">
             {checks.map(([label, donePhases], i) => {
               const done = donePhases.includes(phase)
+              // Highlight the row that's actively working right now (the proof row during 'prove').
+              const active = !done && label === 'Deposit proof generated' && inProof
               return (
                 <div key={i} className="row gap-3">
-                  <span style={{ width: 14, height: 14, borderRadius: 4, border: '1px solid', display: 'flex', alignItems: 'center', justifyContent: 'center', borderColor: done ? 'var(--green)' : 'var(--line-strong)', background: done ? 'oklch(0.78 0.16 152 / 0.12)' : 'transparent', color: 'var(--green)' }}>
+                  <span style={{ width: 14, height: 14, borderRadius: 4, border: '1px solid', display: 'flex', alignItems: 'center', justifyContent: 'center', borderColor: done ? 'var(--green)' : active ? 'var(--cyan)' : 'var(--line-strong)', background: done ? 'oklch(0.78 0.16 152 / 0.12)' : 'transparent', color: 'var(--green)' }}>
                     {done && <Icon d={ICONS.check} size={9} />}
                   </span>
-                  <span className="mono" style={{ fontSize: 11, color: done ? 'var(--text)' : 'var(--text-2)' }}>{label}</span>
+                  <span className="mono" style={{ fontSize: 11, color: done ? 'var(--text)' : active ? 'var(--cyan)' : 'var(--text-2)' }}>{label}</span>
                 </div>
               )
             })}
@@ -244,7 +271,7 @@ function Step1({
       <div>
         <div className="micro">MERKLE INSERTION</div>
         <div className="panel mt-3" style={{ padding: 24 }}>
-          <MerkleInsertionVisual pct={pct} />
+          <MerkleInsertionVisual pct={txPct} />
         </div>
       </div>
     </div>
@@ -312,7 +339,9 @@ export default function DepositPage() {
   const { signMessageAsync } = useSignMessage()
   const publicClient = usePublicClient()
   const [step, setStep] = useState(0)
-  const [amount, setAmount] = useState(25000)
+  // COPY-002: no aggressive five-figure default on a real-money beta vault — start empty so the
+  // amount is a deliberate choice (quick-select chips remain for fast entry).
+  const [amount, setAmount] = useState(0)
   const [deriving, setDeriving] = useState(false)
 
   // Derived note fields (computed during handleDeriveAndDeposit)
@@ -321,11 +350,15 @@ export default function DepositPage() {
   const [depositIndex, setDepositIndex] = useState(0)
 
   // Tx state
-  const [phase, setPhase]         = useState<TxPhase>('approve')
+  const [phase, setPhase]         = useState<TxPhase>('prove')
   const [approveTx, setApproveTx] = useState<string | undefined>()
   const [depositTx, setDepositTx] = useState<string | undefined>()
   const [txError, setTxError]     = useState<string | null>(null)
   const [finalTxHash, setFinalTxHash] = useState('')
+  // Deposit-proof generation progress (the first tracked step). proofPct drives the bar; provingPhase
+  // distinguishes the proving-key download from snarkjs crunching for the status label.
+  const [proofPct, setProofPct]         = useState(0)
+  const [provingPhase, setProvingPhase] = useState<'download' | 'prove' | null>(null)
 
   const amountMicro = parseUnits(String(amount), 6)
 
@@ -364,9 +397,14 @@ export default function DepositPage() {
   const { isSuccess: depositConfirmed, isError: depositReverted } = useWaitForTransactionReceipt({ hash: depositTxHash })
   // Guard against React Strict Mode double-invoking the deposit effect.
   const depositSubmittedRef = useRef(false)
-  // FC-2: the mandatory deposit binding proof, generated client-side from the
-  // in-scope secret in handleDeriveAndDeposit and consumed by doDeposit.
+  // FC-2: the mandatory deposit binding proof, generated client-side in the track's proof step
+  // (doProve) and consumed by doDeposit.
   const depositProofRef = useRef<`0x${string}` | null>(null)
+  // The note secret, held in memory only (never persisted) between key-derivation and proof
+  // generation, so the proof step can build the binding proof. Cleared once the deposit is saved.
+  const depositSecretRef = useRef<string | null>(null)
+  // Re-entrancy guard for doProve (StrictMode double-invoke / retry).
+  const provingRef = useRef(false)
 
   // ── State machine ─────────────────────────────────────────────────────────
   useEffect(() => {
@@ -410,9 +448,14 @@ export default function DepositPage() {
       })
       // The addNote above already updated the in-memory cache + persisted (encrypted) and fired the
       // notes-changed event, so the portfolio refreshes without a cache invalidation here.
+      depositSecretRef.current = null // note saved — drop the in-memory secret
       setFinalTxHash(depositTxHash)
       setPhase('done')
       setStep(2)
+      // C4: nudge the proof-relay to pull this fresh deposit (leaf + Deposited event) into its caches
+      // now — the relay doesn't originate deposit txs, so otherwise it waits for the slow reconcile.
+      // Fire-and-forget; recovery/merkle paths still work without it.
+      void fetch('/api/relay/deposit-hint', { method: 'POST' }).catch(() => {})
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [depositConfirmed])
@@ -462,28 +505,17 @@ export default function DepositPage() {
       setCommitment(c); setNullifier(n); setDepositIndex(index)
       console.log('[deposit] note derived from wallet signature', { commitment: c, index })
 
-      // FC-2 (T20): generate the mandatory deposit binding proof. Binds the hidden
-      // balance + owner to the transferred amount + msg.sender. Secret stays client-side.
-      const { proof } = await generateDepositProof({
-        secret,
-        commitment: c,
-        amount: amountMicro,
-        owner_address: BigInt(address).toString(),
-      })
-      depositProofRef.current = proof
-      console.log('[deposit] binding proof generated')
-
+      // Hold the secret in memory (never persisted) so the track's proof step can build the FC-2
+      // binding proof. Proof generation now runs IN the track (Step 1, phase 'prove') with a progress
+      // bar — instead of blocking here invisibly — so the user sees the (first-time-download) work.
+      depositSecretRef.current = secret
+      depositProofRef.current = null
+      provingRef.current = false
+      setProofPct(0); setProvingPhase('download')
       setTxError(null)
       depositSubmittedRef.current = false // reset for fresh attempt
-      setPhase('approve')
+      setPhase('prove')
       setStep(1)
-
-      if (allowance >= amountMicro) {
-        // Skip approve — let Step1's useEffect call doDeposit() as the single call site.
-        setPhase('deposit')
-      } else {
-        void doApprove()
-      }
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err)
       setTxError(msg.split('\n')[0])
@@ -493,14 +525,82 @@ export default function DepositPage() {
     }
   }
 
+  // FC-2 (T20): generate the mandatory deposit binding proof — the first tracked step. Binds the hidden
+  // balance + owner to the transferred amount + msg.sender. Runs in a Web Worker so the UI stays
+  // responsive, streaming download/prove progress to the bar. On success, advances to approve/deposit.
+  async function doProve() {
+    if (provingRef.current || depositProofRef.current) return
+    const secret = depositSecretRef.current
+    if (!secret || !address) {
+      setTxError('Deposit secret unavailable — please restart the deposit.')
+      return
+    }
+    provingRef.current = true
+    setTxError(null)
+    setProofPct(0); setProvingPhase('download')
+    try {
+      const { proof } = await generateProofInWorker(
+        { type: 'deposit', inputs: { secret, commitment, amount: amountMicro, owner_address: BigInt(address).toString() } },
+        (p) => {
+          setProvingPhase(p.phase)
+          if (p.phase === 'download') {
+            // Cap the download segment at 95% so the bar visibly finishes during the proving tail.
+            setProofPct(p.total > 0 ? Math.min(95, Math.round((p.loaded / p.total) * 95)) : 0)
+          } else {
+            // snarkjs crunching — no granular signal; hold near-complete until it resolves.
+            setProofPct((cur) => Math.max(cur, 96))
+          }
+        },
+      )
+      depositProofRef.current = proof
+      setProofPct(100); setProvingPhase(null)
+      console.log('[deposit] binding proof generated')
+      // Proof in hand → approve, or skip straight to deposit if the allowance already covers it.
+      if (allowance >= amountMicro) {
+        setPhase('deposit')
+      } else {
+        setPhase('approve')
+        void doApprove()
+      }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err)
+      setTxError(msg.split('\n')[0])
+      setProvingPhase(null)
+      console.error('[deposit] proof generation failed:', err)
+    } finally {
+      provingRef.current = false
+    }
+  }
+
+  // Polygon enforces a minimum priority fee (~25–30 gwei). When the wallet/estimator populates a tx
+  // below it, the wallet rejects with "gas price too low" (page.signTx.errorRetry.gasPriceTooLow).
+  // Floor the priority fee (and bump maxFee to match) so the deposit/approve always carry a valid
+  // Polygon gas price. Dev (anvil) needs no floor, and an estimate failure falls back to a static floor.
+  async function txFees(): Promise<{ maxFeePerGas?: bigint; maxPriorityFeePerGas?: bigint }> {
+    if (IS_DEV || !publicClient) return {}
+    const FLOOR = 30_000_000_000n // 30 gwei
+    try {
+      const { maxFeePerGas, maxPriorityFeePerGas } = await publicClient.estimateFeesPerGas()
+      const prio = maxPriorityFeePerGas && maxPriorityFeePerGas > FLOOR ? maxPriorityFeePerGas : FLOOR
+      const bump = prio - (maxPriorityFeePerGas ?? 0n)
+      const maxFee = (maxFeePerGas ?? prio * 2n) + (bump > 0n ? bump : 0n)
+      return { maxFeePerGas: maxFee, maxPriorityFeePerGas: prio }
+    } catch {
+      return { maxFeePerGas: FLOOR * 3n, maxPriorityFeePerGas: FLOOR }
+    }
+  }
+
+  // NOTE: do NOT pass an explicit `nonce`. The wallet broadcasts to its OWN RPC and tracks its own
+  // pending txs; computing a nonce from our RPC (the /api/rpc proxy → Ankr) — especially with
+  // blockTag 'latest', which ignores pending txs — can hand the wallet a too-low/gapped nonce, so the
+  // tx sits in the mempool unmined ("stuck on Included in block"). Let the wallet assign the nonce.
   async function doApprove() {
-    const nonce = await publicClient!.getTransactionCount({ address: address!, blockTag: 'latest' })
     writeApprove({
       address: USDC_ADDRESS,
       abi: USDC_ABI,
       functionName: 'approve',
       args: [VAULT_ADDRESS, amountMicro * 2n],
-      nonce,
+      ...(await txFees()),
     })
   }
 
@@ -511,13 +611,12 @@ export default function DepositPage() {
       return
     }
     depositSubmittedRef.current = true // set synchronously before any await
-    const nonce = await publicClient!.getTransactionCount({ address: address!, blockTag: 'latest' })
     writeDeposit({
       address: VAULT_ADDRESS,
       abi: VAULT_ABI,
       functionName: 'deposit',
       args: [depositProofRef.current, commitment, amountMicro],
-      nonce,
+      ...(await txFees()),
     })
   }
 
@@ -549,6 +648,7 @@ export default function DepositPage() {
           phase={phase} setPhase={setPhase}
           approveTx={approveTx} depositTx={depositTx} txError={txError}
           doApprove={doApprove} doDeposit={doDeposit}
+          doProve={doProve} proofPct={proofPct} provingPhase={provingPhase}
         />
       )}
       {step === 2 && (

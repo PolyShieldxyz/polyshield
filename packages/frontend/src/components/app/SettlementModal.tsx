@@ -279,8 +279,8 @@ export function SettlementModal({
                   style={{
                     padding: 16,
                     textAlign: 'left',
-                    background: checked ? 'oklch(0.82 0.13 210 / 0.06)' : 'var(--surface)',
-                    borderColor: checked ? 'oklch(0.82 0.13 210 / 0.35)' : 'var(--line)',
+                    background: checked ? 'oklch(0.82 0.13 85 / 0.06)' : 'var(--surface)',
+                    borderColor: checked ? 'oklch(0.82 0.13 85 / 0.35)' : 'var(--line)',
                   }}
                 >
                   <div className="row" style={{ justifyContent: 'space-between', gap: 12 }}>
@@ -292,7 +292,7 @@ export function SettlementModal({
                           borderRadius: 3,
                           border: '1px solid',
                           borderColor: checked ? 'var(--cyan)' : 'var(--line-strong)',
-                          background: checked ? 'oklch(0.82 0.13 210 / 0.2)' : 'transparent',
+                          background: checked ? 'oklch(0.82 0.13 85 / 0.2)' : 'transparent',
                           display: 'flex',
                           alignItems: 'center',
                           justifyContent: 'center',

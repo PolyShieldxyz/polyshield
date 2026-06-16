@@ -4,7 +4,8 @@ import { config } from "./config";
 import { signingLayerNonceManager } from "./nonceManager";
 import { getDepositWalletExecutor, DepositWalletExecutor, WalletCall } from "./depositWalletExecutor";
 import { toFieldSafe } from "./marketRegistry";
-import { queryFilterChunked, DEPLOY_BLOCK } from "./logScan";
+import { DEPLOY_BLOCK } from "./logScan";
+import { fetchAllBetAuthorized, BetAuthorizedRecord } from "./vaultEventSource";
 
 const logger = pino({ name: "redemption-pipeline" });
 
@@ -27,26 +28,17 @@ function sameMarket(eventMarketId: string, conditionId: string): boolean {
 /**
  * Fetch all BetAuthorized events for a resolved market.
  *
- * IMPORTANT: `market_id` is the SECOND (non-indexed) event parameter, so it CANNOT be
- * used as a topic filter — `vault.filters.BetAuthorized(null, conditionId)` throws
- * `TypeError: cannot filter non-indexed parameters` in ethers v6 (this previously errored
- * out of every market resolution). Query all BetAuthorized logs and match market_id in JS.
+ * Sourced from the proof-relay event index (a single DB-backed read — no per-service getLogs) when
+ * available, with a chunked chain scan from the deploy block as the fallback. `market_id` is the
+ * SECOND (non-indexed) event parameter, so it CANNOT be a topic filter — we match it in JS.
  */
 async function betsForMarket(
   vault: ethers.Contract,
   provider: ethers.JsonRpcProvider,
   conditionId: string,
-): Promise<ethers.LogDescription[]> {
-  // Page from the deploy block (NOT 0 — a from-0 scan over millions of blocks is rejected / costly)
-  // with the rate-limit-aware chunker so a metered RPC's 429 doesn't abort the redemption.
-  const latest = await provider.getBlockNumber();
-  const logs = await queryFilterChunked(vault, vault.filters.BetAuthorized(), DEPLOY_BLOCK, latest);
-  const out: ethers.LogDescription[] = [];
-  for (const log of logs) {
-    const parsed = vault.interface.parseLog({ topics: log.topics as string[], data: log.data });
-    if (parsed && sameMarket(parsed.args.market_id as string, conditionId)) out.push(parsed);
-  }
-  return out;
+): Promise<BetAuthorizedRecord[]> {
+  const all = await fetchAllBetAuthorized(vault, provider, DEPLOY_BLOCK);
+  return all.filter((r) => sameMarket(r.market_id, conditionId));
 }
 
 const CTF_ABI = [
@@ -123,8 +115,8 @@ async function collectPositionIds(
 ): Promise<string[]> {
   const vault = new ethers.Contract(vaultAddress, VAULT_ABI, provider);
   const ids = new Set<string>();
-  for (const parsed of await betsForMarket(vault, provider, conditionId)) {
-    ids.add(parsed.args.position_id as string);
+  for (const r of await betsForMarket(vault, provider, conditionId)) {
+    ids.add(r.position_id);
   }
   return [...ids];
 }

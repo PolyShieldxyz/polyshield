@@ -3,7 +3,7 @@
 import Link from 'next/link'
 import { useAccount } from 'wagmi'
 import { ConnectKitButton } from 'connectkit'
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useRef, useState, type RefObject } from 'react'
 import { usePathname } from 'next/navigation'
 import { Logo } from './Logo'
 import { Icon, ICONS } from './Icon'
@@ -41,6 +41,9 @@ export function TopNav() {
     else setLaunchHref(`${window.location.protocol}//app.${h.replace(/^www\./, '')}/markets`)
   }, [])
   const isApp = pathname.startsWith('/app') || appHost
+  const [menuOpen, setMenuOpen] = useState(false)
+  const navMenuRef = useRef<HTMLDivElement | null>(null)
+  useCloseOnOutside(navMenuRef, () => setMenuOpen(false))
 
   if (isApp) {
     return <AppTopNav pathname={pathname} />
@@ -73,17 +76,56 @@ export function TopNav() {
           <a href={launchHref} className="btn btn-sm btn-primary">
             Launch App <Icon d={ICONS.arrow} size={12} />
           </a>
+          {/* NAV-001: reach the section links below 1180px (where .nav-links is hidden). */}
+          <div ref={navMenuRef} style={{ position: 'relative' }}>
+            <button
+              className="btn btn-sm btn-ghost nav-menu-btn"
+              aria-label="Menu"
+              aria-haspopup="true"
+              aria-expanded={menuOpen}
+              onClick={() => setMenuOpen((o) => !o)}
+            >
+              <Icon d={menuOpen ? ICONS.cross : ICONS.menu} size={16} />
+            </button>
+            {menuOpen && (
+              <div className="panel nav-menu-panel" style={{ right: 0 }}>
+                {NAV_LINKS.map(([href, label]) => (
+                  <Link
+                    key={href}
+                    href={href}
+                    className={`nav-link ${pathname === href ? 'active' : ''}`}
+                    onClick={() => setMenuOpen(false)}
+                  >
+                    {label}
+                  </Link>
+                ))}
+              </div>
+            )}
+          </div>
         </div>
       </div>
     </div>
   )
 }
 
+/** Close a popover when the user clicks/taps outside of it. */
+function useCloseOnOutside(ref: RefObject<HTMLElement | null>, onClose: () => void) {
+  useEffect(() => {
+    const onDocClick = (event: MouseEvent) => {
+      if (!ref.current?.contains(event.target as Node)) onClose()
+    }
+    document.addEventListener('mousedown', onDocClick)
+    return () => document.removeEventListener('mousedown', onDocClick)
+  }, [ref, onClose])
+}
+
 function AppTopNav({ pathname }: { pathname: string }) {
   const { address, isConnected } = useAccount()
   const { state } = usePortfolioState(address)
   const [walletMenuOpen, setWalletMenuOpen] = useState(false)
+  const [navMenuOpen, setNavMenuOpen] = useState(false)
   const menuRef = useRef<HTMLDivElement | null>(null)
+  const navMenuRef = useRef<HTMLDivElement | null>(null)
 
   useEffect(() => {
     if (!isConnected) {
@@ -92,17 +134,15 @@ function AppTopNav({ pathname }: { pathname: string }) {
     }
   }, [isConnected])
 
-  useEffect(() => {
-    const onDocClick = (event: MouseEvent) => {
-      if (!menuRef.current?.contains(event.target as Node)) {
-        setWalletMenuOpen(false)
-      }
-    }
-    document.addEventListener('mousedown', onDocClick)
-    return () => document.removeEventListener('mousedown', onDocClick)
-  }, [])
+  useCloseOnOutside(menuRef, () => setWalletMenuOpen(false))
+  useCloseOnOutside(navMenuRef, () => setNavMenuOpen(false))
 
   const totalBalance = state ? `$${formatUsdc(state.totalBalance)}` : '—'
+  const sections: [string, string, boolean][] = [
+    ['/app/markets', 'Markets', false],
+    ['/app/portfolio', 'Portfolio', false],
+    ['/explorer', 'Explorer', true],
+  ]
 
   return (
     <div className="topnav">
@@ -124,11 +164,46 @@ function AppTopNav({ pathname }: { pathname: string }) {
         </div>
 
         <div className="row gap-3">
-          <div className="pill pill-soft" style={{ fontSize: 10 }}>
-            {totalBalance}
+          {/* NAV-001: section + action links reachable below 1180px (where .nav-links hides). */}
+          <div ref={navMenuRef} style={{ position: 'relative' }}>
+            <button
+              className="btn btn-sm btn-ghost nav-menu-btn"
+              aria-label="Menu"
+              aria-haspopup="true"
+              aria-expanded={navMenuOpen}
+              onClick={() => setNavMenuOpen((o) => !o)}
+            >
+              <Icon d={navMenuOpen ? ICONS.cross : ICONS.menu} size={16} />
+            </button>
+            {navMenuOpen && (
+              <div className="panel nav-menu-panel" style={{ right: 0 }}>
+                {sections.map(([href, label, ext]) =>
+                  ext ? (
+                    <a key={href} href={href} target="_blank" rel="noreferrer" className="nav-link" onClick={() => setNavMenuOpen(false)}>{label}</a>
+                  ) : (
+                    <Link key={href} href={href} className={`nav-link ${pathname === href ? 'active' : ''}`} onClick={() => setNavMenuOpen(false)}>{label}</Link>
+                  )
+                )}
+                {isConnected && (
+                  <>
+                    <div className="nav-menu-divider" />
+                    <Link href="/app/deposit" className="nav-link" onClick={() => setNavMenuOpen(false)}>Deposit</Link>
+                    <Link href="/app/withdraw" className="nav-link" onClick={() => setNavMenuOpen(false)}>Withdraw</Link>
+                  </>
+                )}
+              </div>
+            )}
           </div>
-          <Link href="/app/deposit" className="btn btn-sm btn-ghost">Deposit</Link>
-          <Link href="/app/withdraw" className="btn btn-sm btn-primary">Withdraw</Link>
+          {/* NAV-002: balance + Deposit/Withdraw are meaningless pre-connect — reveal once connected. */}
+          {isConnected && (
+            <>
+              <div className="pill pill-soft" style={{ fontSize: 10 }}>
+                {totalBalance}
+              </div>
+              <Link href="/app/deposit" className="btn btn-sm btn-ghost">Deposit</Link>
+              <Link href="/app/withdraw" className="btn btn-sm btn-primary">Withdraw</Link>
+            </>
+          )}
           <ConnectKitButton.Custom>
             {({ isConnected: ckConnected, isConnecting, show, address: ckAddress, ensName }) => {
               const label = ensName ?? (ckAddress ? `${ckAddress.slice(0, 6)}…${ckAddress.slice(-4)}` : 'Connect wallet')
@@ -148,7 +223,7 @@ function AppTopNav({ pathname }: { pathname: string }) {
                     <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                       {ckConnected ? label : isConnecting ? 'Connecting…' : 'Connect wallet'}
                     </span>
-                    <span style={{ opacity: 0.75 }}>⌄</span>
+                    <Icon d={ICONS.arrowDown} size={12} style={{ opacity: 0.75 }} />
                   </button>
                   {walletMenuOpen && ckConnected && (
                     <div
@@ -165,9 +240,7 @@ function AppTopNav({ pathname }: { pathname: string }) {
                       <Link className="btn btn-sm btn-ghost" href="/app/portfolio" style={{ width: '100%', justifyContent: 'flex-start' }}>
                         Dashboard
                       </Link>
-                      <Link className="btn btn-sm btn-ghost" href="/app/settings" style={{ width: '100%', justifyContent: 'flex-start' }}>
-                        Settings
-                      </Link>
+                      {/* CRED-003: Settings is a "Coming Soon" stub — hidden from nav until it ships. */}
                       <button
                         className="btn btn-sm btn-ghost"
                         onClick={() => {

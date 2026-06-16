@@ -51,7 +51,7 @@ export function FlowShell({ title, kicker, summary, steps, step, children, onBac
                     width: 26, height: 26, borderRadius: 6,
                     border: '1px solid',
                     borderColor: done ? 'var(--green)' : active ? 'var(--cyan)' : 'var(--line-strong)',
-                    background: done ? 'oklch(0.78 0.16 152 / 0.12)' : active ? 'oklch(0.82 0.13 210 / 0.12)' : 'transparent',
+                    background: done ? 'oklch(0.78 0.16 152 / 0.12)' : active ? 'oklch(0.82 0.13 85 / 0.12)' : 'transparent',
                     color: done ? 'var(--green)' : active ? 'var(--cyan)' : 'var(--text-2)',
                     display: 'flex', alignItems: 'center', justifyContent: 'center',
                     fontFamily: 'var(--mono)', fontSize: 11,
@@ -129,7 +129,7 @@ export function RelayRouteVisual({ litHops }: { litHops: number }) {
               />
             )}
             <circle cx={x} cy={y} r={8}
-              fill={lit ? (i === nodes.length - 1 ? 'oklch(0.78 0.16 152 / 0.3)' : 'oklch(0.82 0.13 210 / 0.2)') : 'rgba(255,255,255,0.05)'}
+              fill={lit ? (i === nodes.length - 1 ? 'oklch(0.78 0.16 152 / 0.3)' : 'oklch(0.82 0.13 85 / 0.2)') : 'rgba(255,255,255,0.05)'}
               stroke={lit ? (i === nodes.length - 1 ? 'var(--green)' : 'var(--cyan)') : 'rgba(255,255,255,0.15)'}
             />
             <text x={x} y={y + 20} textAnchor="middle" fontFamily="JetBrains Mono" fontSize="7"

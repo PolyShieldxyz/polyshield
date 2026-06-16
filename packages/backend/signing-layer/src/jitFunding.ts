@@ -47,15 +47,26 @@ export async function runOnFundingChain<T>(fn: () => Promise<T>): Promise<T> {
   return run;
 }
 
+// C3: optional hook fired (fire-and-forget) after every JIT funding event, so the buffer manager can
+// re-check the base buffer around betting activity instead of polling the balance on a tight loop.
+// Registered by bufferManager.startBufferManager; a no-op when the buffer manager is disabled.
+let _afterFunding: (() => void) | null = null;
+export function setAfterFundingHook(cb: () => void): void {
+  _afterFunding = cb;
+}
+
 export async function ensureDepositWalletFunded(
   provider: ethers.JsonRpcProvider,
   operatorWallet: ethers.Wallet,
   betAmount: bigint,
 ): Promise<boolean> {
-  return runOnFundingChain(() => fundOnce(provider, operatorWallet, betAmount)).catch((err) => {
+  const funded = await runOnFundingChain(() => fundOnce(provider, operatorWallet, betAmount)).catch((err) => {
     logger.error({ err: String(err) }, "JIT funding: unexpected error — treating as unfunded");
     return false;
   });
+  // Nudge the buffer check AFTER the funding chain settles (never awaited → no re-entrant enqueue).
+  if (_afterFunding) { try { _afterFunding(); } catch { /* buffer nudge must never break a bet */ } }
+  return funded;
 }
 
 async function fundOnce(

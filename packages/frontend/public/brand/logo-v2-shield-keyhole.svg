@@ -1,14 +1,9 @@
-<svg width="64" height="64" viewBox="0 0 32 32" fill="none" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="PolyShield logo — shield with keyhole">
-  <defs>
-    <linearGradient id="psg2" x1="0" y1="0" x2="1" y2="1">
-      <stop offset="0" stop-color="#3fd0e6"/>
-      <stop offset="1" stop-color="#9b6cf0"/>
-    </linearGradient>
-  </defs>
-  <!-- Filled shield -->
-  <path d="M16 2.5 L27.5 6.6 V15.8 C27.5 22.6 22.3 27.6 16 29.7 C9.7 27.6 4.5 22.6 4.5 15.8 V6.6 Z"
-        fill="url(#psg2)"/>
-  <!-- Keyhole: the privacy/encryption read. Circle + tapered slot, cut in background color. -->
-  <path d="M16 9.5 A3.2 3.2 0 0 1 17.7 15.4 L19 22 H13 L14.3 15.4 A3.2 3.2 0 0 1 16 9.5 Z"
-        fill="#06080B"/>
+<svg width="64" height="64" viewBox="0 0 64 64" fill="none" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="PolyShield mark — reduced (filled shield + inclusion path)">
+  <!-- Reduced/solid variant for small lockups & favicons: a FILLED indigo shield carries the
+       silhouette at tiny sizes; the bold gold inclusion path (last edge leaning right) stays legible. -->
+  <path d="M32 5 L55 13 V31 C55 44 45 53 32 58 C19 53 9 44 9 31 V13 Z" fill="#8285eb"/>
+  <path d="M32 17 L24 30 L29 43" fill="none" stroke="#f1c45e" stroke-width="3.4" stroke-linecap="round" stroke-linejoin="round"/>
+  <g fill="#f1c45e">
+    <circle cx="32" cy="17" r="3"/><circle cx="29" cy="43" r="3.4"/>
+  </g>
 </svg>

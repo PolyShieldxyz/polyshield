@@ -137,7 +137,15 @@ interface EventIndexLike {
   recoveryData: (depositor: string) => { deposits: unknown[]; spends: unknown[] };
   blockTimestamps: (blocks: number[]) => Record<number, number>;
   allEvents: (limit?: number) => Array<{ type: string; blockNumber: number; logIndex: number; txHash: string; blockTs: number | null; args: Record<string, unknown> }>;
+  headBlock: () => number;
+  betAuthorizedEvents: (fromBlock: number, toBlock: number) => Array<{ type: string; blockNumber: number; logIndex: number; txHash: string; args: Record<string, unknown> }>;
+  resolvedMarketIds: () => string[];
+  syncNow: () => Promise<void>;
 }
+// Delay before the deposit-hint's follow-up sync, so head has advanced past the index's CONFIRMATIONS
+// buffer (~3 Polygon blocks ≈ 6s) and the just-confirmed deposit is ingestable. Tunable.
+const DEPOSIT_HINT_RESYNC_MS = Number(process.env.DEPOSIT_HINT_RESYNC_MS ?? "12000");
+
 let _eventIndex: EventIndexLike | null = null;
 export function setEventIndex(idx: EventIndexLike): void {
   _eventIndex = idx;
@@ -285,6 +293,27 @@ export function createApp(): express.Application {
   app.get("/health", (_req, res) => {
     res.status(200).json({ status: "ok" });
   });
+
+  // C4 (deposit hint): the user's deposit() tx is the ONE state change the relay doesn't originate
+  // (it's sent from the user's own wallet), so sync-on-relay can't see it. The frontend pings this
+  // right after its deposit confirms to pull the new leaf/Deposited event into the caches immediately,
+  // instead of waiting for the slow safety reconcile. Body-less + idempotent: it only triggers a cheap
+  // incremental sync of PUBLIC data (no params trusted), so it's safe to expose behind the rate limit.
+  app.post(
+    "/deposit-hint",
+    rateLimit({ windowMs: 60_000, max: 60, standardHeaders: true, legacyHeaders: false }),
+    (_req, res) => {
+      // Immediate sync — picks up any deposit already past the CONFIRMATIONS buffer.
+      void _merkleCache?.syncNow();
+      void _eventIndex?.syncNow();
+      // The just-confirmed deposit (~1 conf) is still INSIDE the index's CONFIRMATIONS buffer, so the
+      // sync above can't ingest it yet. Schedule one more after the buffer clears so the index reflects
+      // the deposit within seconds — not the 10-min reconcile — for the explorer / a later recovery.
+      const t = setTimeout(() => { void _merkleCache?.syncNow(); void _eventIndex?.syncNow(); }, DEPOSIT_HINT_RESYNC_MS);
+      if (typeof t.unref === "function") t.unref();
+      res.status(202).json({ status: "syncing" });
+    },
+  );
 
   app.post("/relay/bet", async (req, res) => {
     const parsed = betSchema.safeParse(req.body); // API-003
@@ -512,6 +541,12 @@ export function createApp(): express.Application {
       return;
     }
     try {
+      // Pull any just-confirmed events (e.g. a fresh deposit() — the one state change the relay doesn't
+      // originate, so sync-on-relay never sees it) into the index BEFORE serving, so a recovery right
+      // after a deposit isn't missing it. Same on-demand pattern as /merkle-path. syncNow only ingests
+      // up to head−CONFIRMATIONS, so a deposit younger than that (~a few seconds) can still be excluded;
+      // the client keeps its local cache for that window (it doesn't drop locally-known notes).
+      await _eventIndex.syncNow().catch(() => { /* stale-but-serve is better than 500 */ });
       const { deposits, spends } = _eventIndex.recoveryData(depositor);
       const blocks = [...new Set([...deposits, ...spends].map((e) => (e as { blockNumber: number }).blockNumber))];
       const blockTimestamps = _eventIndex.blockTimestamps(blocks);
@@ -541,6 +576,40 @@ export function createApp(): express.Application {
     }
     const limit = Math.min(Math.max(parseInt(String(req.query.limit ?? "1000"), 10) || 1000, 1), 5000);
     res.json({ events: _eventIndex.allEvents(limit) });
+  });
+
+  // GET /index-head — the highest block the event index has ingested (+ readiness). The signing layer
+  // reads this so its scan cursor never advances past what the index has, then pulls BetAuthorized
+  // events from /bet-authorized instead of re-scanning the chain itself.
+  app.get("/index-head", (_req, res) => {
+    if (!_eventIndex || !_eventIndex.isReady()) {
+      res.status(503).json({ error: "event index not ready" });
+      return;
+    }
+    res.json({ head: _eventIndex.headBlock(), ready: true });
+  });
+
+  // GET /bet-authorized?fromBlock=&toBlock= — BetAuthorized events in the range, served from the index.
+  // Public, anonymous on-chain data (same as /events). Lets the signing layer source new bets + a
+  // resolved market's bets without its own getLogs scan.
+  app.get("/bet-authorized", (req, res) => {
+    if (!_eventIndex || !_eventIndex.isReady()) {
+      res.status(503).json({ error: "event index not ready" });
+      return;
+    }
+    const from = Math.max(0, parseInt(String(req.query.fromBlock ?? "0"), 10) || 0);
+    const to = req.query.toBlock !== undefined ? (parseInt(String(req.query.toBlock), 10) || 0) : _eventIndex.headBlock();
+    res.json({ head: _eventIndex.headBlock(), events: _eventIndex.betAuthorizedEvents(from, to) });
+  });
+
+  // GET /resolved-markets — the on-chain market_ids that have a MarketResolved event. The signing layer
+  // seeds its "already resolved" set from here instead of probing Vault.marketResolvedAt per market.
+  app.get("/resolved-markets", (_req, res) => {
+    if (!_eventIndex || !_eventIndex.isReady()) {
+      res.status(503).json({ error: "event index not ready" });
+      return;
+    }
+    res.json({ head: _eventIndex.headBlock(), marketIds: _eventIndex.resolvedMarketIds() });
   });
 
   // ── FC-15: market catalog (public, anonymous data) ──────────────────────────

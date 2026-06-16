@@ -4,6 +4,7 @@ import { useEffect, useState, useCallback } from 'react'
 import { createPublicClient, http } from 'viem'
 import { polygon, polygonAmoy } from 'viem/chains'
 import { defineChain } from 'viem'
+import { polygonReadRpc } from '../../lib/rpc'
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -31,10 +32,10 @@ const TYPE_COLOR: Record<TxType, string> = {
   'Deposit':              'var(--cyan)',
   'Bet Authorized':       'var(--violet)',
   'Settlement Credited':  'var(--green)',
-  'Bet Cancellation':     'oklch(0.80 0.15 70)',
-  'N/A Cancellation':     'oklch(0.80 0.15 70)',
+  'Bet Cancellation':     'oklch(0.80 0.15 55)',
+  'N/A Cancellation':     'oklch(0.80 0.15 55)',
   'Withdrawal':           'var(--text-2)',
-  'Market Resolved':      'oklch(0.75 0.15 40)',
+  'Market Resolved':      'oklch(0.75 0.15 55)',
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
@@ -95,7 +96,9 @@ function buildClient(chainId: number) {
     return createPublicClient({ chain: anvilChain, transport: http(DEV_RPC) })
   }
   if (chainId === 80002) return createPublicClient({ chain: polygonAmoy, transport: http(MAINNET_RPC) })
-  return createPublicClient({ chain: polygon, transport: http(MAINNET_RPC) })
+  // Polygon mainnet reads go through the same-origin /api/rpc proxy in prod (server-only key); dev
+  // keeps the direct public RPC. See lib/rpc.ts.
+  return createPublicClient({ chain: polygon, transport: http(polygonReadRpc()) })
 }
 
 // ── Event fetchers (served from the backend index — see fetchBackendEvents) ───
@@ -248,11 +251,44 @@ export default function ExplorerPage() {
           </div>
         </div>
 
-        {error && (
-          <div className="panel" style={{ padding: 16, marginBottom: 24, borderColor: 'var(--red)', color: 'var(--red)' }}>
-            {error}
-          </div>
-        )}
+        {/* CRED-002: never surface a raw HTTP status / backend message to users. A 503
+            "event index not ready" is the indexer still catching up (transient) — frame it
+            as indexing, not failure; anything else is a soft "couldn't load · retry". */}
+        {error && (() => {
+          const indexing = /not ready|503|index/i.test(error)
+          const misconfigured = /not configured/i.test(error)
+          return (
+            <div
+              className="panel"
+              style={{
+                padding: 16,
+                marginBottom: 24,
+                borderColor: misconfigured ? 'oklch(0.70 0.18 25 / 0.4)' : 'var(--line-strong)',
+              }}
+            >
+              <div className="row gap-3" style={{ alignItems: 'flex-start' }}>
+                <span style={{ width: 8, height: 8, borderRadius: '50%', background: indexing ? 'var(--amber)' : 'var(--red)', flexShrink: 0, marginTop: 5 }} />
+                <div style={{ flex: 1 }}>
+                  <div style={{ fontWeight: 500, color: 'var(--text)', fontSize: 13 }}>
+                    {misconfigured ? 'Explorer unavailable' : indexing ? 'Indexing on-chain activity…' : 'Couldn’t load vault activity'}
+                  </div>
+                  <div className="small mt-1" style={{ fontSize: 12 }}>
+                    {misconfigured
+                      ? 'The vault address isn’t configured for this environment.'
+                      : indexing
+                        ? 'The public event index is still catching up to the chain. This view will populate automatically — no action needed.'
+                        : 'We couldn’t reach the indexer. This is usually temporary.'}
+                  </div>
+                </div>
+                {!misconfigured && (
+                  <button className="btn btn-sm btn-ghost" onClick={() => void refresh()} disabled={loading}>
+                    {loading ? 'Retrying…' : 'Retry'}
+                  </button>
+                )}
+              </div>
+            </div>
+          )
+        })()}
 
         {/* Stats row */}
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(140px, 1fr))', gap: 12, marginBottom: 24 }}>
@@ -358,7 +394,7 @@ export default function ExplorerPage() {
             <div className="panel" style={{ padding: 20 }}>
               <div className="row" style={{ justifyContent: 'space-between', marginBottom: 8 }}>
                 <div className="micro" style={{ fontSize: 9 }}>UNIQUE DEPOSITORS</div>
-                <span className="pill" style={{ background: 'oklch(0.25 0.08 210)', color: 'var(--cyan)', fontSize: 9 }}>
+                <span className="pill" style={{ background: 'oklch(0.25 0.08 85)', color: 'var(--cyan)', fontSize: 9 }}>
                   <span className="dot" style={{ background: 'var(--cyan)', boxShadow: '0 0 6px var(--cyan)' }}></span>
                   LIVE
                 </span>

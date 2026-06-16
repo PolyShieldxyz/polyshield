@@ -4,6 +4,7 @@ import Link from 'next/link'
 import { Suspense, useEffect, useRef, useState } from 'react'
 import { useParams, useRouter, useSearchParams } from 'next/navigation'
 import { Icon, ICONS } from '@/components/ui/Icon'
+import { AmountInput } from '@/components/ui/AmountInput'
 import { BetModal } from '@/components/app/BetModal'
 import { MARKETS, type MarketEntry } from '@/lib/marketsData'
 import { marketBuyCeilingFromBook, roundToTick, type BookLevel } from '@/lib/pricing'
@@ -276,9 +277,23 @@ function MarketDetailContent() {
   // FC-15: honest states — no fixture market is ever shown. While the first load is in flight show a
   // spinner; if the market can't be resolved, show an unavailable notice instead of a fake market.
   if (!payload && status === 'loading') {
+    // STATE-002: render the page chrome + layout-matched skeletons instead of a lone line of
+    // mono text in a black void. Preserves perceived speed and the page's structure.
     return (
-      <div style={{ padding: 48, textAlign: 'center' }}>
-        <div className="micro">LOADING MARKET…</div>
+      <div>
+        <div className="row hairline-b" style={{ padding: '12px 24px', gap: 12 }}>
+          <Link href="/app/markets" className="btn btn-sm btn-ghost" style={{ textDecoration: 'none' }}>← Markets</Link>
+          <div className="skeleton" style={{ width: 280, height: 16, borderRadius: 4 }} />
+        </div>
+        <div style={{ padding: 24, display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) 340px', gap: 20 }}>
+          <div className="col gap-4">
+            <div className="skeleton" style={{ height: 96 }} />
+            <div className="skeleton" style={{ height: 220 }} />
+            <div className="skeleton" style={{ height: 260 }} />
+          </div>
+          <div className="skeleton" style={{ height: 420 }} />
+        </div>
+        <span className="sr-only">Loading market…</span>
       </div>
     )
   }
@@ -362,26 +377,32 @@ function MarketDetailContent() {
           {tab === 'book' && (
             <div className="panel mt-4" style={{ padding: 0 }}>
               <div>
-                <div className="row" style={{ padding: '8px 12px', fontSize: 10, color: 'var(--text-3)', fontFamily: 'var(--mono)', letterSpacing: '0.06em' }}>
+                <div className="row" style={{ padding: '8px 12px', fontSize: 10, color: 'var(--text-2)', fontFamily: 'var(--mono)', letterSpacing: '0.06em' }}>
                   <div style={{ width: 60 }}>PRICE</div>
                   <div style={{ flex: 1, textAlign: 'right' }}>SIZE</div>
                 </div>
-                {(book?.asks ?? []).map((ask, index) => (
-                  <div key={`ask-${index}`} className="row" style={{ padding: '5px 12px', fontSize: 12, fontFamily: 'var(--mono)' }}>
-                    <div style={{ width: 60, color: 'var(--red)' }}>{Number(ask.price).toFixed(3)}</div>
-                    <div style={{ flex: 1, textAlign: 'right' }}>{Number(ask.size).toLocaleString()}</div>
-                  </div>
-                ))}
+                {/* STATE-003: cap each side to an internally-scrolling region (nearest ~40 levels)
+                    so a deep book doesn't stretch the whole page to thousands of pixels. */}
+                <div style={{ maxHeight: 200, overflowY: 'auto' }}>
+                  {(book?.asks ?? []).slice(0, 40).map((ask, index) => (
+                    <div key={`ask-${index}`} className="row" style={{ padding: '5px 12px', fontSize: 12, fontFamily: 'var(--mono)' }}>
+                      <div style={{ width: 60, color: 'var(--red)' }}>{Number(ask.price).toFixed(3)}</div>
+                      <div style={{ flex: 1, textAlign: 'right' }}>{Number(ask.size).toLocaleString()}</div>
+                    </div>
+                  ))}
+                </div>
                 <div className="row hairline-t hairline-b" style={{ padding: '6px 12px', justifyContent: 'space-between', fontFamily: 'var(--mono)', fontSize: 12 }}>
                   <span style={{ color: 'var(--cyan)' }}>{price.toFixed(4)}</span>
                   <span style={{ color: 'var(--text-2)' }}>spread varies by book depth</span>
                 </div>
-                {(book?.bids ?? []).map((bid, index) => (
-                  <div key={`bid-${index}`} className="row" style={{ padding: '5px 12px', fontSize: 12, fontFamily: 'var(--mono)' }}>
-                    <div style={{ width: 60, color: 'var(--green)' }}>{Number(bid.price).toFixed(3)}</div>
-                    <div style={{ flex: 1, textAlign: 'right' }}>{Number(bid.size).toLocaleString()}</div>
-                  </div>
-                ))}
+                <div style={{ maxHeight: 200, overflowY: 'auto' }}>
+                  {(book?.bids ?? []).slice(0, 40).map((bid, index) => (
+                    <div key={`bid-${index}`} className="row" style={{ padding: '5px 12px', fontSize: 12, fontFamily: 'var(--mono)' }}>
+                      <div style={{ width: 60, color: 'var(--green)' }}>{Number(bid.price).toFixed(3)}</div>
+                      <div style={{ flex: 1, textAlign: 'right' }}>{Number(bid.size).toLocaleString()}</div>
+                    </div>
+                  ))}
+                </div>
               </div>
             </div>
           )}
@@ -466,16 +487,12 @@ function MarketDetailContent() {
                 <div className="micro">AMOUNT (USDC)</div>
                 <div style={{ display: 'flex', alignItems: 'center', background: 'var(--bg-1)', border: '1px solid var(--line-strong)', borderRadius: 6, padding: '0 12px', marginTop: 8 }}>
                   <span className="mono" style={{ color: 'var(--text-2)', fontSize: 18, marginRight: 6 }}>$</span>
-                  {/* FINDING: A11Y-002 aria-label; A11Y-001 dropped inline outline:none for global :focus-visible ring. */}
-                  <input
-                    type="number"
+                  {/* String-backed money input (see AmountInput) — a controlled type=number dropped digits. */}
+                  <AmountInput
                     value={amount}
-                    min={0}
-                    step={0.01}
-                    inputMode="decimal"
-                    onChange={(e) => setAmount(Math.max(0, +e.target.value || 0))}
-                    aria-label="Bet amount in USDC"
-                    style={{ background: 'transparent', border: 'none', color: 'var(--text)', fontFamily: 'var(--mono)', fontSize: 22, padding: '10px 0', width: '100%' }}
+                    onValueChange={(n) => setAmount(Math.max(0, n))}
+                    ariaLabel="Bet amount in USDC"
+                    style={{ fontSize: 22, padding: '10px 0' }}
                   />
                   <span className="mono" style={{ color: 'var(--text-2)', fontSize: 12 }}>USDC</span>
                 </div>

@@ -29,7 +29,7 @@ export function DevStatusBar() {
 
   if (!status?.devMode) return null
 
-  const allGood = status.anvil && status.proofRelay && status.indexer && status.mockClob
+  const allGood = status.anvil && status.proofRelay && status.mockClob
 
   return (
     <div style={{
@@ -42,7 +42,6 @@ export function DevStatusBar() {
           <div className="col gap-2">
             <ServiceRow label="Anvil (chain 31337)" up={status.anvil} url="http://127.0.0.1:8545" />
             <ServiceRow label="Proof relay (:3002)"  up={status.proofRelay} url="http://127.0.0.1:3002" />
-            <ServiceRow label="Indexer (:3003)"      up={status.indexer}    url="http://127.0.0.1:3003" />
             <ServiceRow label="Mock CLOB (:3001)"    up={status.mockClob}   url="http://127.0.0.1:3001" />
           </div>
           {(status.vaultAddress || status.usdcAddress) && (
@@ -62,7 +61,7 @@ export function DevStatusBar() {
             </div>
           )}
           {!allGood && (
-            <div className="small mt-3" style={{ color: 'oklch(0.82 0.14 70)', fontSize: 10 }}>
+            <div className="small mt-3" style={{ color: 'oklch(0.82 0.14 55)', fontSize: 10 }}>
               Run <span className="mono">pnpm dev:mock</span> to start all services.
             </div>
           )}
@@ -81,7 +80,7 @@ export function DevStatusBar() {
         <DOT on={allGood} />
         <span>DEV</span>
         <span style={{ color: allGood ? 'var(--green)' : 'var(--red)' }}>
-          {allGood ? 'ALL LIVE' : `${[status.anvil, status.proofRelay, status.indexer, status.mockClob].filter(Boolean).length}/4`}
+          {allGood ? 'ALL LIVE' : `${[status.anvil, status.proofRelay, status.mockClob].filter(Boolean).length}/3`}
         </span>
       </button>
     </div>

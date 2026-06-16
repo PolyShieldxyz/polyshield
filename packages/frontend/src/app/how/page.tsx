@@ -2,16 +2,16 @@ import Link from 'next/link'
 
 /* ── Palette (mirrors styles/globals.css :root) ──────────────────────────── */
 const C = {
-  node: '#0E141C',
+  node: '#15161f',
   line: 'rgba(255,255,255,0.14)',
   lineSoft: 'rgba(255,255,255,0.07)',
   text: '#E6EAF0',
   text2: '#8B94A2',
-  cyan: 'oklch(0.82 0.13 210)',
-  violet: 'oklch(0.70 0.15 290)',
+  cyan: 'oklch(0.82 0.13 85)',
+  violet: 'oklch(0.70 0.15 280)',
   green: 'oklch(0.78 0.16 152)',
   red: 'oklch(0.70 0.18 25)',
-  amber: 'oklch(0.82 0.14 70)',
+  amber: 'oklch(0.82 0.14 55)',
   blue: 'oklch(0.74 0.13 250)',
 }
 

@@ -13,11 +13,14 @@
 import Database from "better-sqlite3";
 import { ethers } from "ethers";
 import pino from "pino";
-import { getLogsChunked } from "./merkle";
+import { getLogsChunked, getCachedBlockNumber } from "./merkle";
 
 const logger = pino({ name: "event-index" });
 
-const POLL_MS = Number(process.env.EVENT_INDEX_POLL_MS ?? process.env.MERKLE_CACHE_POLL_MS ?? "15000");
+// Steady-state cadence is now a SLOW safety reconcile (C1): the relay nudges syncNow() right after it
+// confirms a state-changing tx, and a fresh leaf is also pulled on a /merkle-path miss. This timer
+// only needs to catch user deposit() txs (not relayed by us) + be a belt-and-suspenders backstop.
+const POLL_MS = Number(process.env.EVENT_INDEX_RECONCILE_MS ?? process.env.MERKLE_CACHE_RECONCILE_MS ?? "600000");
 const CONFIRMATIONS = Number(process.env.MERKLE_CACHE_CONFIRMATIONS ?? "3");
 const LOG_CHUNK = Number(process.env.LOG_SCAN_CHUNK ?? "10000");
 const SCAN_WINDOW = Number(process.env.MERKLE_SCAN_WINDOW ?? "5000");
@@ -80,6 +83,7 @@ export class VaultEventIndex {
   private db: Database.Database | null = null;
   private lastBlock: number;
   private ready = false;
+  private syncInFlight: Promise<void> | null = null;
 
   constructor(
     private provider: ethers.JsonRpcProvider,
@@ -117,9 +121,43 @@ export class VaultEventIndex {
 
   isReady(): boolean { return this.ready && this.db !== null; }
 
+  /** Highest block the index has ingested (so a consumer never advances a cursor past it). */
+  headBlock(): number { return this.lastBlock; }
+
+  /** BetAuthorized events in [fromBlock, toBlock] (inclusive), oldest-first. Lets the signing layer
+   *  read new bets from here instead of re-scanning the chain (same data, no per-service getLogs). */
+  betAuthorizedEvents(fromBlock: number, toBlock: number): IndexedEvent[] {
+    if (!this.db) return [];
+    const rows = this.db
+      .prepare(
+        "SELECT type, block, log_index, tx_hash, args_json FROM vault_events WHERE type='BetAuthorized' AND block >= ? AND block <= ? ORDER BY block, log_index",
+      )
+      .all(fromBlock, toBlock) as Array<{ type: string; block: number; log_index: number; tx_hash: string; args_json: string }>;
+    return rows.map((r) => ({ type: r.type, blockNumber: r.block, logIndex: r.log_index, txHash: r.tx_hash, args: JSON.parse(r.args_json) }));
+  }
+
+  /** The on-chain market_ids that have a MarketResolved event — so the signing layer can seed its
+   *  "already resolved" set from here instead of probing Vault.marketResolvedAt per market. */
+  resolvedMarketIds(): string[] {
+    if (!this.db) return [];
+    const rows = this.db
+      .prepare("SELECT args_json FROM vault_events WHERE type='MarketResolved'")
+      .all() as Array<{ args_json: string }>;
+    const out = new Set<string>();
+    for (const r of rows) {
+      try {
+        const a = JSON.parse(r.args_json) as { market_id?: string };
+        if (a.market_id) out.add(a.market_id);
+      } catch {
+        /* skip a malformed row */
+      }
+    }
+    return [...out];
+  }
+
   private async sync(): Promise<void> {
     if (!this.db) return;
-    const head = await this.provider.getBlockNumber();
+    const head = await getCachedBlockNumber(this.provider);
     const target = head - CONFIRMATIONS;
     if (target <= this.lastBlock) return;
 
@@ -197,6 +235,21 @@ export class VaultEventIndex {
     return out;
   }
 
+  /** Serialize sync() so the relay-confirm nudge and the background reconcile never overlap (a
+   *  concurrent run would race lastBlock). Callers share the in-flight run. */
+  private runSync(): Promise<void> {
+    if (this.syncInFlight) return this.syncInFlight;
+    this.syncInFlight = this.sync().finally(() => { this.syncInFlight = null; });
+    return this.syncInFlight;
+  }
+
+  /** Incremental catch-up trigger (C1): called right after the relay confirms a state-changing tx,
+   *  so a just-emitted event lands in the index in seconds without waiting for the slow reconcile. */
+  async syncNow(): Promise<void> {
+    if (!this.ready || !this.db) return;
+    await this.runSync().catch((err) => logger.error({ err: String(err) }, "event index syncNow failed"));
+  }
+
   /** One-shot catch-up (no poll interval) for the resync CLI. Backfills recent events into the DB. */
   async catchUp(): Promise<{ lastBlock: number }> {
     await this.sync();
@@ -209,6 +262,6 @@ export class VaultEventIndex {
     await this.sync();
     this.ready = true;
     logger.info("event index ready");
-    setInterval(() => void this.sync().catch((err) => logger.error({ err: String(err) }, "event index sync failed")), POLL_MS);
+    setInterval(() => void this.runSync().catch((err) => logger.error({ err: String(err) }, "event index sync failed")), POLL_MS);
   }
 }

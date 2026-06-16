@@ -7,14 +7,16 @@ name: polyshield
 #   internet --443/80--> caddy --> frontend:3000
 #                                     |-- /api/relay/*     -> proof-relay:3002
 #                                     |-- /api/signing/*   -> signing-layer:3004  (vault key)
-#                                     |-- /api/settlement/*-> indexer:3003
+#
+# Settlement state is read on-demand by the frontend via eth_call (pendingCredit/marketResolvedAt);
+# market-resolution events are also in the proof-relay event index. There is no separate indexer
+# service (it only ever served an unused /settlement endpoint while polling the chain 24/7).
 
 networks:
   internal:
     driver: bridge
 
 volumes:
-  indexer_data:     # persistent: indexer SQLite (settlement records). DO NOT lose.
   signing_data:     # persistent: signing-layer settlement.db (attestations). DO NOT lose.
   proofrelay_data:  # persistent: proof-relay merkle cache (rebuildable from chain — safe to lose, just slower cold start).
   caddy_data:       # persistent: Let's Encrypt certs/account. Losing it re-issues certs.
@@ -52,15 +54,18 @@ services:
         NEXT_PUBLIC_VAULT_DEPLOY_BLOCK: ${NEXT_PUBLIC_VAULT_DEPLOY_BLOCK}
     restart: unless-stopped
     env_file:
+      # common.env first so frontend.env can override. Gives the Next server POLYGON_RPC_URL — the
+      # UPSTREAM for the /api/rpc proxy that the browser's Polygon reads (incl. tx-receipt polling)
+      # go through. Without it the proxy 503s and deposits hang at "Broadcast to RPC".
+      - ./env/common.env
       - ./env/frontend.env       # server-only: OPERATOR_API_TOKEN (must match signing-layer)
     environment:
       - NODE_ENV=production
       # Server-side proxy targets — private compose-network DNS names.
       - PROOF_RELAY_URL=http://proof-relay:3002
       - SIGNING_LAYER_URL=http://signing-layer:3004
-      - INDEXER_URL=http://indexer:3003
     networks: [internal]
-    depends_on: [proof-relay, indexer, signing-layer]
+    depends_on: [proof-relay, signing-layer]
 
   proof-relay:
     build:
@@ -74,19 +79,6 @@ services:
       - PROOF_RELAY_DB_PATH=/data/merkle.db   # backend merkle read-cache (persists across restarts)
     volumes:
       - proofrelay_data:/data
-    networks: [internal]
-
-  indexer:
-    build:
-      context: ../packages/backend
-      dockerfile: indexer/Dockerfile
-    restart: unless-stopped
-    env_file:
-      - ./env/common.env
-    environment:
-      - INDEXER_DB_PATH=/data/polyshield.db
-    volumes:
-      - indexer_data:/data
     networks: [internal]
 
   signing-layer:
@@ -104,6 +96,10 @@ services:
       - ./env/signing-layer.env  # VAULT KEY + Polymarket creds + OPERATOR_API_TOKEN (secret)
     environment:
       - SETTLEMENT_DB_PATH=/data/settlement.db
+      # Source BetAuthorized events from the proof-relay's event index instead of re-scanning the
+      # chain (falls back to a chain getLogs scan if the relay is unreachable).
+      - PROOF_RELAY_URL=http://proof-relay:3002
     volumes:
       - signing_data:/data
     networks: [internal]
+    depends_on: [proof-relay]

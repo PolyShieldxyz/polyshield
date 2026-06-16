@@ -6,6 +6,7 @@ import { cancelOrdersForMarket } from "./wsFillTracker";
 import { signingLayerNonceManager } from "./nonceManager";
 import { conditionIdForKey, marketMetaForKey, toFieldSafe } from "./marketRegistry";
 import { getTrackedMarkets, upsertTrackedMarket, trackedMarketCount } from "./trackedMarkets";
+import { fetchResolvedMarkets } from "./vaultEventSource";
 
 const logger = pino({ name: "settlement-resolver" });
 
@@ -30,10 +31,37 @@ const VAULT_ABI = [
 // Poll cadence for the settlement scan. Resolution is a slow, infrequent event, so this can be
 // looser than the bet-auth poller. publicnode has no eth_newFilter/getFilterChanges support, so a
 // live `ctf.on` subscription silently dies there (see eventListener.ts) — hence this poll fallback.
-const SETTLEMENT_POLL_MS = Number(process.env.SETTLEMENT_POLL_MS ?? "30000");
+const SETTLEMENT_POLL_MS = Number(process.env.SETTLEMENT_POLL_MS ?? "120000");
 
-// Markets (reduced key) already driven to resolution this process — skip re-checking them.
+// Markets (reduced key) known resolved-on-chain — skip re-checking them. Populated by (a) this
+// process's own resolutions, and (b) a periodic seed from the proof-relay's MarketResolved index.
 const resolvedMarkets = new Set<string>();
+
+// Seed the resolved-set from the proof-relay's MarketResolved index instead of probing
+// Vault.marketResolvedAt per market. Refreshed periodically; while the seed is FRESH, the per-market
+// marketResolvedAt eth_call is skipped entirely (a market absent from the index is genuinely
+// unresolved on-chain). If the relay is unavailable, the seed goes stale and the poll falls back to
+// the on-chain marketResolvedAt check — so resilience is preserved.
+const RESOLVED_REFRESH_MS = Number(process.env.RESOLVED_REFRESH_MS ?? "300000"); // 5 min
+const SEED_FRESH_MS = RESOLVED_REFRESH_MS * 3; // tolerate a couple of failed refreshes before falling back
+let _resolvedSeededAt = 0;
+
+async function refreshResolvedFromIndex(): Promise<void> {
+  try {
+    const ids = await fetchResolvedMarkets();
+    if (ids === null) return; // relay down → keep the per-market marketResolvedAt fallback
+    let added = 0;
+    for (const id of ids) {
+      const key = toFieldSafe(id);
+      if (!resolvedMarkets.has(key)) added++;
+      resolvedMarkets.add(key);
+    }
+    _resolvedSeededAt = Date.now();
+    logger.info({ total: ids.length, newlyAdded: added }, "settlement: seeded resolved markets from proof-relay index");
+  } catch (err) {
+    logger.warn({ err: String(err) }, "settlement: resolved-markets seed failed (using per-market check)");
+  }
+}
 
 // Backfill for bets placed BEFORE the tracked_markets table existed (their BetAuthorized logs are
 // now pruned and unreadable). Each is a reduced on-chain market_id; the raw conditionId + endDate are
@@ -107,86 +135,50 @@ async function handleResolution(
   await runRedemptionPipeline(provider, wallet, conditionId, blockNumber);
 }
 
-// CTF.ConditionResolution is a GLOBAL event — every market resolving on all of Polymarket fires it.
-// On a real RPC (Alchemy) the subscription is live, so without this filter the resolver would try to
-// redeem/resolve HUNDREDS of unrelated markets at once → RPC 429 storm → crash. Only act on markets
-// the vault actually has bets on (tracked_markets). Cached briefly to avoid a DB hit per global event.
-let _trackedCache: { keys: Set<string>; at: number } | null = null;
-function isVaultMarket(conditionId: string): boolean {
-  const now = Date.now();
-  if (!_trackedCache || now - _trackedCache.at > 10_000) {
-    _trackedCache = { keys: new Set(getTrackedMarkets().map((m) => m.reducedKey.toLowerCase())), at: now };
-  }
-  return _trackedCache.keys.has(toFieldSafe(conditionId).toLowerCase());
-}
-
-/**
- * Probe whether the RPC supports filter methods (eth_newFilter). Public providers like Ankr/
- * publicnode return "Method disabled" — attaching a `.on` subscription there does nothing but
- * spam an eth_newFilter error every few seconds forever. Anvil/dev and full archive nodes support
- * it. We probe once at startup and only attach the live subscription when it actually works.
- */
-async function filtersSupported(provider: ethers.JsonRpcProvider): Promise<boolean> {
-  try {
-    const id = (await provider.send("eth_newFilter", [{ fromBlock: "latest", toBlock: "latest" }])) as string;
-    try { await provider.send("eth_uninstallFilter", [id]); } catch { /* best-effort cleanup */ }
-    return true;
-  } catch {
-    return false;
-  }
-}
+// NOTE: the former live `ctf.on("ConditionResolution")` subscription (and its `isVaultMarket`
+// global-event filter + `filtersSupported` RPC probe) were removed — over an HTTP RPC the subscription
+// forced a background eth_blockNumber + getLogs poller every ~4s and only ever fired on filter-capable
+// RPCs. Settlement now runs solely via the tracked-markets poll below, which is RPC-cheap and works on
+// every provider (including pruned/filter-less public nodes).
 
 export function startSettlementResolver(
   provider: ethers.JsonRpcProvider,
   wallet: ethers.Wallet
 ): void {
-  const ctf = new ethers.Contract(config.ctfAddress, CTF_ABI, provider);
-
-  // Path 1 — live subscription. Works against Anvil/dev (filters supported) and provides the raw
-  // conditionId directly from the event. On a filter-disabled RPC (Ankr "Method disabled") this
-  // subscription never fires AND retries eth_newFilter forever, so we attach it ONLY when a startup
-  // probe confirms filter support; otherwise Path 2's poll is the sole (and sufficient) path.
-  void (async () => {
-    if (!(await filtersSupported(provider))) {
-      logger.warn(
-        "RPC does not support eth_newFilter — skipping live CTF subscription; settlement runs via poll fallback only",
-      );
-      return;
-    }
-    ctf.on(
-      "ConditionResolution",
-      async (
-        conditionId: string,
-        _oracle: string,
-        _questionId: string,
-        _outcomeSlotCount: bigint,
-        _payoutNumerators: bigint[],
-        event: ethers.ContractEventPayload
-      ) => {
-        try {
-          if (!isVaultMarket(conditionId)) return; // global CTF event for a market the vault has no bets on
-          await provider.waitForTransaction(event.log.transactionHash, 1);
-          await handleResolution(provider, wallet, conditionId, event.log.blockNumber);
-          resolvedMarkets.add(toFieldSafe(conditionId));
-        } catch (err) {
-          logger.error({ err, conditionId }, "Failed to run redemption pipeline (event path)");
-        }
-      }
-    );
-    logger.info("RPC supports filters — live CTF subscription attached");
-  })();
-
-  // Path 2 — poll fallback for public RPCs where `ctf.on` never fires (and pruned RPCs that can't
-  // serve historical logs). We iterate the locally-persisted tracked_markets table — the markets the
-  // Vault has bets on, recorded at bet-submission time — and check each for CTF finalization via the
-  // payoutDenominator STATE read (which pruned nodes serve). No historical eth_getLogs.
+  // Single path: poll the locally-persisted tracked_markets table — the markets the Vault has bets
+  // on, recorded at bet-submission time — and check each for CTF finalization via the payoutDenominator
+  // STATE read (which even pruned nodes serve). No historical eth_getLogs.
+  //
+  // The former "Path 1" live `ctf.on("ConditionResolution")` subscription has been removed: over an
+  // HTTP RPC it forced a background eth_blockNumber + getLogs poller every ~4s forever, and it only
+  // ever fired on filter-capable RPCs (it was already skipped on Ankr/publicnode). The poll below is
+  // sufficient on every RPC and does the same redemption work, so the subscription was pure duplicated
+  // RPC load. `filtersSupported` is retained for diagnostics but no longer gates a subscription.
   seedTrackedMarkets();
+  // Seed the resolved-set from the proof-relay's MarketResolved index (replaces the per-market
+  // Vault.marketResolvedAt eth_call when fresh) + refresh it periodically.
+  void refreshResolvedFromIndex();
+  setInterval(() => void refreshResolvedFromIndex(), RESOLVED_REFRESH_MS);
   startSettlementPoll(provider, wallet);
 
   logger.info(
-    { ctf: config.ctfAddress, vault: config.vaultContractAddress, pollMs: SETTLEMENT_POLL_MS },
-    "Settlement resolver started (live subscription + poll fallback)"
+    { ctf: config.ctfAddress, vault: config.vaultContractAddress, pollMs: SETTLEMENT_POLL_MS, resolvedRefreshMs: RESOLVED_REFRESH_MS },
+    "Settlement resolver started (poll-only; resolved-set seeded from proof-relay index)"
   );
+}
+
+// C2: per-market adaptive backoff. A market past its endDate but not yet finalized on CTF (resolution
+// lag is routinely minutes→hours) doesn't need an eth_call every tick. After each "still unresolved"
+// check we push the market's next check out exponentially (base → cap), so an idling market costs ~one
+// probe per backoff window instead of one per poll. Cleared when the market resolves.
+const SETTLE_BACKOFF_BASE_MS = Number(process.env.SETTLEMENT_BACKOFF_BASE_MS ?? "60000");      // 1 min
+const SETTLE_BACKOFF_MAX_MS = Number(process.env.SETTLEMENT_BACKOFF_MAX_MS ?? "1800000");      // 30 min
+const _settleBackoff = new Map<string, { misses: number; nextAt: number }>();
+
+function backoffMarket(reducedKey: string, now: number): void {
+  const misses = (_settleBackoff.get(reducedKey)?.misses ?? 0) + 1;
+  const delay = Math.min(SETTLE_BACKOFF_MAX_MS, SETTLE_BACKOFF_BASE_MS * 2 ** (misses - 1));
+  _settleBackoff.set(reducedKey, { misses, nextAt: now + delay });
 }
 
 function startSettlementPoll(provider: ethers.JsonRpcProvider, wallet: ethers.Wallet): void {
@@ -196,33 +188,48 @@ function startSettlementPoll(provider: ethers.JsonRpcProvider, wallet: ethers.Wa
   const tick = async () => {
     try {
       const nowSec = Math.floor(Date.now() / 1000);
+      const nowMs = Date.now();
+      // When the resolved-set was recently seeded from the proof-relay index, a market absent from it
+      // is genuinely unresolved on-chain — so skip the per-market Vault.marketResolvedAt eth_call. If
+      // the seed is stale/unavailable (relay down), fall back to the on-chain check.
+      const seedFresh = _resolvedSeededAt > 0 && nowMs - _resolvedSeededAt < SEED_FRESH_MS;
       // Source of markets = the locally-persisted tracked_markets table. NO historical eth_getLogs,
       // so this works on a pruned RPC (which refuses logs older than its prune window).
       for (const { reducedKey, rawConditionId, endDate } of getTrackedMarkets()) {
         if (resolvedMarkets.has(reducedKey)) continue;
+        // Resolution-time gate FIRST (no RPC): a timed market can't resolve before its endDate, so a
+        // pre-endDate market costs zero chain calls. Open-ended markets (no endDate) fall through.
+        if (endDate && nowSec < endDate) continue;
+        // Backoff gate: skip BOTH eth_calls until this market's next scheduled check.
+        const bo = _settleBackoff.get(reducedKey);
+        if (bo && nowMs < bo.nextAt) continue;
         try {
-          const resolvedAt: bigint = await vault.marketResolvedAt(reducedKey);
-          if (resolvedAt > 0n) {
-            resolvedMarkets.add(reducedKey); // already resolved on-chain — nothing to do
-            continue;
+          // Per-market on-chain resolved check — only when the index seed isn't fresh (else the seed
+          // already told us which markets are resolved, with no eth_call).
+          if (!seedFresh) {
+            const resolvedAt: bigint = await vault.marketResolvedAt(reducedKey);
+            if (resolvedAt > 0n) {
+              resolvedMarkets.add(reducedKey); // already resolved on-chain — nothing to do
+              _settleBackoff.delete(reducedKey);
+              continue;
+            }
           }
-          // Resolution-time gate: a timed market (crypto/sports) can't resolve before its endDate, so
-          // don't bother CTF until then. Open-ended markets (endDate null/unknown) are checked every tick.
-          if (endDate && nowSec < endDate) continue;
 
           // Prefer the stored raw conditionId; if it's just the reduced key (resolveToken missed at bet
           // time), fall back to the registry. Without the real conditionId, CTF can't be queried.
           const raw = rawConditionId && rawConditionId !== reducedKey ? rawConditionId : (conditionIdForKey(reducedKey) ?? rawConditionId);
-          if (!raw || raw === reducedKey) continue;
+          if (!raw || raw === reducedKey) { backoffMarket(reducedKey, nowMs); continue; }
 
           const denominator: bigint = await ctf.payoutDenominator(raw);
-          if (denominator === 0n) continue; // not finalized on CTF yet
+          if (denominator === 0n) { backoffMarket(reducedKey, nowMs); continue; } // not finalized on CTF yet
 
           logger.info({ reducedKey, rawConditionId: raw }, "poll: market resolved on CTF — running settlement");
           await handleResolution(provider, wallet, raw, await provider.getBlockNumber());
           resolvedMarkets.add(reducedKey);
+          _settleBackoff.delete(reducedKey);
         } catch (err) {
           logger.error({ err, reducedKey }, "poll: settlement check failed for market");
+          backoffMarket(reducedKey, nowMs);
         }
       }
     } catch (err) {

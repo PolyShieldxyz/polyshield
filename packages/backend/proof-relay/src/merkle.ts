@@ -69,6 +69,16 @@ function isRateLimit(err: unknown): boolean {
  * (the merkle scan pages via getLogsChunked instead).
  */
 export class RetryingJsonRpcProvider extends ethers.JsonRpcProvider {
+  // `staticNetwork: true` detects the chain ONCE and treats it as fixed, so ethers stops re-issuing
+  // `eth_chainId` to re-validate the network around operations. The chain never changes under us.
+  constructor(
+    url?: string | ethers.FetchRequest,
+    network?: ethers.Networkish,
+    options?: ethers.JsonRpcApiProviderOptions,
+  ) {
+    super(url, network, { staticNetwork: true, ...options });
+  }
+
   async send(method: string, params: Array<unknown> | Record<string, unknown>): Promise<unknown> {
     let attempt = 0;
     for (;;) {
@@ -84,6 +94,32 @@ export class RetryingJsonRpcProvider extends ethers.JsonRpcProvider {
       }
     }
   }
+}
+
+// Shared, short-TTL cache of eth_blockNumber. The merkle cache and the event index each poll for the
+// chain head on their own timer; before this they issued a separate getBlockNumber per loop per tick.
+// Coalescing them behind one cached read (and one in-flight promise) removes the duplicate head calls —
+// a few seconds of staleness only delays indexing slightly, and both loops already lag by CONFIRMATIONS.
+let _headValue = 0;
+let _headAt = 0;
+let _headInFlight: Promise<number> | null = null;
+const HEAD_TTL_MS = Number(process.env.BLOCK_HEAD_TTL_MS ?? "5000");
+
+export async function getCachedBlockNumber(provider: ethers.JsonRpcProvider): Promise<number> {
+  const now = Date.now();
+  if (now - _headAt < HEAD_TTL_MS && _headValue > 0) return _headValue;
+  if (_headInFlight) return _headInFlight;
+  _headInFlight = provider
+    .getBlockNumber()
+    .then((bn) => {
+      _headValue = bn;
+      _headAt = Date.now();
+      return bn;
+    })
+    .finally(() => {
+      _headInFlight = null;
+    });
+  return _headInFlight;
 }
 
 /**

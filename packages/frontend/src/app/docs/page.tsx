@@ -195,7 +195,7 @@ export default function DocsPage() {
                 to preserve the original look. */}
             {SECTIONS[sec].map(({ title }) => (
               <button key={title} type="button" onClick={() => { setSection(sec); setPage(title) }}
-                style={{ display: 'block', width: '100%', textAlign: 'left', border: 'none', cursor: 'pointer', padding: '6px 10px', borderRadius: 5, fontSize: 13, fontFamily: 'inherit', color: page === title && section === sec ? 'var(--cyan)' : 'var(--text-2)', background: page === title && section === sec ? 'oklch(0.82 0.13 210 / 0.08)' : 'transparent' }}>
+                style={{ display: 'block', width: '100%', textAlign: 'left', border: 'none', cursor: 'pointer', padding: '6px 10px', borderRadius: 5, fontSize: 13, fontFamily: 'inherit', color: page === title && section === sec ? 'var(--cyan)' : 'var(--text-2)', background: page === title && section === sec ? 'oklch(0.82 0.13 85 / 0.08)' : 'transparent' }}>
                 {title}
               </button>
             ))}

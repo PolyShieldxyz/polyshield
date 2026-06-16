@@ -288,7 +288,8 @@ export default function WithdrawPage() {
         </Link>
       </div>
 
-      <div style={{ padding: 24, maxWidth: 740 }}>
+      {/* LAYOUT-001: center the focused form instead of hugging the left edge. */}
+      <div style={{ padding: 24, maxWidth: 600, margin: '0 auto' }}>
         <div className="panel" style={{ padding: 20 }}>
           <div className="micro">AVAILABLE TO WITHDRAW</div>
           <div className="num mt-2" style={{ fontSize: 34, color: 'var(--green)' }}>
@@ -339,7 +340,7 @@ export default function WithdrawPage() {
               </div>
             )}
             {!invalidAmount && fundsDeployed && (
-              <div className="small mt-1" style={{ color: 'var(--yellow, #f0a500)', fontSize: 11 }}>
+              <div className="small mt-1" style={{ color: 'var(--amber)', fontSize: 11 }}>
                 Vault funds are currently deployed to Polymarket. Check back after open markets settle.
               </div>
             )}

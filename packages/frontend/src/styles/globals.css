@@ -2,42 +2,55 @@
    src/app/layout.tsx). The previous Google Fonts CDN @import was removed because
    it leaked visitor IP/Referer to a third party and render-blocked first paint. */
 
-/* PolyShield — design tokens */
+/* PolyShield — design tokens · palette "P5 Midnight & Gold"
+   Dark indigo-ink canvas. GOLD (--accent) is the single INTERACTIVE/value color (links, buttons,
+   focus, balances). INDIGO (--brand) is brand + cryptography/proof only (pills, VERIFIED, gradients)
+   — never a CTA. Gold and indigo are near-complementary; the role split is what keeps the two-accent
+   system disciplined (only gold ever means "act"). --green/--red are SEMANTIC only; --amber (warning)
+   was nudged to orange so it never reads as the gold brand. See docs/style-and-palette-research-2026-06-16.md.
+   Legacy --cyan* and --violet* names are kept as aliases so existing references keep working. */
 :root {
-  --bg: #06080B;
-  --bg-1: #0A0D12;
-  /* Elevation: wider value steps between surfaces so stacked panels/cards read as
-     distinct layers instead of one flat plane. Pair with --line + --shadow-1. */
-  --surface: #0E141C;
-  --surface-1: #161D29;
-  --surface-2: #202836;
+  /* Neutrals — cool indigo ink (hue 280). Wider value steps so stacked surfaces read as layers. */
+  --bg: oklch(0.15 0.016 280);
+  --bg-1: oklch(0.175 0.016 280);
+  --surface: oklch(0.205 0.018 280);
+  --surface-1: oklch(0.25 0.020 280);
+  --surface-2: oklch(0.30 0.022 280);
   --line: rgba(255, 255, 255, 0.06);
   --line-strong: rgba(255, 255, 255, 0.12);
   --line-bright: rgba(255, 255, 255, 0.22);
-  --text: #E6EAF0;
-  --text-1: #B7C0CC;
-  /* Contrast: --text-2/--text-3 were below WCAG AA on the darkest surfaces. Lightened
-     so secondary labels and meta text stay legible at small sizes. */
-  --text-2: #8B94A2;
-  --text-3: #69717F;
+  --text: oklch(0.96 0.008 280);
+  --text-1: oklch(0.85 0.015 280);
+  /* Contrast (A11Y-001): --text-2/--text-3 must stay legible at small sizes. Reserve --text-3 for
+     genuinely secondary meta; use --text-2 for any small essential label. Verify with a contrast tool. */
+  --text-2: oklch(0.69 0.022 280);
+  --text-3: oklch(0.58 0.022 280);
 
-  /* Accent discipline: --cyan is the single INTERACTIVE/brand action color (links, buttons,
-     focus). --cyan-soft is a calmer fill for large surfaces/data so the UI doesn't read as
-     all-neon. --violet is brand/gradient only. --green/--red/--amber are SEMANTIC only
-     (gain/loss, success/error, warning) — do not use them decoratively. */
-  --cyan: oklch(0.82 0.13 210);
-  --cyan-soft: oklch(0.80 0.09 210);
-  --cyan-dim: oklch(0.55 0.10 210);
-  --cyan-glow: oklch(0.82 0.13 210 / 0.18);
-  --violet: oklch(0.70 0.15 290);
-  --violet-dim: oklch(0.50 0.13 290);
-  /* Semantic values are kept identical to the inline oklch() literals used across the app
-     components, so the token and any hardcoded usage render the same color (one source of truth). */
+  /* GOLD — interactive / value. The single "act / your money" accent. */
+  --accent: oklch(0.80 0.11 85);
+  --accent-press: oklch(0.72 0.11 85);
+  --accent-soft: oklch(0.80 0.11 85 / 0.14);
+  --accent-line: oklch(0.80 0.11 85 / 0.38);
+  --on-accent: oklch(0.22 0.04 85);     /* dark text on gold fills */
+  /* INDIGO — brand / cryptography / proof. Never a primary CTA. */
+  --brand: oklch(0.74 0.15 280);
+  --brand-soft: oklch(0.74 0.15 280 / 0.16);
+  --brand-line: oklch(0.74 0.15 280 / 0.40);
+
+  /* Legacy aliases (kept so existing var(--cyan)/var(--violet) refs + .btn-cyan/.pill-cyan/.text-cyan/
+     .pill-violet keep working). --cyan-soft stays an OPAQUE calmer fill (do NOT alias to --accent-soft). */
+  --cyan: var(--accent);
+  --cyan-soft: oklch(0.80 0.09 85);
+  --cyan-dim: oklch(0.55 0.10 85);
+  --cyan-glow: oklch(0.80 0.11 85 / 0.18);
+  --violet: var(--brand);
+  --violet-dim: oklch(0.50 0.13 280);
+  /* Semantic. --amber nudged to orange (hue 55) so warning is distinct from the gold accent. */
   --green: oklch(0.78 0.16 152);
   --red: oklch(0.70 0.18 25);
-  --amber: oklch(0.82 0.14 70);
-  /* Keyboard focus ring (A11Y) — applied below to interactive elements. */
-  --focus: oklch(0.82 0.13 210 / 0.65);
+  --amber: oklch(0.80 0.14 55);
+  /* Keyboard focus ring (A11Y) — gold, applied below to interactive elements. */
+  --focus: oklch(0.80 0.11 85 / 0.65);
 
   --r-1: 4px;
   --r-2: 6px;
@@ -109,24 +122,24 @@ textarea:focus-visible, [role="link"]:focus-visible, [tabindex]:focus-visible {
 .btn:disabled { opacity: 0.5; cursor: not-allowed; }
 .btn-primary { background: var(--text); color: #000; border-color: var(--text); font-weight: 500; }
 .btn-primary:hover { background: #fff; }
-/* Cyan brand CTA — reserved for the single hero/launch action so the brand color
-   does real work at the top of the funnel. Workhorse confirms stay .btn-primary (white). */
-.btn-brand { background: var(--cyan); color: #04161c; border-color: var(--cyan); font-weight: 500; }
-.btn-brand:hover { background: oklch(0.86 0.13 210); border-color: oklch(0.86 0.13 210); box-shadow: 0 0 0 3px var(--cyan-glow); }
+/* Gold brand CTA — reserved for the single hero/launch action so the accent does real
+   work at the top of the funnel. Workhorse confirms stay .btn-primary (white). */
+.btn-brand { background: var(--accent); color: var(--on-accent); border-color: var(--accent); font-weight: 500; }
+.btn-brand:hover { background: oklch(0.86 0.13 85); border-color: oklch(0.86 0.13 85); box-shadow: 0 0 0 3px var(--cyan-glow); }
 .btn-ghost { border-color: transparent; }
 .btn-ghost:hover { background: rgba(255,255,255,0.04); border-color: var(--line); }
 .btn-sm { padding: 6px 10px; font-size: 12px; }
-.btn-cyan { background: oklch(0.82 0.13 210 / 0.10); border-color: oklch(0.82 0.13 210 / 0.35); color: var(--cyan); }
-.btn-cyan:hover { background: oklch(0.82 0.13 210 / 0.15); border-color: oklch(0.82 0.13 210 / 0.55); }
+.btn-cyan { background: oklch(0.82 0.13 85 / 0.10); border-color: oklch(0.82 0.13 85 / 0.35); color: var(--cyan); }
+.btn-cyan:hover { background: oklch(0.82 0.13 85 / 0.15); border-color: oklch(0.82 0.13 85 / 0.55); }
 
 /* Pills / chips */
 .pill { display: inline-flex; align-items: center; gap: 6px; padding: 4px 8px; border-radius: 999px; border: 1px solid var(--line-strong); font-size: 11px; color: var(--text-1); font-family: var(--mono); letter-spacing: 0.04em; }
 .pill .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--cyan); box-shadow: 0 0 8px var(--cyan); }
 .pill-soft { border-color: var(--line); color: var(--text-2); }
-.pill-cyan { color: var(--cyan); border-color: oklch(0.82 0.13 210 / 0.35); background: oklch(0.82 0.13 210 / 0.06); }
-.pill-violet { color: var(--violet); border-color: oklch(0.70 0.15 290 / 0.35); background: oklch(0.70 0.15 290 / 0.06); }
+.pill-cyan { color: var(--cyan); border-color: oklch(0.82 0.13 85 / 0.35); background: oklch(0.82 0.13 85 / 0.06); }
+.pill-violet { color: var(--violet); border-color: oklch(0.70 0.15 280 / 0.35); background: oklch(0.70 0.15 280 / 0.06); }
 .pill-green { color: var(--green); border-color: oklch(0.78 0.16 152 / 0.35); background: oklch(0.78 0.16 152 / 0.06); }
-.pill-amber { color: var(--amber); border-color: oklch(0.82 0.14 70 / 0.35); background: oklch(0.82 0.14 70 / 0.06); }
+.pill-amber { color: var(--amber); border-color: oklch(0.82 0.14 55 / 0.35); background: oklch(0.82 0.14 55 / 0.06); }
 .pill-red { color: var(--red); border-color: oklch(0.70 0.18 25 / 0.35); background: oklch(0.70 0.18 25 / 0.06); }
 
 /* CTA button rows (landing hero + closing CTA). Wraps on tablet, stacks to
@@ -140,6 +153,29 @@ textarea:focus-visible, [role="link"]:focus-visible, [tabindex]:focus-visible {
 /* Cards / panels */
 .panel { background: var(--surface); border: 1px solid var(--line); border-radius: var(--r-3); }
 .panel-strong { background: var(--surface-1); border: 1px solid var(--line-strong); border-radius: var(--r-3); }
+
+/* ── Material system (P5) — depth reserved for CHROME; data surfaces stay flat. ──────────────
+   .glass  = frosted translucent — top nav, modal panels, hero overlays, toasts (static bg only).
+   .elev   = opaque raised — dropdowns, popovers, the active/selected card, modal base.
+   .editorial-head = a confident accent rule on section eyebrows (the differentiation signature).
+   Do NOT put .glass behind scrolling data (contrast + blur perf). prefers-reduced-transparency
+   falls back to a solid surface for motion/perf-sensitive users and low-end GPUs. */
+.glass {
+  background: color-mix(in oklab, var(--surface) 64%, transparent);
+  -webkit-backdrop-filter: blur(18px); backdrop-filter: blur(18px);
+  border: 1px solid var(--line-strong);
+  box-shadow: inset 0 1px 0 rgba(255,255,255,0.08);
+}
+.elev {
+  background: var(--surface-1);
+  border: 1px solid var(--line);
+  box-shadow: 0 14px 40px rgba(0,0,0,0.5), inset 0 1px 0 rgba(255,255,255,0.05);
+}
+/* Editorial signature on section heads — an indigo (brand/structure) rule, not gold (gold = action). */
+.editorial-head { border-left: 3px solid var(--brand); padding-left: 14px; }
+@media (prefers-reduced-transparency: reduce) {
+  .glass { background: var(--surface); -webkit-backdrop-filter: none; backdrop-filter: none; }
+}
 /* Browsable card: lifts and brightens its edge to cyan on hover so a grid of these
    reads as an interactive surface rather than a wall of static divs. */
 .market-card { transition: border-color .15s ease, transform .15s ease, box-shadow .15s ease; }
@@ -157,7 +193,9 @@ textarea:focus-visible, [role="link"]:focus-visible, [tabindex]:focus-visible {
 .container { max-width: 1320px; margin: 0 auto; padding: 0 32px; }
 
 /* Top nav */
-.topnav { position: sticky; top: 0; z-index: 50; height: 56px; backdrop-filter: blur(12px); background: rgba(6,8,11,0.72); border-bottom: 1px solid var(--line); }
+/* Glass chrome (P5): translucent over the page, falls back to solid via prefers-reduced-transparency. */
+.topnav { position: sticky; top: 0; z-index: 50; height: 56px; -webkit-backdrop-filter: blur(16px); backdrop-filter: blur(16px); background: color-mix(in oklab, var(--bg) 72%, transparent); border-bottom: 1px solid var(--line); }
+@media (prefers-reduced-transparency: reduce) { .topnav { background: var(--bg); -webkit-backdrop-filter: none; backdrop-filter: none; } }
 .topnav-inner { height: 100%; display: flex; align-items: center; justify-content: space-between; padding: 0 28px; }
 .nav-links { display: flex; gap: 4px; }
 .nav-link { padding: 6px 10px; font-size: 13px; color: var(--text-1); border-radius: var(--r-1); cursor: pointer; }
@@ -166,6 +204,10 @@ textarea:focus-visible, [role="link"]:focus-visible, [tabindex]:focus-visible {
 
 /* App layout */
 .app-shell { min-height: calc(100vh - 56px); }
+
+/* LAYOUT-001: shared shell for focused single-column flows (withdraw, settings, etc.) so they
+   sit centered with consistent width instead of hugging the left edge against a large void. */
+.flow-center { max-width: 600px; margin: 48px auto; padding: 0 24px; }
 
 /* Skeleton loader: a real left-to-right shimmer (the old code referenced a
    non-existent `pulse` keyframe, so skeletons sat at flat 0.5 opacity and never
@@ -203,13 +245,19 @@ textarea:focus-visible, [role="link"]:focus-visible, [tabindex]:focus-visible {
   to { stroke-dashoffset: -40; }
 }
 @keyframes spin { to { transform: rotate(360deg); } }
+/* Logo mark (Logo animate): the gold inclusion path draws on leaf→root, then the leaf "verifies".
+   prefers-reduced-motion (below) snaps both to their final visible state — no broken frame. */
+@keyframes logo-draw { from { stroke-dashoffset: 1; } to { stroke-dashoffset: 0; } }
+@keyframes logo-verify { 0% { opacity: 0; } 55% { opacity: 0; } 70% { opacity: 1; } 82% { opacity: 0.45; } 100% { opacity: 1; } }
+.logo-draw { stroke-dasharray: 1; stroke-dashoffset: 1; animation: logo-draw 0.9s ease forwards; }
+.logo-verify { animation: logo-verify 1.5s ease forwards; }
 @keyframes counter-tick { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: translateY(0); } }
 .tick { animation: counter-tick .3s ease forwards; }
 
 .scanline { position: relative; overflow: hidden; }
 .scanline::after {
   content: ""; position: absolute; inset: 0;
-  background: linear-gradient(180deg, transparent 40%, oklch(0.82 0.13 210 / 0.035) 50%, transparent 60%);
+  background: linear-gradient(180deg, transparent 40%, oklch(0.82 0.13 85 / 0.035) 50%, transparent 60%);
   background-size: 100% 240px;
   animation: scan 6s linear infinite;
   pointer-events: none;
@@ -222,8 +270,16 @@ textarea:focus-visible, [role="link"]:focus-visible, [tabindex]:focus-visible {
 .tbl td { padding: 12px 14px; border-bottom: 1px solid var(--line); color: var(--text-1); }
 .tbl tr:hover td { background: rgba(255,255,255,0.015); }
 
+/* Mobile/tablet nav menu button (NAV-001). Hidden on desktop; revealed at the same
+   breakpoint that hides the inline .nav-links so the primary sections stay reachable. */
+.nav-menu-btn { display: none; }
+.nav-menu-panel { position: absolute; top: calc(100% + 8px); padding: 8px; min-width: 200px; box-shadow: var(--shadow-2); z-index: 60; }
+.nav-menu-panel .nav-link { display: block; padding: 10px 12px; font-size: 14px; border-radius: var(--r-2); }
+.nav-menu-divider { height: 1px; background: var(--line); margin: 6px 4px; }
+
 @media (max-width: 1180px) {
   .nav-links { display: none; }
+  .nav-menu-btn { display: inline-flex; }
   .topnav-inner { padding: 0 18px; gap: 12px; }
 }
 
@@ -240,7 +296,7 @@ textarea:focus-visible, [role="link"]:focus-visible, [tabindex]:focus-visible {
 ::-webkit-scrollbar-thumb:hover { background: rgba(255,255,255,0.12); }
 
 /* Selection */
-::selection { background: oklch(0.82 0.13 210 / 0.3); color: white; }
+::selection { background: oklch(0.82 0.13 85 / 0.3); color: white; }
 
 /* Utility */
 .row { display: flex; align-items: center; }

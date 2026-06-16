@@ -281,7 +281,24 @@ export function usePortfolioState(wallet?: `0x${string}`): {
  */
 export function useChainResetDetector(): boolean {
   const [justReset, setJustReset] = useState(false)
-  const { data: blockNumber } = useBlockNumber({ watch: true, query: { refetchInterval: 3000 } })
+  // Chain resets only happen on the local dev chain (Anvil reseeds on every `dev:mock`). On Polygon
+  // the height never goes backwards, so block-watching there is pure wasted RPC. Gate the poll to dev
+  // AND pause it while the tab is hidden — a background tab needn't poll at all. (The genesis-hash
+  // check below is the primary reset signal and runs once via publicClient regardless.)
+  const isDev = process.env.NEXT_PUBLIC_DEV_MODE === 'true'
+  const [tabVisible, setTabVisible] = useState(true)
+  useEffect(() => {
+    if (typeof document === 'undefined') return
+    const onVis = () => setTabVisible(!document.hidden)
+    onVis()
+    document.addEventListener('visibilitychange', onVis)
+    return () => document.removeEventListener('visibilitychange', onVis)
+  }, [])
+  const watchActive = isDev && tabVisible
+  const { data: blockNumber } = useBlockNumber({
+    watch: watchActive,
+    query: { enabled: isDev, refetchInterval: watchActive ? 12000 : (false as const) },
+  })
   const { disconnect } = useDisconnect()
   const publicClient = usePublicClient()
   const justResetRef = useRef(false)

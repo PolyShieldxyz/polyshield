@@ -85,8 +85,11 @@ export function Modal({ open, title, eyebrow = 'APP', onClose, children, width =
         position: 'fixed',
         inset: 0,
         zIndex: 120,
-        background: 'rgba(6, 8, 11, 0.74)',
-        backdropFilter: 'blur(6px)',
+        // P5 glass scrim. Dialog itself stays a solid .panel — modal content is dense money-data
+        // where legibility must win over translucency.
+        background: 'color-mix(in oklab, var(--bg) 74%, transparent)',
+        backdropFilter: 'blur(8px)',
+        WebkitBackdropFilter: 'blur(8px)',
         display: 'flex',
         alignItems: 'center',
         justifyContent: 'center',

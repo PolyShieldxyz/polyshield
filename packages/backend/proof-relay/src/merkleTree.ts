@@ -22,7 +22,7 @@ import Database from "better-sqlite3";
 import { ethers } from "ethers";
 import { poseidon2 } from "poseidon-lite";
 import pino from "pino";
-import { getLogsChunked } from "./merkle";
+import { getLogsChunked, getCachedBlockNumber } from "./merkle";
 
 const logger = pino({ name: "merkle-cache" });
 
@@ -31,7 +31,10 @@ const LEAF_INSERTED_TOPIC = ethers.id("LeafInserted(uint32,bytes32,bytes32)");
 const LEAF_INSERTED_ABI = new ethers.Interface([
   "event LeafInserted(uint32 indexed leafIndex, bytes32 leaf, bytes32 newRoot)",
 ]);
-const POLL_MS = Number(process.env.MERKLE_CACHE_POLL_MS ?? "15000");
+// Steady-state cadence is a SLOW safety reconcile (C1): the relay calls syncNow() right after it
+// confirms a leaf-inserting tx, and /merkle-path also syncs on a cache miss. This timer mainly exists
+// to catch user deposit() txs (not relayed by us) and as a divergence backstop.
+const POLL_MS = Number(process.env.MERKLE_CACHE_RECONCILE_MS ?? "600000");
 // Small confirmation buffer so a shallow Polygon reorg can't poison the cache. Leaves newer than this
 // are served by the on-the-fly fallback until they confirm.
 const CONFIRMATIONS = Number(process.env.MERKLE_CACHE_CONFIRMATIONS ?? "3");
@@ -180,7 +183,7 @@ export class CachedMerkleTree {
    * historical seed on a tiny-getLogs-limit RPC) RESUMES from the last window instead of restarting. */
   private async sync(): Promise<void> {
     if (!this.consistent) return; // already diverged — API is using the on-chain fallback
-    const head = await this.provider.getBlockNumber();
+    const head = await getCachedBlockNumber(this.provider);
     const target = head - CONFIRMATIONS;
     if (target <= this.lastBlock) return;
 

@@ -9,6 +9,9 @@ import { Hash } from '@/components/ui/Hash'
 import { NETWORK_STATUS } from '@/lib/brand'
 
 /* ---------- Hero visual: animated cryptographic graph ---------- */
+// Round to 2 decimals so SSR (Node) and client (browser) serialize identical SVG coords.
+const round2 = (n: number) => Math.round(n * 100) / 100
+
 function HeroVisual() {
   const w = 640, h = 520
   const nodes = useMemo(() => {
@@ -18,7 +21,10 @@ function HeroVisual() {
     rings.forEach(({ r, n }, ri) => {
       for (let i = 0; i < n; i++) {
         const a = (i / n) * Math.PI * 2 + ri * 0.2
-        arr.push({ x: w / 2 + Math.cos(a) * r, y: h / 2 + Math.sin(a) * r, kind: ri === 2 ? 'depositor' : 'note', ring: ri })
+        // BUG-001: round coordinates to a fixed precision. Math.cos/Math.sin are not guaranteed
+        // bit-identical between the SSR engine (Node) and the browser, so the raw floats produced
+        // mismatched SVG attribute strings on hydration. Rounding makes both passes emit the same.
+        arr.push({ x: round2(w / 2 + Math.cos(a) * r), y: round2(h / 2 + Math.sin(a) * r), kind: ri === 2 ? 'depositor' : 'note', ring: ri })
       }
     })
     return arr
@@ -43,8 +49,15 @@ function HeroVisual() {
 
   const [pulse, setPulse] = useState(0)
   useEffect(() => {
-    const id = setInterval(() => setPulse((p) => (p + 1) % nodes.length), 280)
-    return () => clearInterval(id)
+    // PERF-001 / A11Y: don't re-render every 280ms in a hidden tab, and honor reduced-motion.
+    if (typeof window !== 'undefined' && window.matchMedia?.('(prefers-reduced-motion: reduce)').matches) return
+    let id: ReturnType<typeof setInterval> | undefined
+    const start = () => { if (id === undefined) id = setInterval(() => setPulse((p) => (p + 1) % nodes.length), 280) }
+    const stop = () => { if (id !== undefined) { clearInterval(id); id = undefined } }
+    const onVisibility = () => (document.hidden ? stop() : start())
+    start()
+    document.addEventListener('visibilitychange', onVisibility)
+    return () => { stop(); document.removeEventListener('visibilitychange', onVisibility) }
   }, [nodes.length])
 
   return (
@@ -52,9 +65,9 @@ function HeroVisual() {
       <svg viewBox={`0 0 ${w} ${h}`} width="100%" height="100%">
         <defs>
           <radialGradient id="vaultg" cx="0.5" cy="0.5" r="0.5">
-            <stop offset="0" stopColor="oklch(0.82 0.13 210)" stopOpacity="0.55" />
-            <stop offset="0.6" stopColor="oklch(0.82 0.13 210)" stopOpacity="0.08" />
-            <stop offset="1" stopColor="oklch(0.82 0.13 210)" stopOpacity="0" />
+            <stop offset="0" stopColor="oklch(0.82 0.13 85)" stopOpacity="0.55" />
+            <stop offset="0.6" stopColor="oklch(0.82 0.13 85)" stopOpacity="0.08" />
+            <stop offset="1" stopColor="oklch(0.82 0.13 85)" stopOpacity="0" />
           </radialGradient>
         </defs>
         {[60, 130, 200, 260].map((r) => (
@@ -64,15 +77,15 @@ function HeroVisual() {
         {lines.map(([a, b], i) => {
           const na = nodes[a], nb = nodes[b]
           const active = a === pulse || b === pulse
-          return <line key={i} x1={na.x} y1={na.y} x2={nb.x} y2={nb.y} stroke={active ? 'oklch(0.82 0.13 210)' : 'rgba(255,255,255,0.07)'} strokeWidth={active ? 1 : 0.6} />
+          return <line key={i} x1={na.x} y1={na.y} x2={nb.x} y2={nb.y} stroke={active ? 'oklch(0.82 0.13 85)' : 'rgba(255,255,255,0.07)'} strokeWidth={active ? 1 : 0.6} />
         })}
         {nodes.map((n, i) => {
           if (n.kind === 'vault') {
             return (
               <g key={i}>
-                <rect x={n.x - 22} y={n.y - 22} width="44" height="44" rx="8" fill="rgba(255,255,255,0.06)" stroke="oklch(0.82 0.13 210)" strokeWidth="1" />
-                <rect x={n.x - 14} y={n.y - 14} width="28" height="28" rx="4" fill="none" stroke="oklch(0.82 0.13 210)" strokeWidth="0.8" opacity="0.6" />
-                <circle cx={n.x} cy={n.y} r="3" fill="oklch(0.85 0.13 210)" />
+                <rect x={n.x - 22} y={n.y - 22} width="44" height="44" rx="8" fill="rgba(255,255,255,0.06)" stroke="oklch(0.82 0.13 85)" strokeWidth="1" />
+                <rect x={n.x - 14} y={n.y - 14} width="28" height="28" rx="4" fill="none" stroke="oklch(0.82 0.13 85)" strokeWidth="0.8" opacity="0.6" />
+                <circle cx={n.x} cy={n.y} r="3" fill="oklch(0.85 0.13 85)" />
               </g>
             )
           }
@@ -80,8 +93,8 @@ function HeroVisual() {
           const r = n.kind === 'depositor' ? 4 : 2.5
           return (
             <g key={i}>
-              {active && <circle cx={n.x} cy={n.y} r={r + 6} fill="oklch(0.82 0.13 210 / 0.18)" />}
-              <circle cx={n.x} cy={n.y} r={r} fill={active ? 'oklch(0.85 0.13 210)' : n.kind === 'depositor' ? 'rgba(255,255,255,0.5)' : 'rgba(255,255,255,0.25)'} />
+              {active && <circle cx={n.x} cy={n.y} r={r + 6} fill="oklch(0.82 0.13 85 / 0.18)" />}
+              <circle cx={n.x} cy={n.y} r={r} fill={active ? 'oklch(0.85 0.13 85)' : n.kind === 'depositor' ? 'rgba(255,255,255,0.5)' : 'rgba(255,255,255,0.25)'} />
             </g>
           )
         })}
@@ -103,7 +116,7 @@ function HeroTape() {
     ['VAULT TX', '0xVAULT…EOA', 'YES · MARKET-C', '500 USDC', 'FILLED'],
   ]
   return (
-    <div className="panel" style={{ padding: 0, overflow: 'hidden' }}>
+    <div className="panel glass" style={{ padding: 0, overflow: 'hidden' }}>
       <div className="row hairline-b" style={{ padding: '10px 16px', justifyContent: 'space-between' }}>
         <div className="micro">Simulated vault tape</div>
         <div className="micro" style={{ color: 'var(--text-2)' }}>● SIMULATED</div>
@@ -118,7 +131,8 @@ function HeroTape() {
               <td style={{ color: 'var(--text)' }}>{r[2]}</td>
               <td className="num">{r[3]}</td>
               <td>
-                <span className={`pill ${r[4] === 'VERIFIED' || r[4] === 'FILLED' || r[4] === 'CREDIT' ? 'pill-cyan' : 'pill-amber'}`} style={{ fontSize: 10 }}>
+                {/* P5: VERIFIED = proof → indigo (brand); FILLED/CREDIT = value → gold; else warning. */}
+                <span className={`pill ${r[4] === 'VERIFIED' ? 'pill-violet' : r[4] === 'FILLED' || r[4] === 'CREDIT' ? 'pill-cyan' : 'pill-amber'}`} style={{ fontSize: 10 }}>
                   {r[4]}
                 </span>
               </td>
@@ -139,7 +153,7 @@ const FEATURES = [
       <svg viewBox="0 0 320 160" width="100%">
         <defs>
           <marker id="arr" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="5" markerHeight="5" orient="auto">
-            <path d="M0 0 L8 4 L0 8 z" fill="oklch(0.82 0.13 210 / 0.7)" />
+            <path d="M0 0 L8 4 L0 8 z" fill="oklch(0.82 0.13 85 / 0.7)" />
           </marker>
         </defs>
         {[40, 80, 120].map((y, i) => (
@@ -147,13 +161,13 @@ const FEATURES = [
             <rect x="10" y={y - 14} width="80" height="28" rx="4" fill="rgba(255,255,255,0.04)" stroke="rgba(255,255,255,0.14)" />
             <text x="50" y={y - 2} textAnchor="middle" fontFamily="Inter" fontSize="10" fill="#B7C0CC">Depositor {i + 1}</text>
             <text x="50" y={y + 10} textAnchor="middle" fontFamily="JetBrains Mono" fontSize="8" fill="rgba(255,255,255,0.4)">0x{(i + 1).toString().padStart(4, '0')}…</text>
-            <line x1="90" y1={y} x2="140" y2="80" stroke="oklch(0.82 0.13 210 / 0.35)" strokeDasharray="3 3" markerEnd="url(#arr)" />
+            <line x1="90" y1={y} x2="140" y2="80" stroke="oklch(0.82 0.13 85 / 0.35)" strokeDasharray="3 3" markerEnd="url(#arr)" />
           </g>
         ))}
-        <rect x="140" y="58" width="80" height="44" rx="6" fill="rgba(255,255,255,0.04)" stroke="oklch(0.82 0.13 210)" />
+        <rect x="140" y="58" width="80" height="44" rx="6" fill="rgba(255,255,255,0.04)" stroke="oklch(0.82 0.13 85)" />
         <text x="180" y="78" textAnchor="middle" fontFamily="Inter" fontSize="11" fill="#E6EAF0">Vault</text>
-        <text x="180" y="94" textAnchor="middle" fontFamily="JetBrains Mono" fontSize="9" fill="oklch(0.82 0.13 210)">0x7a4f</text>
-        <line x1="220" y1="80" x2="270" y2="80" stroke="oklch(0.82 0.13 210)" markerEnd="url(#arr)" />
+        <text x="180" y="94" textAnchor="middle" fontFamily="JetBrains Mono" fontSize="9" fill="oklch(0.82 0.13 85)">0x7a4f</text>
+        <line x1="220" y1="80" x2="270" y2="80" stroke="oklch(0.82 0.13 85)" markerEnd="url(#arr)" />
         <rect x="270" y="58" width="44" height="44" rx="6" fill="rgba(255,255,255,0.04)" stroke="rgba(255,255,255,0.18)" />
         <text x="292" y="82" textAnchor="middle" fontFamily="Inter" fontSize="10" fill="#B7C0CC">PM</text>
         <text x="180" y="148" textAnchor="middle" fontFamily="JetBrains Mono" fontSize="9" fill="rgba(255,255,255,0.35)">which depositor? unknowable.</text>
@@ -167,13 +181,13 @@ const FEATURES = [
       <svg viewBox="0 0 320 160" width="100%">
         <rect x="10" y="60" width="80" height="40" rx="4" fill="rgba(255,255,255,0.04)" stroke="rgba(255,255,255,0.14)" />
         <text x="50" y="78" textAnchor="middle" fontFamily="Inter" fontSize="10" fill="#B7C0CC">Browser</text>
-        <text x="50" y="92" textAnchor="middle" fontFamily="JetBrains Mono" fontSize="8" fill="oklch(0.82 0.13 210)">prove(π)</text>
-        <line x1="90" y1="80" x2="130" y2="80" stroke="oklch(0.82 0.13 210 / 0.5)" strokeDasharray="3 3" />
+        <text x="50" y="92" textAnchor="middle" fontFamily="JetBrains Mono" fontSize="8" fill="oklch(0.82 0.13 85)">prove(π)</text>
+        <line x1="90" y1="80" x2="130" y2="80" stroke="oklch(0.82 0.13 85 / 0.5)" strokeDasharray="3 3" />
         <text x="110" y="72" textAnchor="middle" fontFamily="JetBrains Mono" fontSize="8" fill="rgba(255,255,255,0.4)">384B</text>
         <rect x="130" y="60" width="80" height="40" rx="4" fill="rgba(255,255,255,0.04)" stroke="rgba(255,255,255,0.14)" />
         <text x="170" y="78" textAnchor="middle" fontFamily="Inter" fontSize="10" fill="#B7C0CC">Relay</text>
         <text x="170" y="92" textAnchor="middle" fontFamily="JetBrains Mono" fontSize="8" fill="rgba(255,255,255,0.4)">3-hop</text>
-        <line x1="210" y1="80" x2="250" y2="80" stroke="oklch(0.82 0.13 210 / 0.5)" strokeDasharray="3 3" />
+        <line x1="210" y1="80" x2="250" y2="80" stroke="oklch(0.82 0.13 85 / 0.5)" strokeDasharray="3 3" />
         <rect x="250" y="60" width="60" height="40" rx="4" fill="rgba(255,255,255,0.04)" stroke="oklch(0.78 0.16 152)" />
         <text x="280" y="78" textAnchor="middle" fontFamily="Inter" fontSize="10" fill="#E6EAF0">Vault</text>
         <text x="280" y="92" textAnchor="middle" fontFamily="JetBrains Mono" fontSize="8" fill="oklch(0.78 0.16 152)">✓</text>
@@ -206,13 +220,13 @@ const FEATURES = [
     body: 'Every depositor in the vault shares one Polymarket EOA. Every trade you authorize is cryptographically indistinguishable from every other depositor\'s trade. The anonymity set grows with every new depositor.',
     diagram: (
       <svg viewBox="0 0 320 160" width="100%">
-        <circle cx="160" cy="80" r="65" fill="oklch(0.82 0.13 210 / 0.04)" stroke="oklch(0.82 0.13 210 / 0.25)" strokeDasharray="3 4" />
-        <circle cx="160" cy="80" r="40" fill="oklch(0.82 0.13 210 / 0.04)" stroke="oklch(0.82 0.13 210 / 0.25)" strokeDasharray="3 4" />
+        <circle cx="160" cy="80" r="65" fill="oklch(0.82 0.13 85 / 0.04)" stroke="oklch(0.82 0.13 85 / 0.25)" strokeDasharray="3 4" />
+        <circle cx="160" cy="80" r="40" fill="oklch(0.82 0.13 85 / 0.04)" stroke="oklch(0.82 0.13 85 / 0.25)" strokeDasharray="3 4" />
         {Array.from({ length: 36 }, (_, i) => {
           const a = (i / 36) * Math.PI * 2
           const r = 28 + (i % 3) * 18
           const you = i === 11
-          return <circle key={i} cx={160 + Math.cos(a) * r} cy={80 + Math.sin(a) * r} r={you ? 4 : 2.5} fill={you ? 'oklch(0.85 0.13 210)' : 'rgba(255,255,255,0.4)'} />
+          return <circle key={i} cx={160 + Math.cos(a) * r} cy={80 + Math.sin(a) * r} r={you ? 4 : 2.5} fill={you ? 'oklch(0.85 0.13 85)' : 'rgba(255,255,255,0.4)'} />
         })}
         <text x="160" y="154" textAnchor="middle" fontFamily="JetBrains Mono" fontSize="9" fill="rgba(255,255,255,0.4)">depositors · you indistinguishable</text>
       </svg>
@@ -225,11 +239,11 @@ const FEATURES = [
       <svg viewBox="0 0 320 160" width="100%">
         <rect x="10" y="50" width="90" height="60" rx="6" fill="rgba(255,255,255,0.04)" stroke="rgba(255,255,255,0.14)" />
         <text x="55" y="74" textAnchor="middle" fontFamily="Inter" fontSize="10" fill="#E6EAF0">Your browser</text>
-        <text x="55" y="90" textAnchor="middle" fontFamily="JetBrains Mono" fontSize="8" fill="oklch(0.82 0.13 210)">secret = rand()</text>
+        <text x="55" y="90" textAnchor="middle" fontFamily="JetBrains Mono" fontSize="8" fill="oklch(0.82 0.13 85)">secret = rand()</text>
         <text x="55" y="102" textAnchor="middle" fontFamily="JetBrains Mono" fontSize="8" fill="rgba(255,255,255,0.35)">never sent</text>
         <line x1="100" y1="80" x2="130" y2="80" stroke="var(--line-strong)" strokeDasharray="3 3" />
         <text x="115" y="72" textAnchor="middle" fontFamily="JetBrains Mono" fontSize="8" fill="oklch(0.78 0.16 152)">C = H(s,v)</text>
-        <rect x="130" y="50" width="90" height="60" rx="6" fill="rgba(255,255,255,0.04)" stroke="oklch(0.82 0.13 210)" />
+        <rect x="130" y="50" width="90" height="60" rx="6" fill="rgba(255,255,255,0.04)" stroke="oklch(0.82 0.13 85)" />
         <text x="175" y="74" textAnchor="middle" fontFamily="Inter" fontSize="10" fill="#E6EAF0">Vault contract</text>
         <text x="175" y="90" textAnchor="middle" fontFamily="JetBrains Mono" fontSize="8" fill="rgba(255,255,255,0.5)">commitment tree</text>
         <text x="175" y="102" textAnchor="middle" fontFamily="JetBrains Mono" fontSize="8" fill="oklch(0.78 0.16 152)">USDC</text>
@@ -275,7 +289,7 @@ function ArchitectureDiagram() {
             const active = hover === from || hover === to
             return (
               <line key={i} x1={a.x} y1={a.y} x2={b.x} y2={b.y}
-                stroke={active ? 'oklch(0.82 0.13 210 / 0.6)' : 'rgba(255,255,255,0.1)'}
+                stroke={active ? 'oklch(0.82 0.13 85 / 0.6)' : 'rgba(255,255,255,0.1)'}
                 strokeWidth={active ? 1.5 : 1} markerEnd="url(#arche)" />
             )
           })}
@@ -283,7 +297,7 @@ function ArchitectureDiagram() {
             const active = hover === n.id
             return (
               <g key={n.id} onMouseEnter={() => setHover(n.id)} onMouseLeave={() => setHover(null)} style={{ cursor: 'pointer' }}>
-                {active && <circle cx={n.x} cy={n.y} r="22" fill="oklch(0.82 0.13 210 / 0.12)" />}
+                {active && <circle cx={n.x} cy={n.y} r="22" fill="oklch(0.82 0.13 85 / 0.12)" />}
                 <circle cx={n.x} cy={n.y} r="14" fill="rgba(255,255,255,0.04)" stroke={active ? n.color : 'rgba(255,255,255,0.15)'} strokeWidth={active ? 1.5 : 1} />
                 <circle cx={n.x} cy={n.y} r="4" fill={n.color} opacity={active ? 1 : 0.6} />
                 <text x={n.x} y={n.y + 28} textAnchor="middle" fontFamily="JetBrains Mono" fontSize="9" fill={active ? 'var(--text)' : 'rgba(255,255,255,0.45)'} letterSpacing="0.5">{n.label}</text>
