@@ -128,9 +128,41 @@ export async function getCachedBlockNumber(provider: ethers.JsonRpcProvider): Pr
  *  - range/result-too-large: halve the span and retry;
  *  - single-block non-rate-limit failure: a genuine RPC error → give up.
  */
+// Combined vault+tree log scan. When configured (production), the merkle cache AND the event index pull
+// their logs from ONE getLogs over BOTH addresses — halving the getLogs each sync makes — then each
+// filters its own. An in-flight-promise memo (keyed by block range) means the two caches' concurrent
+// syncs share a single fetch. Not configured (e.g. a resync script) → returns null and callers fall
+// back to their own per-address scan, so behaviour is unchanged there.
+let _combinedAddrs: string[] | null = null;
+export function setCombinedLogScan(vaultAddress: string, treeAddress: string): void {
+  _combinedAddrs = [vaultAddress, treeAddress];
+}
+
+let _combinedInFlight: { key: string; at: number; p: Promise<ethers.Log[]> } | null = null;
+const COMBINED_MEMO_MS = Number(process.env.COMBINED_LOGS_MEMO_MS ?? "5000");
+
+export async function getVaultTreeLogs(
+  provider: ethers.JsonRpcProvider,
+  fromBlock: number,
+  toBlock: number,
+  startChunk: number,
+): Promise<ethers.Log[] | null> {
+  if (!_combinedAddrs) return null;
+  const key = `${fromBlock}-${toBlock}`;
+  const now = Date.now();
+  if (_combinedInFlight && _combinedInFlight.key === key && now - _combinedInFlight.at < COMBINED_MEMO_MS) {
+    return _combinedInFlight.p;
+  }
+  // No topic filter: pull all logs from both contracts in one call; each cache filters its own. (The
+  // vault/tree don't emit a meaningful volume of unrelated events, so the extra payload is negligible.)
+  const p = getLogsChunked(provider, { address: _combinedAddrs, topics: [] }, fromBlock, toBlock, startChunk);
+  _combinedInFlight = { key, at: now, p };
+  return p;
+}
+
 export async function getLogsChunked(
   provider: ethers.JsonRpcProvider,
-  filter: { address: string; topics: (string | string[] | null)[] },
+  filter: { address: string | string[]; topics: (string | string[] | null)[] },
   fromBlock: number,
   toBlock: number,
   startChunk: number,

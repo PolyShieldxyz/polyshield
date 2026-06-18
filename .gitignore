@@ -1,12 +1,7 @@
 .claude/
 .devcontainer/
 # Private working docs at repo root (tracked versions live in docs/)
-/architecture.md
-/open-questions.md
-/claude-code-plan-prompt.md
-/threat-model.md
-/polymarket-api.md
-/zk-design.md
+/CONTRIBUTING.md
 
 Benchmarking/
 
@@ -27,6 +22,7 @@ packages/.env.test
 /deploy/env/frontend.env
 /deploy/env/proof-relay.env
 /deploy/env/signing-layer.env
+/deploy/cloudflare-dns.sh
 
 # Dependencies
 node_modules/

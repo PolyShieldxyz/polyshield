@@ -22,7 +22,7 @@ import Database from "better-sqlite3";
 import { ethers } from "ethers";
 import { poseidon2 } from "poseidon-lite";
 import pino from "pino";
-import { getLogsChunked, getCachedBlockNumber } from "./merkle";
+import { getLogsChunked, getCachedBlockNumber, getVaultTreeLogs } from "./merkle";
 
 const logger = pino({ name: "merkle-cache" });
 
@@ -190,13 +190,18 @@ export class CachedMerkleTree {
     let cursor = this.lastBlock + 1;
     while (cursor <= target && this.consistent) {
       const windowEnd = Math.min(cursor + SCAN_WINDOW - 1, target);
-      const logs = await getLogsChunked(
-        this.provider,
-        { address: this.treeAddress, topics: [LEAF_INSERTED_TOPIC] },
-        cursor,
-        windowEnd,
-        LOG_CHUNK,
-      );
+      // Prefer the shared vault+tree scan (one getLogs for both caches), then keep only this tree's
+      // LeafInserted logs. Falls back to a tree-only scan when the combined scan isn't configured.
+      const combined = await getVaultTreeLogs(this.provider, cursor, windowEnd, LOG_CHUNK);
+      const logs = combined !== null
+        ? combined.filter((l) => l.address.toLowerCase() === this.treeAddress.toLowerCase() && l.topics[0] === LEAF_INSERTED_TOPIC)
+        : await getLogsChunked(
+            this.provider,
+            { address: this.treeAddress, topics: [LEAF_INSERTED_TOPIC] },
+            cursor,
+            windowEnd,
+            LOG_CHUNK,
+          );
       const events = logs
         .map((l) => {
           const p = LEAF_INSERTED_ABI.parseLog(l);

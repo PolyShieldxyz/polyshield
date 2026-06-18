@@ -92,6 +92,11 @@ interface IGovernor is IERC165, IERC6372 {
     error GovernorQueueNotImplemented();
 
     /**
+     * @dev The proposal hasn't been queued yet.
+     */
+    error GovernorNotQueuedProposal(uint256 proposalId);
+
+    /**
      * @dev The proposal has already been queued.
      */
     error GovernorAlreadyQueuedProposal(uint256 proposalId);

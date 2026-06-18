@@ -6,6 +6,7 @@ import { getDepositWalletExecutor, DepositWalletExecutor, WalletCall } from "./d
 import { toFieldSafe } from "./marketRegistry";
 import { DEPLOY_BLOCK } from "./logScan";
 import { fetchAllBetAuthorized, BetAuthorizedRecord } from "./vaultEventSource";
+import { batchUint } from "./multicall";
 
 const logger = pino({ name: "redemption-pipeline" });
 
@@ -74,11 +75,13 @@ const VAULT_ABI_RESOLVED = ["function marketResolvedAt(bytes32) view returns (ui
  */
 export async function readNumerators(ctf: ethers.Contract, conditionId: string): Promise<bigint[]> {
   const slotCount: bigint = await ctf.getOutcomeSlotCount(conditionId);
-  const out: bigint[] = [];
-  for (let i = 0n; i < slotCount; i++) {
-    out.push(await ctf.payoutNumerators(conditionId, i));
-  }
-  return out;
+  const n = Number(slotCount);
+  if (n <= 0) return [];
+  // Batch all payoutNumerators(conditionId, i) into ONE eth_call (Multicall3; per-call fallback).
+  const provider = ctf.runner?.provider as ethers.JsonRpcProvider;
+  const idx = Array.from({ length: n }, (_, i) => [conditionId, i]);
+  const vals = await batchUint(provider, ctf, "payoutNumerators", idx);
+  return vals.map((v) => v ?? 0n);
 }
 
 const ERC20_ABI = [
@@ -97,15 +100,14 @@ const OFFRAMP_ABI = ["function unwrap(address _asset, address _to, uint256 _amou
 
 async function hasVaultShares(
   ctf: ethers.Contract,
-  conditionId: string,
+  _conditionId: string,
   positionIds: string[]
 ): Promise<boolean> {
-  if (!config.depositWalletAddress) return false;
-  for (const positionId of positionIds) {
-    const bal: bigint = await ctf.balanceOf(config.depositWalletAddress, positionId);
-    if (bal > 0n) return true;
-  }
-  return false;
+  if (!config.depositWalletAddress || positionIds.length === 0) return false;
+  // Batch all balanceOf(depositWallet, positionId) reads into ONE eth_call (Multicall3; per-call fallback).
+  const provider = ctf.runner?.provider as ethers.JsonRpcProvider;
+  const bals = await batchUint(provider, ctf, "balanceOf", positionIds.map((id) => [config.depositWalletAddress, id]));
+  return bals.some((b) => (b ?? 0n) > 0n);
 }
 
 async function collectPositionIds(

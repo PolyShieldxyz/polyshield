@@ -60,7 +60,7 @@ flowchart LR
 | 🟦 Blue | **User / Wallet** | Depositor's EOA (MetaMask etc.). Only signs `deposit` + EIP-191 secret-derivation messages. |
 | 🟩 Teal | **Frontend** | Next.js app, `lib/notes.ts`, `lib/prover.ts`, `workers/prover.worker.ts` (snarkjs `groth16.fullProve`). |
 | 🟪 Purple | **Proof Relay** | Stateless HTTP service (port 3002). Pays gas, submits all *spend* txs. Cannot forge proofs. **Also the backend index/cache** (SQLite `merkle.db`): `CachedMerkleTree` → `/merkle-path`, `VaultEventIndex` → `/recovery-data` + `/events` — serves the public on-chain state so clients never re-scan the chain. Sees only public/anonymous data; cannot de-anonymize. |
-| 🟨 Amber | **Indexer** | Watches `CTF.ConditionResolution` + `Vault.MarketResolved`; serves `GET /settlement/:id`. |
+| 🟨 Amber | **Settlement indexing** | No longer a standalone service: settlement *detection* runs inside the signing-layer (`settlementResolver` — watches `CTF.ConditionResolution` + `Vault.MarketResolved`), and settlement *records* / the explorer feed are served from the proof-relay's `VaultEventIndex`. Shown amber in the flow diagrams as the conceptual "indexer" role. |
 | 🟧 Orange | **Signing Layer** | Operator service: event listener, JIT funding, CLOB order builder, fill tracker, attestation store (FC-9), redemption pipeline. |
 | 🟩 Green | **Contracts** | `Vault`, `CommitmentMerkleTree`, `NullifierRegistry`, `PoseidonT3Hasher`, `VaultInputs` lib. |
 | 🟥 Pink | **Circuits / Verifiers** | 9 Circom/Groth16 circuits + their snarkjs verifier adapters (slots 0–8). |
@@ -83,7 +83,7 @@ flowchart TB
     subgraph OFFCHAIN["Off-chain backend"]
         direction TB
         RL[📨 Proof Relay :3002<br/>gas payer · stateless · cannot forge<br/>+ backend INDEX/CACHE SQLite:<br/>CachedMerkleTree → /merkle-path<br/>VaultEventIndex → /recovery-data · /events]:::relay
-        IX[🗂️ Indexer :3003<br/>settlement records]:::indexer
+        IX[🗂️ Settlement index<br/>conceptual role — runs inside<br/>signing-layer + proof-relay]:::indexer
         SL[✍️ Signing Layer<br/>operator EOA · event listener<br/>JIT · CLOB · fills · attestations<br/>settlement resolver + redemption pipeline]:::signer
     end
 

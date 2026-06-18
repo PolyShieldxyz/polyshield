@@ -53,7 +53,8 @@ The vault holds one Polymarket signing account (EOA) shared by all depositors. W
  │  pUSD + CTF shares)   │   │  • JIT collateral funding · FC-9 signed operator attestations │
  └──────────────────────┘   │  v2: AWS Nitro TEE (planned)                                  │
                             └────────────────────────────────────────────────────────────┘
-   indexer (3003): mirrors CTF ConditionResolution → settlement records (supplementary)
+   Settlement detection lives in the signing layer (settlement-resolver); settlement records and
+   the explorer event feed are served by the proof-relay's index — there is no separate indexer service.
 ```
 
 **Chain:** Polygon mainnet (production) / Polygon Amoy (testnet).
@@ -112,12 +113,13 @@ packages/
     bet_auth/    Noir source — reference only, not compiled or used
     (…other Noir dirs)  see packages/circuits/README.md
   backend/
-    signing-layer/     Node.js — BetAuthorized → FAK/GTC/GTD orders; settlement resolver; JIT funding; FC-9 attestations
-    proof-relay/       Relays proofs (relayer EOA pays gas) + backend index/cache:
-                       /merkle-path (CachedMerkleTree), /recovery-data + /events (VaultEventIndex), SQLite merkle.db
-    indexer/           CTF settlement event listener, REST API for witness data
+    signing-layer/     Node.js — BetAuthorized → FAK/GTC/GTD orders; settlement resolver; JIT funding;
+                       FC-9 attestations; auto-settlement API (port 3004)
+    proof-relay/       Relays proofs (relayer EOA pays gas) + backend index/cache + market catalog:
+                       /merkle-path (CachedMerkleTree), /recovery-data + /events (VaultEventIndex),
+                       /relay/settlement (settlement credit), /markets (Gamma catalog), /analytics, SQLite merkle.db
     mock-clob-server/  Fake Polymarket CLOB for local dev (mock only — all other components are real)
-    mock-env/          Anvil + contract deployment + service orchestration
+    mock-env/          Anvil + contract deployment + service orchestration (pnpm dev:mock)
   frontend/      Next.js + Wagmi — deposit, bet, settle, withdraw UIs
   test-fixtures/ Generated test data (markets, users, action sequences)
 
@@ -162,8 +164,8 @@ pnpm dev:all
 |---|---|---|
 | Anvil RPC | 8545 | Chain ID 31337 — resets on every `dev:mock` restart |
 | Mock CLOB | 3001 | Fake Polymarket — `POST /admin/settle-market` triggers resolution |
-| Proof Relay | 3002 | Real relay, submits to Vault on Anvil |
-| Indexer API | 3003 | Real indexer, listens for CTF settlement events |
+| Proof Relay | 3002 | Real relay; submits to Vault on Anvil; also serves merkle-path / recovery-data / events / settlement |
+| Signing Layer | 3004 | Real operator; watches `BetAuthorized`, submits orders, resolves settlement, serves attestations |
 | Frontend | 3000 | `pnpm dev:frontend` |
 
 ### Test accounts (pre-funded on Anvil restart)
@@ -188,7 +190,7 @@ pnpm contracts:build        # forge build
 pnpm contracts:test         # forge test
 pnpm contracts:coverage     # forge coverage
 
-# ── Circuits (Groth16 / Circom — run from Benchmarking/groth16/) ─────────────
+# ── Circuits (Groth16 / Circom) ──────────────────────────────────────────────
 pnpm compile:circuits       # circom → r1cs + wasm artifacts
 pnpm setup:circuits         # snarkjs groth16 setup → .zkey proving keys
 pnpm generate:verifiers     # generate Solidity verifier contracts
@@ -248,15 +250,19 @@ Smart contracts are open-source and MIT licensed. The protocol is currently in a
 
 Full roadmap with per-phase deliverables: [polyshield.xyz/roadmap](https://polyshield.xyz/roadmap)
 
+<!-- 
+
 ---
 
 ## Contributing
 
-Read [`CLAUDE.md`](CLAUDE.md) before writing any code — it is the authoritative source for architecture decisions, naming conventions, and constraints that must not be overridden.
+See [`CONTRIBUTING.md`](CONTRIBUTING.md) for the full guide — workflow, project layout, coding standards, testing requirements, and the change types that need maintainer sign-off.
 
-Read [`docs/open-questions.md`](docs/open-questions.md) before implementing anything in affected areas (Q4, Q5, Q7, Q8 are the most likely to be relevant). Check which questions are OPEN vs RESOLVED.
+In short, before writing any code:
 
-Read [`docs/zk-design.md`](docs/zk-design.md) before touching any circuit or writing code that interacts with commitments or nullifiers.
+- Read [`CLAUDE.md`](CLAUDE.md) — the authoritative source for architecture decisions, naming conventions, and protocol constants that must not be overridden.
+- Read [`docs/open-questions.md`](docs/open-questions.md) before implementing anything in affected areas (Q4, Q5, Q7, Q8 are the most likely to be relevant). Check which questions are OPEN vs RESOLVED.
+- Read [`docs/zk-design.md`](docs/zk-design.md) before touching any circuit or any code that interacts with commitments or nullifiers. -->
 
 ---
 

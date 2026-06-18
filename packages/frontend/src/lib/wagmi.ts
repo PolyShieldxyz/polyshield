@@ -54,15 +54,21 @@ if (!WC_PROJECT_ID && typeof window !== 'undefined') {
   )
 }
 
-export const wagmiConfig = createConfig(
-  getDefaultConfig({
+export const wagmiConfig = createConfig({
+  ...getDefaultConfig({
     chains,
     transports,
     walletConnectProjectId: WC_PROJECT_ID,
     appName: 'PolyShield',
     appDescription: 'Private prediction market trading.',
     appUrl: 'https://polyshield.xyz',
-  })
-)
+  }),
+  // SSR-safe: this module is imported during server render (providers.tsx). Without `ssr`,
+  // wagmi eagerly hydrates persisted wallet state from browser storage on the server, and the
+  // WalletConnect connector's store reaches for IndexedDB — which is undefined in Node, throwing
+  // "ReferenceError: indexedDB is not defined" as an unhandledRejection. `ssr: true` defers all
+  // browser-storage hydration/reconnect to the client. Client persistence/reconnect is unchanged.
+  ssr: true,
+})
 
 export { anvilChain }

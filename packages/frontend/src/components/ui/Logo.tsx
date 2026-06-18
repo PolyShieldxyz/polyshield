@@ -19,7 +19,10 @@ const PATH = 'M32 17 L24 30 L29 43'
 
 export function Logo({ size = 22, withText = true, animate = false }: LogoProps) {
   return (
-    <div className="row gap-3" style={{ alignItems: 'center' }}>
+    // inline-flex (not the .row flex default of flex-start, which fills its parent and
+    // left-aligns the mark) so the standalone logo shrink-wraps and a parent textAlign:center
+    // actually centers it. In the nav it's already the first flex child, so this is a no-op there.
+    <div className="gap-3" style={{ display: 'inline-flex', alignItems: 'center' }}>
       <svg width={size} height={size} viewBox="0 0 64 64" fill="none" aria-hidden>
         {/* Shield — faint indigo fill + outline so the tree reads inside it. */}
         <path d={SHIELD} fill="var(--brand-soft, rgba(130,133,235,0.06))" stroke={INDIGO} strokeWidth="2.4" strokeLinejoin="round" />

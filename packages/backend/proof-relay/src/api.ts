@@ -146,6 +146,11 @@ interface EventIndexLike {
 // buffer (~3 Polygon blocks ≈ 6s) and the just-confirmed deposit is ingestable. Tunable.
 const DEPOSIT_HINT_RESYNC_MS = Number(process.env.DEPOSIT_HINT_RESYNC_MS ?? "12000");
 
+// Cache of the Vault's governance-set feeConfig (it changes only on setFeeParams) so /recovery-data
+// doesn't re-read it on every request.
+const FEE_CONFIG_TTL_MS = Number(process.env.FEE_CONFIG_TTL_MS ?? "300000"); // 5 min
+let _feeCfgCache: { betFeeBps: string; relayGasFeeUSDC: string; at: number } | null = null;
+
 let _eventIndex: EventIndexLike | null = null;
 export function setEventIndex(idx: EventIndexLike): void {
   _eventIndex = idx;
@@ -303,12 +308,10 @@ export function createApp(): express.Application {
     "/deposit-hint",
     rateLimit({ windowMs: 60_000, max: 60, standardHeaders: true, legacyHeaders: false }),
     (_req, res) => {
-      // Immediate sync — picks up any deposit already past the CONFIRMATIONS buffer.
-      void _merkleCache?.syncNow();
-      void _eventIndex?.syncNow();
-      // The just-confirmed deposit (~1 conf) is still INSIDE the index's CONFIRMATIONS buffer, so the
-      // sync above can't ingest it yet. Schedule one more after the buffer clears so the index reflects
-      // the deposit within seconds — not the 10-min reconcile — for the explorer / a later recovery.
+      // The just-confirmed deposit (~1 conf) is INSIDE the index's CONFIRMATIONS buffer, so syncing now
+      // can't ingest it (the immediate sync was wasted getLogs). Sync once AFTER the buffer clears, so
+      // the index reflects the deposit within seconds — not the 10-min reconcile — for the explorer /
+      // a later recovery. (/recovery-data and /merkle-path also sync on demand as further safety nets.)
       const t = setTimeout(() => { void _merkleCache?.syncNow(); void _eventIndex?.syncNow(); }, DEPOSIT_HINT_RESYNC_MS);
       if (typeof t.unref === "function") t.unref();
       res.status(202).json({ status: "syncing" });
@@ -551,14 +554,28 @@ export function createApp(): express.Application {
       const blocks = [...new Set([...deposits, ...spends].map((e) => (e as { blockNumber: number }).blockNumber))];
       const blockTimestamps = _eventIndex.blockTimestamps(blocks);
 
-      // feeConfig (betFeeBps, relayGasFeeUSDC) + currentRoot — cheap on-chain state reads.
-      const vault = new ethers.Contract(_vaultAddress, [
-        "function feeConfig() view returns (uint16 betFeeBps, uint64 relayGasFeeUSDC, uint64 minBet, uint64 withdrawalFeeUSDC, uint64 minWithdrawal, address feeRecipient)",
-      ], _provider);
-      const tree = new ethers.Contract(_treeAddress, ["function currentRoot() view returns (bytes32)"], _provider);
+      // feeConfig is OUR governance-set protocol fee (Vault.setFeeParams) — it changes only on a rare
+      // owner action, so cache it instead of reading it on every recovery. currentRoot changes per
+      // insert, so it stays a live read.
       let betFeeBps = "0", relayGasFeeUSDC = "0", currentRoot = "0x";
-      try { const fc = await vault.feeConfig(); betFeeBps = fc[0].toString(); relayGasFeeUSDC = fc[1].toString(); } catch { /* older vault */ }
-      try { currentRoot = await tree.currentRoot(); } catch { /* leave */ }
+      if (_feeCfgCache && Date.now() - _feeCfgCache.at < FEE_CONFIG_TTL_MS) {
+        betFeeBps = _feeCfgCache.betFeeBps;
+        relayGasFeeUSDC = _feeCfgCache.relayGasFeeUSDC;
+      } else {
+        try {
+          const vault = new ethers.Contract(_vaultAddress, [
+            "function feeConfig() view returns (uint16 betFeeBps, uint64 relayGasFeeUSDC, uint64 minBet, uint64 withdrawalFeeUSDC, uint64 minWithdrawal, address feeRecipient)",
+          ], _provider);
+          const fc = await vault.feeConfig();
+          betFeeBps = fc[0].toString();
+          relayGasFeeUSDC = fc[1].toString();
+          _feeCfgCache = { betFeeBps, relayGasFeeUSDC, at: Date.now() };
+        } catch { /* older vault / read failed — serve defaults */ }
+      }
+      try {
+        const tree = new ethers.Contract(_treeAddress, ["function currentRoot() view returns (bytes32)"], _provider);
+        currentRoot = await tree.currentRoot();
+      } catch { /* leave */ }
 
       res.json({ deposits, spends, blockTimestamps, feeConfig: { betFeeBps, relayGasFeeUSDC }, currentRoot, deployBlock: _treeDeployBlock });
     } catch (err) {

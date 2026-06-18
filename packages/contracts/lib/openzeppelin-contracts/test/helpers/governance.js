@@ -8,7 +8,7 @@ const timelockSalt = (address, descriptionHash) =>
   ethers.toBeHex((ethers.toBigInt(address) << 96n) ^ ethers.toBigInt(descriptionHash), 32);
 
 class GovernorHelper {
-  constructor(governor, mode = 'blockNumber') {
+  constructor(governor, mode = 'blocknumber') {
     this.governor = governor;
     this.mode = mode;
   }

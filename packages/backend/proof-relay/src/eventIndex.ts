@@ -13,7 +13,7 @@
 import Database from "better-sqlite3";
 import { ethers } from "ethers";
 import pino from "pino";
-import { getLogsChunked, getCachedBlockNumber } from "./merkle";
+import { getLogsChunked, getCachedBlockNumber, getVaultTreeLogs } from "./merkle";
 
 const logger = pino({ name: "event-index" });
 
@@ -164,7 +164,12 @@ export class VaultEventIndex {
     let cursor = this.lastBlock + 1;
     while (cursor <= target) {
       const windowEnd = Math.min(cursor + SCAN_WINDOW - 1, target);
-      const logs = await getLogsChunked(this.provider, { address: this.vaultAddress, topics: [TOPICS] }, cursor, windowEnd, LOG_CHUNK);
+      // Prefer the shared vault+tree scan (one getLogs for both caches), then keep only this vault's
+      // indexed events. Falls back to a vault-only scan when the combined scan isn't configured.
+      const combined = await getVaultTreeLogs(this.provider, cursor, windowEnd, LOG_CHUNK);
+      const logs = combined !== null
+        ? combined.filter((l) => l.address.toLowerCase() === this.vaultAddress.toLowerCase() && NAME_BY_TOPIC.has(l.topics[0]))
+        : await getLogsChunked(this.provider, { address: this.vaultAddress, topics: [TOPICS] }, cursor, windowEnd, LOG_CHUNK);
 
       // Resolve block timestamps once per unique block in this window.
       const blocks = [...new Set(logs.map((l) => l.blockNumber))];

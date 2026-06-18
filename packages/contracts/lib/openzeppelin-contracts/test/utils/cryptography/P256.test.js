@@ -1,22 +1,30 @@
 const { ethers } = require('hardhat');
 const { expect } = require('chai');
-const { p256 } = require('@noble/curves/nist.js');
+const { secp256r1 } = require('@noble/curves/p256');
 const { loadFixture } = require('@nomicfoundation/hardhat-network-helpers');
 
 const N = 0xffffffff00000000ffffffffffffffffbce6faada7179e84f3b9cac2fc632551n;
 
+// As in ECDSA, signatures are malleable and the tooling produce both high and low S values.
+// We need to ensure that the s value is in the lower half of the order of the curve.
+const ensureLowerOrderS = ({ s, recovery, ...rest }) => {
+  if (s > N / 2n) {
+    s = N - s;
+    recovery = 1 - recovery;
+  }
+  return { s, recovery, ...rest };
+};
+
 const prepareSignature = (
-  privateKey = p256.utils.randomSecretKey(),
+  privateKey = secp256r1.utils.randomPrivateKey(),
   messageHash = ethers.hexlify(ethers.randomBytes(0x20)),
 ) => {
   const publicKey = [
-    p256.getPublicKey(privateKey, false).slice(0x01, 0x21),
-    p256.getPublicKey(privateKey, false).slice(0x21, 0x41),
+    secp256r1.getPublicKey(privateKey, false).slice(0x01, 0x21),
+    secp256r1.getPublicKey(privateKey, false).slice(0x21, 0x41),
   ].map(ethers.hexlify);
-
-  const rawSignature = p256.sign(ethers.getBytes(messageHash), privateKey, { prehash: false, format: 'recovered' });
-  const signature = [ethers.hexlify(rawSignature.slice(0x01, 0x21)), ethers.hexlify(rawSignature.slice(0x21, 0x41))];
-  const recovery = rawSignature[0];
+  const { r, s, recovery } = ensureLowerOrderS(secp256r1.sign(messageHash.replace(/0x/, ''), privateKey));
+  const signature = [r, s].map(v => ethers.toBeHex(v, 0x20));
 
   return { privateKey, publicKey, signature, recovery, messageHash };
 };

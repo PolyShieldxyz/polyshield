@@ -1,5 +1,5 @@
-// SPDX-License-Identifier: MIT OR Apache-2.0
-pragma solidity >=0.8.13 <0.9.0;
+// SPDX-License-Identifier: MIT
+pragma solidity >=0.6.2 <0.9.0;
 
 import {VmSafe} from "./Vm.sol";
 
@@ -175,7 +175,8 @@ abstract contract StdChains {
                     (errHash != keccak256(oldNotFoundError) && errHash != keccak256(newNotFoundError))
                         || bytes(chain.rpcUrl).length == 0
                 ) {
-                    assembly ("memory-safe") {
+                    /// @solidity memory-safe-assembly
+                    assembly {
                         revert(add(32, err), mload(err))
                     }
                 }
@@ -195,12 +196,13 @@ abstract contract StdChains {
 
         // If adding an RPC here, make sure to test the default RPC URL in `test_Rpcs` in `StdChains.t.sol`
         setChainWithDefaultRpcUrl("anvil", ChainData("Anvil", 31337, "http://127.0.0.1:8545"));
-        setChainWithDefaultRpcUrl("mainnet", ChainData("Mainnet", 1, "https://eth.llamarpc.com"));
+        setChainWithDefaultRpcUrl(
+            "mainnet", ChainData("Mainnet", 1, "https://eth-mainnet.alchemyapi.io/v2/pwc5rmJhrdoaSEfimoKEmsvOjKSmPDrP")
+        );
         setChainWithDefaultRpcUrl(
             "sepolia", ChainData("Sepolia", 11155111, "https://sepolia.infura.io/v3/b9794ad1ddf84dfb8c34d6bb5dca2001")
         );
         setChainWithDefaultRpcUrl("holesky", ChainData("Holesky", 17000, "https://rpc.holesky.ethpandaops.io"));
-        setChainWithDefaultRpcUrl("hoodi", ChainData("Hoodi", 560048, "https://rpc.hoodi.ethpandaops.io"));
         setChainWithDefaultRpcUrl("optimism", ChainData("Optimism", 10, "https://mainnet.optimism.io"));
         setChainWithDefaultRpcUrl(
             "optimism_sepolia", ChainData("Optimism Sepolia", 11155420, "https://sepolia.optimism.io")
@@ -249,11 +251,6 @@ abstract contract StdChains {
             "flare_coston2", ChainData("Flare Coston2", 114, "https://coston2-api.flare.network/ext/C/rpc")
         );
 
-        setChainWithDefaultRpcUrl("ink", ChainData("Ink", 57073, "https://rpc-gel.inkonchain.com"));
-        setChainWithDefaultRpcUrl(
-            "ink_sepolia", ChainData("Ink Sepolia", 763373, "https://rpc-gel-sepolia.inkonchain.com")
-        );
-
         setChainWithDefaultRpcUrl("mode", ChainData("Mode", 34443, "https://mode.drpc.org"));
         setChainWithDefaultRpcUrl("mode_sepolia", ChainData("Mode Sepolia", 919, "https://sepolia.mode.network"));
 
@@ -276,11 +273,6 @@ abstract contract StdChains {
         setChainWithDefaultRpcUrl("orderly", ChainData("Orderly", 291, "https://rpc.orderly.network"));
         setChainWithDefaultRpcUrl(
             "orderly_sepolia", ChainData("Orderly Sepolia", 4460, "https://testnet-rpc.orderly.org")
-        );
-
-        setChainWithDefaultRpcUrl("unichain", ChainData("Unichain", 130, "https://mainnet.unichain.org"));
-        setChainWithDefaultRpcUrl(
-            "unichain_sepolia", ChainData("Unichain Sepolia", 1301, "https://sepolia.unichain.org")
         );
     }
 

@@ -3,7 +3,7 @@ import { ethers } from "ethers";
 import pino from "pino";
 import { initRelayer, setOnRelayConfirmed } from "./relayer";
 import { createApp, initMerkle, setMerkleCache, setEventIndex } from "./api";
-import { RetryingJsonRpcProvider } from "./merkle";
+import { RetryingJsonRpcProvider, setCombinedLogScan } from "./merkle";
 import { CachedMerkleTree } from "./merkleTree";
 import { VaultEventIndex } from "./eventIndex";
 import { startMarketCatalogSync } from "./marketCatalog";
@@ -39,6 +39,9 @@ const provider = new RetryingJsonRpcProvider(POLYGON_RPC_URL);
 initRelayer(RELAYER_PRIVATE_KEY, VAULT_CONTRACT_ADDRESS, provider);
 
 if (TREE_ADDRESS) {
+  // The merkle cache (tree LeafInserted) and event index (vault events) now share ONE getLogs over
+  // both addresses per sync instead of one each. See getVaultTreeLogs.
+  setCombinedLogScan(VAULT_CONTRACT_ADDRESS, TREE_ADDRESS);
   initMerkle(provider, TREE_ADDRESS, VAULT_CONTRACT_ADDRESS, TREE_DEPLOY_BLOCK);
   // Backend read-cache of the on-chain tree: serves /merkle-path in O(depth) with no per-request
   // chain scan. The on-chain tree stays authoritative; the cache verifies every appended leaf's root

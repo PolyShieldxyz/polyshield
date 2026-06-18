@@ -3,8 +3,6 @@
 pragma solidity ^0.8.24;
 
 import {VotesExtended} from "../governance/utils/VotesExtended.sol";
-import {Time} from "../utils/types/Time.sol";
-import {ERC6372Utils} from "../utils/ERC6372Utils.sol";
 
 abstract contract VotesExtendedMock is VotesExtended {
     mapping(address voter => uint256) private _votingUnits;
@@ -34,11 +32,11 @@ abstract contract VotesExtendedMock is VotesExtended {
 
 abstract contract VotesExtendedTimestampMock is VotesExtendedMock {
     function clock() public view override returns (uint48) {
-        return Time.timestamp();
+        return uint48(block.timestamp);
     }
 
     // solhint-disable-next-line func-name-mixedcase
     function CLOCK_MODE() public view virtual override returns (string memory) {
-        return ERC6372Utils.timestampClockMode(clock);
+        return "mode=timestamp";
     }
 }

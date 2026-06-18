@@ -4,6 +4,7 @@ import { useAccount, useSwitchChain, useDisconnect } from 'wagmi'
 import { WalletConnect } from '@/components/ui/WalletConnect'
 import { BetaConsentGate } from '@/components/app/BetaConsentGate'
 import { Logo } from '@/components/ui/Logo'
+import { AppBackdrop } from '@/components/ui/AppBackdrop'
 import { clearNoteCache, getFreeNotes, resetAllLocalState, resetWalletConnectorStorage } from '@/lib/notes'
 import { clearSession } from '@/lib/secretSession'
 import { useNotesHydration } from '@/lib/useNotesHydration'
@@ -18,6 +19,19 @@ const CONSOLIDATE_PRELOAD_NOTE_THRESHOLD = 5
 // The chain the app expects (137 = Polygon in prod; 31337 = Anvil in dev). On any other
 // network, on-chain reads (USDC balance, allowance) silently return nothing.
 const EXPECTED_CHAIN_ID = Number(process.env.NEXT_PUBLIC_CHAIN_ID ?? '137')
+
+// Full-height centered gate (connect / reconnecting / wrong-network) over the animated
+// node-edge backdrop. Children render in a z-raised, opaque panel so contrast is unaffected.
+function GateScreen({ children }: { children: React.ReactNode }) {
+  return (
+    <div style={{ position: 'relative', minHeight: 'calc(100vh - 56px)', display: 'flex', alignItems: 'center', justifyContent: 'center', overflow: 'hidden' }}>
+      <AppBackdrop />
+      <div style={{ position: 'relative', zIndex: 1, width: '100%', display: 'flex', justifyContent: 'center', padding: '0 16px' }}>
+        {children}
+      </div>
+    </div>
+  )
+}
 
 export default function AppLayout({ children }: { children: React.ReactNode }) {
   const { address, isConnected, status, chainId } = useAccount()
@@ -90,13 +104,24 @@ export default function AppLayout({ children }: { children: React.ReactNode }) {
   // FOREVER — which used to render nothing but the outer nav (the "only the
   // nav bar loads" bug). Cap the wait so we always fall through to the connect
   // gate instead of hanging on a blank page.
+  // While wagmi restores the prior session, paint the backdrop + an animated logo IMMEDIATELY
+  // instead of a blank screen for 2–3s (visibility of system status; avoids a dead first paint).
   if ((status === 'reconnecting' || status === 'connecting') && !reconnectTimedOut) {
-    return null
+    return (
+      <GateScreen>
+        <div style={{ textAlign: 'center' }}>
+          <Logo size={44} withText={false} animate />
+          <p className="body mt-4" style={{ fontSize: 13, color: 'var(--text-3)', margin: 0 }}>
+            Restoring your session…
+          </p>
+        </div>
+      </GateScreen>
+    )
   }
 
   if (!isConnected) {
     return (
-      <div style={{ minHeight: 'calc(100vh - 56px)', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+      <GateScreen>
         <div className="panel" style={{ padding: 48, maxWidth: 440, width: '100%', textAlign: 'center' }}>
           <Logo size={40} withText={false} />
           {chainWasReset ? (
@@ -132,7 +157,7 @@ export default function AppLayout({ children }: { children: React.ReactNode }) {
             Polygon mainnet · beta
           </div>
         </div>
-      </div>
+      </GateScreen>
     )
   }
 
@@ -140,7 +165,7 @@ export default function AppLayout({ children }: { children: React.ReactNode }) {
   if (isConnected && chainId !== undefined && chainId !== EXPECTED_CHAIN_ID) {
     const target = EXPECTED_CHAIN_ID === 137 ? 'Polygon' : `chain ${EXPECTED_CHAIN_ID}`
     return (
-      <div style={{ minHeight: 'calc(100vh - 56px)', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+      <GateScreen>
         <div className="panel" style={{ padding: 48, maxWidth: 440, width: '100%', textAlign: 'center' }}>
           <Logo size={40} withText={false} />
           <h2 className="h3 mt-6" style={{ margin: 0 }}>Wrong network</h2>
@@ -159,7 +184,7 @@ export default function AppLayout({ children }: { children: React.ReactNode }) {
             </button>
           </div>
         </div>
-      </div>
+      </GateScreen>
     )
   }
 

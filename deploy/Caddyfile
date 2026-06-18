@@ -4,10 +4,11 @@
 # (needs inbound :80 for the HTTP-01 challenge and :443 for serving). A bare IP cannot get a
 # publicly-trusted cert — that is why a hostname (free sslip.io or a real domain) is required.
 
-# Apex host = marketing site; app.<host> = the dApp (see frontend src/middleware.ts).
-# Caddy serves BOTH and proxies to the same Next server, which routes by subdomain.
-# `app.{$SSLIP_HOST}` is a literal text substitution → app.84-32-231-156.sslip.io.
-{$SSLIP_HOST}, app.{$SSLIP_HOST} {
+# Apex host = marketing site; app.<host> = the dApp; explorer.<host> = the public explorer
+# (see frontend src/middleware.ts). Caddy serves ALL THREE and proxies to the same Next
+# server, which routes by subdomain. `app.{$SSLIP_HOST}` is a literal text substitution
+# → app.84-32-231-156.sslip.io (likewise explorer.{$SSLIP_HOST}).
+{$SSLIP_HOST}, app.{$SSLIP_HOST}, explorer.{$SSLIP_HOST} {
 	encode zstd gzip
 
 	# The Next.js server (server-side API routes proxy to the private backend over the

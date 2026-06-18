@@ -110,9 +110,9 @@ function HeroVisual() {
 function HeroTape() {
   const rows = [
     ['VAULT TX', '0xVAULT…EOA', 'YES · MARKET-A', '500 USDC', 'FILLED'],
-    ['PROOF', '0xe92b…1147', 'BET-AUTH-V2', '45s', 'VERIFIED'],
+    ['PROOF', '0xe92b…1147', 'BET-AUTH', '45s', 'VERIFIED'],
     ['VAULT TX', '0xVAULT…EOA', 'NO · MARKET-B', '1,000 USDC', 'FILLED'],
-    ['SETTLE', '0x1c83…aa07', 'SETTLEMENT-V1', '+2,000', 'CREDIT'],
+    ['SETTLE', '0x1c83…aa07', 'SETTLEMENT', '+2,000', 'CREDIT'],
     ['VAULT TX', '0xVAULT…EOA', 'YES · MARKET-C', '500 USDC', 'FILLED'],
   ]
   return (
@@ -379,7 +379,7 @@ export default function LandingPage() {
                 <span className="dot" />&nbsp;{NETWORK_STATUS}
               </div>
               <h1 className="h1 mt-6">
-                Trade prediction<br />markets<span className="text-cyan">,</span> privately.
+                Trade prediction<br />markets, <span className="text-cyan">privately</span>.
               </h1>
               <p className="body mt-6" style={{ maxWidth: 520, fontSize: 17 }}>
                 PolyShield is a zero-knowledge vault layer for Polymarket. Deposit USDC,

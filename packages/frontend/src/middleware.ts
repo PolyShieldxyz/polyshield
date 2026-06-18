@@ -32,6 +32,52 @@ export function middleware(request: NextRequest) {
   if (isLocalDev) return NextResponse.next()
 
   const isAppSubdomain = hostname.startsWith('app.')
+  const isExplorerSubdomain = hostname.startsWith('explorer.')
+
+  // explorer.polyshield.xyz → a single-page host that serves ONLY the /explorer page.
+  if (isExplorerSubdomain) {
+    // Framework paths, the /api proxies, and static assets (incl. ZK wasm/zkey) are served
+    // from this host as-is — never redirected, or proving/data fetches would break.
+    const isAsset =
+      pathname.startsWith('/_next') ||
+      pathname.startsWith('/api') ||
+      pathname.startsWith('/circuits') ||
+      pathname.startsWith('/zkeys') ||
+      /\.[a-zA-Z0-9]+$/.test(pathname)
+    if (isAsset) return NextResponse.next()
+
+    // The explorer itself: subdomain root → serve /explorer; /explorer* → serve as-is.
+    if (pathname === '/') {
+      const url = request.nextUrl.clone()
+      url.pathname = '/explorer'
+      return NextResponse.rewrite(url)
+    }
+    if (pathname === '/explorer' || pathname.startsWith('/explorer/')) {
+      return NextResponse.next()
+    }
+
+    // Any other page link from the shared nav/footer (Product, How, Docs, Roadmap, and
+    // "Launch App" → /app/*) belongs to the apex/app hosts, not here. Redirect to the apex
+    // root with the same path; the apex host's own rules then forward /app/* to app.<root>.
+    const root = hostname.replace(/^explorer\./, '')
+    const url = request.nextUrl.clone()
+    url.hostname = root
+    url.port = ''  // behind a TLS proxy: don't leak Next's internal :3000 into the redirect
+    return NextResponse.redirect(url, 307)
+  }
+
+  // Canonicalize the explorer to its own subdomain: /explorer on the apex or app.* host
+  // → 301 to explorer.<root>/ (strip a leading app./www. to get the root domain). Keeps
+  // the relative `/explorer` links in TopNav/SiteFooter working in local dev (where
+  // subdomain routing is disabled and /explorer is served directly).
+  if (pathname === '/explorer' || pathname.startsWith('/explorer/')) {
+    const root = hostname.replace(/^app\./, '').replace(/^www\./, '')
+    const url = request.nextUrl.clone()
+    url.hostname = `explorer.${root}`
+    url.port = ''  // behind a TLS proxy: don't leak Next's internal :3000 into the redirect
+    url.pathname = '/'
+    return NextResponse.redirect(url, 301)
+  }
 
   // app.polyshield.xyz/foo → internally serve /app/foo
   if (isAppSubdomain) {
@@ -40,8 +86,9 @@ export function middleware(request: NextRequest) {
     // ALL proof generation on the subdomain. Skip anything with a file extension, plus the
     // ZK asset dirs explicitly.
     // Shared top-level pages (not under /app) must serve as-is on the subdomain too —
-    // otherwise e.g. /explorer rewrites to /app/explorer (404). These exist only at the root.
-    const SHARED_TOP_LEVEL = ['/explorer', '/docs', '/how', '/roadmap']
+    // otherwise e.g. /docs rewrites to /app/docs (404). These exist only at the root.
+    // (/explorer is handled earlier — it 301s to the explorer.<root> subdomain.)
+    const SHARED_TOP_LEVEL = ['/docs', '/how', '/roadmap']
     const isShared = SHARED_TOP_LEVEL.some((r) => pathname === r || pathname.startsWith(r + '/'))
     const skip =
       isShared ||

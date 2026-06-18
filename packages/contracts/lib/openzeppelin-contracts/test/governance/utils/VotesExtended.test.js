@@ -9,7 +9,7 @@ const time = require('../../helpers/time');
 const { shouldBehaveLikeVotes } = require('./Votes.behavior');
 
 const MODES = {
-  blockNumber: '$VotesExtendedMock',
+  blocknumber: '$VotesExtendedMock',
   timestamp: '$VotesExtendedTimestampMock',
 };
 

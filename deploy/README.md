@@ -9,18 +9,37 @@ internet ──443/80──► caddy ──► frontend:3000
                                  ├─ /api/merkle-path/*  ─► proof-relay:3002   (backend merkle cache — FC-12)
                                  ├─ /api/recovery-data/*─► proof-relay:3002   (note recovery index — FC-12)
                                  ├─ /api/events         ─► proof-relay:3002   (explorer event index — FC-12)
-                                 ├─ /api/signing/*      ─► signing-layer:3004 (holds vault key)
-                                 └─ /api/settlement/*   ─► indexer:3003
+                                 ├─ /api/markets/*      ─► proof-relay:3002   (Gamma market catalog — FC-15)
+                                 └─ /api/signing/*      ─► signing-layer:3004 (holds vault key; auto-settlement API)
 ```
 
-The proof-relay is now both the **proof submitter** and the **backend index/cache** (FC-12):
-`CachedMerkleTree → /merkle-path`, `VaultEventIndex → /recovery-data` + `/events`, persisted in
-its own SQLite (`merkle.db`). Clients fetch merkle paths / recovery data / explorer events from it
-instead of scanning the chain — see `docs/architecture.md` §2.4.
+Only two backend services run. The proof-relay is both the **proof submitter** and the **backend
+index/cache + market catalog** (FC-12/FC-15): `CachedMerkleTree → /merkle-path`,
+`VaultEventIndex → /recovery-data` + `/events`, settlement-credit relay, and the public market
+catalog (`/markets`), persisted in its own SQLite (`merkle.db` / `catalog.db`). Clients fetch
+merkle paths / recovery data / explorer events from it instead of scanning the chain — see
+`docs/architecture.md` §2.4. **There is no separate indexer service** — settlement *detection*
+runs inside the signing-layer (`settlementResolver`), and settlement *records* are served from the
+proof-relay event index.
 
 Only **Caddy publishes ports** (80/443). The backend services have no published ports, so they
 are reachable only over the private compose network — never from the internet. No tunnel needed
 because the frontend's server-side API routes proxy to the backend by container name.
+
+### Hostnames (apex + 2 subdomains)
+
+Caddy serves three hostnames off the one `SSLIP_HOST` (`{$SSLIP_HOST}` + `app.` + `explorer.`),
+all proxied to the same Next server, which routes by subdomain in `src/middleware.ts`:
+
+| Host | Serves |
+|---|---|
+| `polyshield.xyz` (apex) | Marketing site. `/app/*` 301s to the app subdomain; `/explorer` 301s to the explorer subdomain. |
+| `app.polyshield.xyz` | The dApp (deposit/bet/settle/withdraw). |
+| `explorer.polyshield.xyz` | The public on-chain activity explorer (single-page host; all other links bounce to apex/app). |
+
+**DNS:** add an A record for **each** host → the box's public IP (`@`, `app`, `explorer`), DNS-only
+(grey cloud) so Caddy can complete the Let's Encrypt HTTP-01 challenge for all three. Caddy requests
+one cert covering all three names on first start.
 
 ---
 
@@ -106,7 +125,7 @@ Caddy fetches a Let's Encrypt cert for `SSLIP_HOST` on first start (watch `docke
 ```bash
 curl -I https://84-32-231-156.sslip.io/                       # 200, valid TLS
 sudo docker compose exec proof-relay   node -e "require('http').get('http://127.0.0.1:3002/health',r=>{console.log(r.statusCode)})"
-sudo docker compose exec indexer       node -e "require('http').get('http://127.0.0.1:3003/health',r=>{console.log(r.statusCode)})"
+sudo docker compose exec signing-layer node -e "require('http').get('http://127.0.0.1:3004/',r=>{console.log(r.statusCode)})"
 sudo docker compose logs -f signing-layer
 ```
 
@@ -122,8 +141,7 @@ Named volumes (survive `down`/restarts/redeploys):
 | Volume | Holds | If lost |
 |---|---|---|
 | `signing_data` (`/data/settlement.db`) | operator attestations + `tracked_markets` + event-listener cursor | **settlement breaks** — losing it can strand user funds |
-| `indexer_data` (`/data/polyshield.db`) | settlement records | indexer re-syncs from chain (slow) |
-| `proofrelay_data` (`/data/merkle.db`) | merkle cache + event index (FC-12) | rebuildable from chain — safe to lose, just a slow cold-start re-scan |
+| `proofrelay_data` (`/data/merkle.db`) | merkle cache + event index + market catalog (FC-12/FC-15) | rebuildable from chain — safe to lose, just a slow cold-start re-scan |
 | `caddy_data` | TLS certs/account | re-issued automatically |
 
 Back up the SQLite volumes on a schedule (`signing_data` is the critical one), e.g.:

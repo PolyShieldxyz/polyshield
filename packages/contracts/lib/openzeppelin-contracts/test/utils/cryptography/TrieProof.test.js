@@ -1,6 +1,6 @@
 const { ethers } = require('hardhat');
 const { expect } = require('chai');
-const { loadFixture } = require('@nomicfoundation/hardhat-network-helpers');
+const { spawn } = require('child_process');
 const { MerklePatriciaTrie, createMerkleProof } = require('@ethereumjs/mpt');
 
 const { Enum } = require('../../helpers/enums');
@@ -26,36 +26,66 @@ const ProofError = Enum(
   'INVALID_PROOF', // General failure during proof traversal
 );
 
+const ZeroBytes = generators.bytes.zero;
+
 const sanitizeHexString = value => (value.length % 2 ? '0x0' : '0x') + value.replace(/0x/, '');
 const encodeStorageLeaf = value => ethers.encodeRlp(ethers.stripZerosLeft(value));
 
-async function fixture() {
-  const mock = await ethers.deployContract('$TrieProof');
-  const storage = await ethers.deployContract('StorageSlotMock');
-  const target = await ethers.deployContract('CallReceiverMock');
-  return { mock, storage, target };
-}
-
 describe('TrieProof', function () {
-  beforeEach(async function () {
-    Object.assign(this, await loadFixture(fixture));
+  before('start anvil node', async function () {
+    const port = 8546;
+
+    // start process and create provider
+    this.process = await spawn('anvil', ['--port', port], { timeout: 30000 });
+    await new Promise(resolve => this.process.stdout.once('data', resolve));
+    this.provider = new ethers.JsonRpcProvider(`http://localhost:${port}`);
+
+    // deploy mock on the hardhat network
+    this.mock = await ethers.deployContract('$TrieProof');
+  });
+
+  beforeEach('use fresh storage contract with empty state for each test', async function () {
+    this.storage = await this.provider.getSigner(0).then(signer => ethers.deployContract('StorageSlotMock', signer));
+    this.target = await this.provider.getSigner(0).then(signer => ethers.deployContract('CallReceiverMock', signer));
+
+    this.getProof = ({
+      provider = this.provider,
+      address = this.storage.target,
+      storageKeys = [],
+      blockNumber = 'latest',
+    }) =>
+      provider.send('eth_getProof', [
+        address,
+        ethers.isHexString(storageKeys) ? [storageKeys] : storageKeys,
+        blockNumber,
+      ]);
+  });
+
+  after('stop anvil node', async function () {
+    this.process.kill();
   });
 
   describe('verify', function () {
     it('verify transaction and receipt inclusion in block', async function () {
       // Multiple transactions/events in a block
-      const txs = await batchInBlock([
-        () => this.target.mockFunction({ gasLimit: 100000 }),
-        () => this.target.mockFunctionWithArgs(0, 1, { gasLimit: 100000 }),
-        () => this.target.mockFunctionWithArgs(17, 42, { gasLimit: 100000 }),
-      ]);
+      const txs = await batchInBlock(
+        [
+          () => this.target.mockFunction({ gasLimit: 100000 }),
+          () => this.target.mockFunctionWithArgs(0, 1, { gasLimit: 100000 }),
+          () => this.target.mockFunctionWithArgs(17, 42, { gasLimit: 100000 }),
+        ],
+        this.provider,
+      );
 
       // for some reason ethers doesn't expose the transactionsRoot in blocks, so we fetch the block details via RPC instead.
-      const blockTries = await ethers.provider.getBlock('latest').then(block => BlockTries.from(block).ready());
-      const { transactionsRoot, receiptsRoot } = await ethers.provider.send('eth_getBlockByNumber', [
-        blockTries.block.number,
+      const { transactionsRoot, receiptsRoot } = await this.provider.send('eth_getBlockByNumber', [
+        txs.at(0).blockNumber,
         false,
       ]);
+
+      const blockTries = await this.provider
+        .getBlock(txs.at(0).blockNumber)
+        .then(block => BlockTries.from(block).ready());
 
       // Sanity check trie roots
       expect(blockTries.transactionTrieRoot).to.equal(transactionsRoot);
@@ -111,17 +141,18 @@ describe('TrieProof', function () {
       ]) {
         it(title, async function () {
           // set storage state
-          await Promise.all(Object.entries(slots).map(([slot, value]) => this.storage.setBytes32Slot(slot, value)));
+          const txs = await Promise.all(
+            Object.entries(slots).map(([slot, value]) => this.storage.setBytes32Slot(slot, value)),
+          );
 
           // get block that contains the latest storage changes
-          const { stateRoot } = await ethers.provider.send('eth_getBlockByNumber', ['latest', false]);
+          const { stateRoot, number: blockNumber } = await txs.at(-1).getBlock();
 
           // build storage proofs for all storage slots (in that block)
-          const { accountProof, storageHash, storageProof, codeHash } = await ethers.provider.send('eth_getProof', [
-            this.storage.target,
-            Object.keys(slots),
-            'latest',
-          ]);
+          const { accountProof, storageHash, storageProof, codeHash } = await this.getProof({
+            storageKeys: Object.keys(slots),
+            blockNumber: ethers.toBeHex(blockNumber),
+          });
 
           // Verify account details in the block's state trie
           await expect(
@@ -153,7 +184,7 @@ describe('TrieProof', function () {
     });
 
     it('returns false for invalid proof', async function () {
-      await expect(this.mock.$verify('0x', ethers.ZeroHash, '0x', [])).to.eventually.be.false;
+      await expect(this.mock.$verify(ZeroBytes, ethers.ZeroHash, '0x', [])).to.eventually.be.false;
     });
   });
 
@@ -176,19 +207,10 @@ describe('TrieProof', function () {
 
       for (const [slot, value] of Object.entries(slots)) {
         const proof = await createMerkleProof(tree, ethers.getBytes(slot));
-        expect(proof.length).to.equal(3); // root extension node, branch node, leaf node
-
         // verify the full proof
         await expect(this.mock.$verify(encodeStorageLeaf(value), root, slot, proof)).to.eventually.be.true;
-
-        // verify the compressed proofs with the inlined node removed (vacuous proof). Last two levels are inlined, so they are optional.
-        for (const partialProof of [
-          [proof[0]], // only root extension node (missing branch and leaf nodes)
-          [proof[0], proof[1]], // root extension node and branch node (missing leaf node)
-          [proof[0], proof[2]], // root extension node and leaf node (missing branch node)
-        ]) {
-          await expect(this.mock.$verify(encodeStorageLeaf(value), root, slot, partialProof)).to.eventually.be.true;
-        }
+        // verify the compressed proof with the inlined node removed (vacuous proof)
+        await expect(this.mock.$verify(encodeStorageLeaf(value), root, slot, proof.slice(0, -1))).to.eventually.be.true;
       }
     });
 
@@ -216,19 +238,10 @@ describe('TrieProof', function () {
 
       for (const [slot, value] of Object.entries(slots)) {
         const proof = await createMerkleProof(tree, ethers.getBytes(slot));
-        expect(proof.length).to.equal(4); // root extension node, branch node, branch node, leaf node
-
         // verify the full proof
         await expect(this.mock.$verify(encodeStorageLeaf(value), root, slot, proof)).to.eventually.be.true;
-
-        // verify the compressed proofs with the inlined node removed (vacuous proof). Last two levels are inlined, so they are optional.
-        for (const partialProof of [
-          [proof[0], proof[1]], // only root extension node and first branch node (missing second branch and leaf nodes)
-          [proof[0], proof[1], proof[2]], // root extension node and both branch nodes (missing leaf node)
-          [proof[0], proof[1], proof[3]], // root extension node and first branch node and leaf node (missing second branch node)
-        ]) {
-          await expect(this.mock.$verify(encodeStorageLeaf(value), root, slot, partialProof)).to.eventually.be.true;
-        }
+        // verify the compressed proof with the inlined node removed (vacuous proof)
+        await expect(this.mock.$verify(encodeStorageLeaf(value), root, slot, proof.slice(0, -1))).to.eventually.be.true;
       }
     });
   });
@@ -240,7 +253,7 @@ describe('TrieProof', function () {
         .withArgs(ProofError.EMPTY_KEY);
 
       await expect(this.mock.$tryTraverse(ethers.ZeroHash, '0x', [])).to.eventually.deep.equal([
-        '0x',
+        ZeroBytes,
         ProofError.EMPTY_KEY,
       ]);
     });
@@ -249,11 +262,10 @@ describe('TrieProof', function () {
       const slot = generators.bytes32();
       const value = generators.bytes32();
       await this.storage.setBytes32Slot(slot, value);
-
       const {
         storageHash,
         storageProof: [{ proof }],
-      } = await ethers.provider.send('eth_getProof', [this.storage.target, [slot], 'latest']);
+      } = await this.getProof({ storageKeys: [slot] });
 
       // Correct root hash
       await expect(this.mock.$verify(encodeStorageLeaf(value), storageHash, ethers.keccak256(slot), proof)).to
@@ -275,7 +287,7 @@ describe('TrieProof', function () {
         .to.revertedWithCustomError(this.mock, 'TrieProofTraversalError')
         .withArgs(ProofError.INVALID_ROOT);
       await expect(this.mock.$tryTraverse(invalidHash, ethers.keccak256(slot), proof)).to.eventually.deep.equal([
-        '0x',
+        ZeroBytes,
         ProofError.INVALID_ROOT,
       ]);
     });
@@ -290,7 +302,7 @@ describe('TrieProof', function () {
       const {
         storageHash,
         storageProof: [{ proof }],
-      } = await ethers.provider.send('eth_getProof', [this.storage.target, [slot], 'latest']);
+      } = await this.getProof({ storageKeys: [slot] });
 
       // Correct proof
       await expect(this.mock.$verify(encodeStorageLeaf(value), storageHash, ethers.keccak256(slot), proof)).to
@@ -313,7 +325,7 @@ describe('TrieProof', function () {
         .to.revertedWithCustomError(this.mock, 'TrieProofTraversalError')
         .withArgs(ProofError.INVALID_LARGE_NODE);
       await expect(this.mock.$tryTraverse(storageHash, ethers.keccak256(slot), proof)).to.eventually.deep.equal([
-        '0x',
+        ZeroBytes,
         ProofError.INVALID_LARGE_NODE,
       ]);
     });
@@ -343,7 +355,7 @@ describe('TrieProof', function () {
         .to.revertedWithCustomError(this.mock, 'TrieProofTraversalError')
         .withArgs(ProofError.EMPTY_VALUE);
       await expect(this.mock.$tryTraverse(ethers.keccak256(proof[0]), key, proof)).to.eventually.deep.equal([
-        '0x',
+        ZeroBytes,
         ProofError.EMPTY_VALUE,
       ]);
     });
@@ -359,7 +371,7 @@ describe('TrieProof', function () {
         .to.revertedWithCustomError(this.mock, 'TrieProofTraversalError')
         .withArgs(ProofError.INVALID_EXTRA_PROOF_ELEMENT);
       await expect(this.mock.$tryTraverse(ethers.keccak256(proof[0]), key, proof)).to.eventually.deep.equal([
-        '0x',
+        ZeroBytes,
         ProofError.INVALID_EXTRA_PROOF_ELEMENT,
       ]);
     });
@@ -378,7 +390,7 @@ describe('TrieProof', function () {
           .to.revertedWithCustomError(this.mock, 'TrieProofTraversalError')
           .withArgs(ProofError.INVALID_PATH_REMAINDER);
         await expect(this.mock.$tryTraverse(ethers.keccak256(proof[0]), key, proof)).to.eventually.deep.equal([
-          '0x',
+          ZeroBytes,
           ProofError.INVALID_PATH_REMAINDER,
         ]);
       });
@@ -392,7 +404,7 @@ describe('TrieProof', function () {
           .to.revertedWithCustomError(this.mock, 'TrieProofTraversalError')
           .withArgs(ProofError.EMPTY_PATH);
         await expect(this.mock.$tryTraverse(ethers.keccak256(proof[0]), '0x00', proof)).to.eventually.deep.equal([
-          '0x',
+          ZeroBytes,
           ProofError.EMPTY_PATH,
         ]);
       });
@@ -410,7 +422,7 @@ describe('TrieProof', function () {
           .to.revertedWithCustomError(this.mock, 'TrieProofTraversalError')
           .withArgs(ProofError.INVALID_PATH_REMAINDER);
         await expect(this.mock.$tryTraverse(ethers.keccak256(proof[0]), key, proof)).to.eventually.deep.equal([
-          '0x',
+          ZeroBytes,
           ProofError.INVALID_PATH_REMAINDER,
         ]);
       });
@@ -426,7 +438,7 @@ describe('TrieProof', function () {
           .to.revertedWithCustomError(this.mock, 'TrieProofTraversalError')
           .withArgs(ProofError.EMPTY_EXTENSION_PATH_REMAINDER);
         await expect(this.mock.$tryTraverse(ethers.keccak256(proof[0]), key, proof)).to.eventually.deep.equal([
-          '0x',
+          ZeroBytes,
           ProofError.EMPTY_EXTENSION_PATH_REMAINDER,
         ]);
       });
@@ -444,7 +456,7 @@ describe('TrieProof', function () {
           .to.revertedWithCustomError(this.mock, 'TrieProofTraversalError')
           .withArgs(ProofError.MISMATCH_LEAF_PATH_KEY_REMAINDER);
         await expect(this.mock.$tryTraverse(ethers.keccak256(proof[0]), key, proof)).to.eventually.deep.equal([
-          '0x',
+          ZeroBytes,
           ProofError.MISMATCH_LEAF_PATH_KEY_REMAINDER,
         ]);
       });
@@ -458,7 +470,7 @@ describe('TrieProof', function () {
         .to.revertedWithCustomError(this.mock, 'TrieProofTraversalError')
         .withArgs(ProofError.UNKNOWN_NODE_PREFIX);
       await expect(this.mock.$tryTraverse(ethers.keccak256(proof[0]), key, proof)).to.eventually.deep.equal([
-        '0x',
+        ZeroBytes,
         ProofError.UNKNOWN_NODE_PREFIX,
       ]);
     });
@@ -471,7 +483,7 @@ describe('TrieProof', function () {
         .to.revertedWithCustomError(this.mock, 'TrieProofTraversalError')
         .withArgs(ProofError.UNPARSEABLE_NODE);
       await expect(this.mock.$tryTraverse(ethers.keccak256(proof[0]), key, proof)).to.eventually.deep.equal([
-        '0x',
+        ZeroBytes,
         ProofError.UNPARSEABLE_NODE,
       ]);
     });
@@ -481,7 +493,7 @@ describe('TrieProof', function () {
         .to.revertedWithCustomError(this.mock, 'TrieProofTraversalError')
         .withArgs(ProofError.INVALID_PROOF);
       await expect(this.mock.$tryTraverse(ethers.ZeroHash, '0x00', [])).to.eventually.deep.equal([
-        '0x',
+        ZeroBytes,
         ProofError.INVALID_PROOF,
       ]);
     });
@@ -698,7 +710,7 @@ describe('TrieProof', function () {
         }
 
         await expect(this.mock.$tryTraverse(root, key, proof)).to.eventually.deep.equal([
-          value ?? '0x',
+          value ?? ZeroBytes,
           error ?? ProofError.NO_ERROR,
         ]);
       });

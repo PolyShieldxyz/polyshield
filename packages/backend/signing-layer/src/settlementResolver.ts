@@ -7,6 +7,7 @@ import { signingLayerNonceManager } from "./nonceManager";
 import { conditionIdForKey, marketMetaForKey, toFieldSafe } from "./marketRegistry";
 import { getTrackedMarkets, upsertTrackedMarket, trackedMarketCount } from "./trackedMarkets";
 import { fetchResolvedMarkets } from "./vaultEventSource";
+import { batchUint } from "./multicall";
 
 const logger = pino({ name: "settlement-resolver" });
 
@@ -190,45 +191,60 @@ function startSettlementPoll(provider: ethers.JsonRpcProvider, wallet: ethers.Wa
       const nowSec = Math.floor(Date.now() / 1000);
       const nowMs = Date.now();
       // When the resolved-set was recently seeded from the proof-relay index, a market absent from it
-      // is genuinely unresolved on-chain — so skip the per-market Vault.marketResolvedAt eth_call. If
-      // the seed is stale/unavailable (relay down), fall back to the on-chain check.
+      // is genuinely unresolved on-chain — so skip the Vault.marketResolvedAt check. If the seed is
+      // stale/unavailable (relay down), fall back to the on-chain check (also batched).
       const seedFresh = _resolvedSeededAt > 0 && nowMs - _resolvedSeededAt < SEED_FRESH_MS;
-      // Source of markets = the locally-persisted tracked_markets table. NO historical eth_getLogs,
-      // so this works on a pruned RPC (which refuses logs older than its prune window).
-      for (const { reducedKey, rawConditionId, endDate } of getTrackedMarkets()) {
-        if (resolvedMarkets.has(reducedKey)) continue;
-        // Resolution-time gate FIRST (no RPC): a timed market can't resolve before its endDate, so a
-        // pre-endDate market costs zero chain calls. Open-ended markets (no endDate) fall through.
-        if (endDate && nowSec < endDate) continue;
-        // Backoff gate: skip BOTH eth_calls until this market's next scheduled check.
+
+      // Pass 1 — collect eligible markets with NO RPC: past endDate, not known-resolved, past backoff.
+      // (tracked_markets is local; no historical eth_getLogs, so this works on a pruned RPC.)
+      let eligible = getTrackedMarkets().filter(({ reducedKey, endDate }) => {
+        if (resolvedMarkets.has(reducedKey)) return false;
+        if (endDate && nowSec < endDate) return false; // a timed market can't resolve before endDate
         const bo = _settleBackoff.get(reducedKey);
-        if (bo && nowMs < bo.nextAt) continue;
-        try {
-          // Per-market on-chain resolved check — only when the index seed isn't fresh (else the seed
-          // already told us which markets are resolved, with no eth_call).
-          if (!seedFresh) {
-            const resolvedAt: bigint = await vault.marketResolvedAt(reducedKey);
-            if (resolvedAt > 0n) {
-              resolvedMarkets.add(reducedKey); // already resolved on-chain — nothing to do
-              _settleBackoff.delete(reducedKey);
-              continue;
-            }
+        if (bo && nowMs < bo.nextAt) return false;
+        return true;
+      });
+      if (eligible.length === 0) return;
+
+      // Pass 2 — when the index seed isn't fresh, batch Vault.marketResolvedAt for ALL eligible markets
+      // in ONE eth_call (Multicall3) and drop the already-resolved ones.
+      if (!seedFresh) {
+        const resolvedAts = await batchUint(provider, vault, "marketResolvedAt", eligible.map((m) => [m.reducedKey]));
+        eligible = eligible.filter((m, i) => {
+          if ((resolvedAts[i] ?? 0n) > 0n) {
+            resolvedMarkets.add(m.reducedKey);
+            _settleBackoff.delete(m.reducedKey);
+            return false;
           }
+          return true;
+        });
+        if (eligible.length === 0) return;
+      }
 
-          // Prefer the stored raw conditionId; if it's just the reduced key (resolveToken missed at bet
-          // time), fall back to the registry. Without the real conditionId, CTF can't be queried.
-          const raw = rawConditionId && rawConditionId !== reducedKey ? rawConditionId : (conditionIdForKey(reducedKey) ?? rawConditionId);
-          if (!raw || raw === reducedKey) { backoffMarket(reducedKey, nowMs); continue; }
+      // Resolve each market's raw conditionId (NO RPC — registry lookup). Without a usable raw
+      // conditionId, CTF can't be queried → back off and skip.
+      const checkable: Array<{ reducedKey: string; raw: string }> = [];
+      for (const { reducedKey, rawConditionId } of eligible) {
+        const raw = rawConditionId && rawConditionId !== reducedKey ? rawConditionId : (conditionIdForKey(reducedKey) ?? rawConditionId);
+        if (!raw || raw === reducedKey) { backoffMarket(reducedKey, nowMs); continue; }
+        checkable.push({ reducedKey, raw });
+      }
+      if (checkable.length === 0) return;
 
-          const denominator: bigint = await ctf.payoutDenominator(raw);
-          if (denominator === 0n) { backoffMarket(reducedKey, nowMs); continue; } // not finalized on CTF yet
-
+      // Pass 3 — batch ctf.payoutDenominator for ALL checkable markets in ONE eth_call. A finalized
+      // market (denominator > 0) is driven through settlement; the rest back off.
+      const denoms = await batchUint(provider, ctf, "payoutDenominator", checkable.map((c) => [c.raw]));
+      for (let i = 0; i < checkable.length; i++) {
+        const { reducedKey, raw } = checkable[i];
+        const denom = denoms[i];
+        if (denom === null || denom === 0n) { backoffMarket(reducedKey, nowMs); continue; } // not finalized (or read failed)
+        try {
           logger.info({ reducedKey, rawConditionId: raw }, "poll: market resolved on CTF — running settlement");
           await handleResolution(provider, wallet, raw, await provider.getBlockNumber());
           resolvedMarkets.add(reducedKey);
           _settleBackoff.delete(reducedKey);
         } catch (err) {
-          logger.error({ err, reducedKey }, "poll: settlement check failed for market");
+          logger.error({ err, reducedKey }, "poll: settlement failed for market");
           backoffMarket(reducedKey, nowMs);
         }
       }

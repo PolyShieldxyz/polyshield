@@ -368,7 +368,7 @@ describe('ERC4337Utils', function () {
   describe('getValidationData', function () {
     for (const [name, range] of Object.entries({
       timestamp: ValidationRange.Timestamp,
-      blockNumber: ValidationRange.Block,
+      blocknumber: ValidationRange.Block,
     })) {
       describe(`using ${name}`, function () {
         it('returns the validation data with valid validity range', async function () {

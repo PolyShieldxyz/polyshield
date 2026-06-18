@@ -17,15 +17,19 @@ packages/circuits/
 
 ## Active: Groth16 / Circom (`groth16/`)
 
-**These are the circuits used in production.** Compiled with `circom 2.1.6`, proven with `snarkjs` (Groth16 on BN254), verified on-chain by the five adapter verifier contracts in `packages/contracts/src/verifiers/`.
+**These are the circuits used in production.** Compiled with `circom 2.1.6`, proven with `snarkjs` (Groth16 on BN254), verified on-chain by the nine adapter verifier contracts in `packages/contracts/src/verifiers/` (one per circuit, verifier slots 0–8).
 
 ```
 groth16/
-  bet_auth.circom          — Bet authorization: note balance check, nullifier, new commitment
-  withdrawal.circom        — Withdrawal to depositing address only (W-to-W)
-  settlement_credit.circom — Winning position settlement credit
-  bet_cancel.circom        — Restore balance for a failed FOK bet
-  cancel_credit.circom     — N/A market resolution credit
+  bet_auth.circom          — (slot 0) Bet authorization: balance check, nullifier, new commitment, bet_amount + fee
+  settlement_credit.circom — (slot 1) Winning position settlement credit
+  withdrawal.circom        — (slot 2) Withdrawal to depositing address only (W-to-W)
+  bet_cancel.circom        — (slot 3) Restore balance for a failed/cancelled bet
+  cancel_credit.circom     — (slot 4) N/A market resolution credit (all CTF numerators zero)
+  deposit.circom           — (slot 5) Mandatory deposit binding (FC-2): commitment ↔ amount + owner
+  position_close.circom    — (slot 6) Pre-settlement secondary-sale credit (FC-1)
+  partial_credit.circom    — (slot 7) Refund of the unfilled remainder of a partial limit fill (FC-4)
+  consolidate.circom       — (slot 8) Merge up to 4 same-owner notes into 1 (FC-8)
   lib/
     note.circom            — NoteCommitment (Poseidon4), NullifierHash (Poseidon2), RecipientHash
     merkle.circom          — Poseidon Merkle path verifier (depth 32)
@@ -44,21 +48,29 @@ nullifier  = Poseidon2(secret, nonce)
 
 | Circuit | Public inputs |
 |---|---|
-| `bet_auth` | `merkle_root, nullifier, new_commitment, bet_amount, price, expected_shares, market_id, outcome_side, position_id` |
-| `withdrawal` | `merkle_root, nullifier, withdrawal_amount, recipient_hash, new_commitment` |
+| `bet_auth` | `merkle_root, nullifier, new_commitment, bet_amount, price, expected_shares, market_id, outcome_side, position_id, fee` (10; `fee` Vault-injected, FC-10) |
 | `settlement_credit` | `merkle_root, nullifier, new_commitment, nullifier_of_bet, market_id, total_credit` |
+| `withdrawal` | `merkle_root, nullifier, withdrawal_amount, recipient_hash, new_commitment` |
 | `bet_cancel` | `merkle_root, nullifier, new_commitment, nullifier_of_bet, bet_amount` |
 | `cancel_credit` | `merkle_root, nullifier, new_commitment, nullifier_of_bet, market_id, bet_amount` |
+| `deposit` | `commitment, amount, owner_address` |
+| `position_close` | `merkle_root, nullifier, new_commitment, nullifier_of_bet, sell_proceeds` |
+| `partial_credit` | `merkle_root, nullifier, new_commitment, nullifier_of_bet, refund_amount` |
+| `consolidate` | `merkle_root, nullifier[0..3], new_commitment` |
+
+> Vault-injected public inputs (`fee`, `bet_amount`, `total_credit` components, `sell_proceeds`,
+> `refund_amount`) are supplied by the contract — not the user — so a forged proof with any other
+> value produces a `new_commitment` that fails verification. See `docs/zk-design.md`.
 
 ### Proof format
 
 Proofs are ABI-encoded as `abi.encode(uint256[2] pA, uint256[2][2] pB, uint256[2] pC)` — 256 bytes. The G2 coordinate pairs are swapped relative to snarkjs ordering to match the EIP-197 BN254 precompile convention.
 
-### Active circuit set (8)
+### Active circuit set (9)
 
-`bet_auth`, `withdrawal`, `settlement_credit`, `bet_cancel`, `cancel_credit`, plus
-`deposit` (FC-2), `position_close` (FC-1), and `partial_credit` (FC-4). Each has a generated
-verifier in `packages/contracts/src/verifiers/<Name>Verifier.sol`.
+`bet_auth`, `settlement_credit`, `withdrawal`, `bet_cancel`, `cancel_credit`, plus
+`deposit` (FC-2), `position_close` (FC-1), `partial_credit` (FC-4), and `consolidate` (FC-8).
+Each has a generated verifier in `packages/contracts/src/verifiers/<Name>Verifier.sol`.
 
 > `circomlib` must be installed at `packages/circuits/node_modules` for the relative includes in
 > `groth16/lib/*.circom` to resolve — it is declared in `packages/circuits/package.json`, so
@@ -70,23 +82,22 @@ The compiled `.wasm` and `.zkey` files are **not committed** (large binaries). T
 - `.wasm` files → `packages/frontend/public/circuits/*.wasm` (gitignored)
 - `.zkey` files → `packages/frontend/public/zkeys/*.zkey` (gitignored)
 
-Regenerate everything (verifiers + wasm + zkey + RealVerifier fixtures) via the reconstructed
-Groth16 pipeline in `Benchmarking/groth16/` (see its README for prerequisites — circom 2.1.6,
-snarkjs, and a Powers-of-Tau file):
+Regenerate everything (verifiers + wasm + zkey + RealVerifier fixtures) via the Groth16 pipeline
+(prerequisites: circom 2.1.6, snarkjs, and a Powers-of-Tau file):
 ```bash
 # from the repo root
 pnpm circuits:all
 # == compile → setup → generate verifiers → copy wasm/zkey to frontend → regenerate fixtures
 ```
-A fresh trusted setup changes every verifying key, so this regenerates all 8 verifiers, all
-artifacts, and all 3 `test/fixtures/*_proof.json` together. Then verify on-chain:
+A fresh trusted setup changes every verifying key, so this regenerates all 9 verifiers, all
+artifacts, and the `test/fixtures/*_proof.json` files together. Then verify on-chain:
 ```bash
 cd packages/contracts && forge build && forge test --match-contract RealVerifierTest
 ```
 
 > The old `regen-verifiers.sh` (barretenberg/UltraHonk-based) was removed — it violated the
-> "no Honk/PLONK" rule. The Groth16 verifiers are generated by
-> `Benchmarking/groth16/src/cli/generateVerifiers.ts`.
+> "no Honk/PLONK" rule. The Groth16 verifiers are generated by the snarkjs-based
+> `generateVerifiers.ts` step of the Groth16 pipeline.
 
 ---
 
