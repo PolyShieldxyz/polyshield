@@ -1,7 +1,7 @@
 import Link from 'next/link'
 import { Logo } from './Logo'
 import { Icon, ICONS } from './Icon'
-import { NETWORK_STATUS } from '@/lib/brand'
+import { NETWORK_STATUS, TWITTER_URL, GITHUB_URL } from '@/lib/brand'
 
 // Only link to destinations that actually exist today. Dead "Coming soon"
 // placeholders (Markets/Vault/SDK/Press/Whitepaper/Legal/…) were removed for the
@@ -27,15 +27,14 @@ export function SiteFooter() {
               Zero-knowledge privacy infrastructure for prediction markets.
               Built for traders who treat conviction as an asset.
             </div>
-            {/* X / Twitter and GitHub only — destinations to be wired up; rendered as
-                disabled placeholders until the handles are live. Discord removed. */}
+            {/* X / Twitter and GitHub — live. Discord removed. */}
             <div className="row gap-3 mt-6">
-              <span className="btn btn-sm btn-ghost" role="link" aria-disabled="true" title="Coming soon" aria-label="X / Twitter (coming soon)" style={{ cursor: 'not-allowed', opacity: 0.5 }}>
+              <a className="btn btn-sm btn-ghost" href={TWITTER_URL} target="_blank" rel="noopener noreferrer" aria-label="PolyShield on X / Twitter" title="X / Twitter">
                 <Icon d={ICONS.twitter} />
-              </span>
-              <span className="btn btn-sm btn-ghost" role="link" aria-disabled="true" title="Coming soon" aria-label="GitHub (coming soon)" style={{ cursor: 'not-allowed', opacity: 0.5 }}>
+              </a>
+              <a className="btn btn-sm btn-ghost" href={GITHUB_URL} target="_blank" rel="noopener noreferrer" aria-label="PolyShield on GitHub" title="GitHub">
                 <Icon d={ICONS.github} />
-              </span>
+              </a>
             </div>
           </div>
           <div>

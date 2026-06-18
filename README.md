@@ -1,5 +1,7 @@
 # Polyshield
 
+[![Website](https://img.shields.io/badge/web-polyshield.xyz-0b0b0b)](https://polyshield.xyz) [![X / Twitter](https://img.shields.io/badge/X-@PolyShieldapp-1d9bf0)](https://x.com/PolyShieldapp) [![GitHub](https://img.shields.io/badge/GitHub-PolyShieldxyz-181717)](https://github.com/PolyShieldxyz)
+
 A zero-knowledge privacy vault for [Polymarket](https://polymarket.com). Deposit USDC into a shared vault, authorize bets via ZK proofs, and withdraw — without your wallet address ever appearing in a Polymarket transaction.
 
 **Status:** Core protocol live on Polygon mainnet (limited test phase) — full deposit → bet → settle → withdraw verified end-to-end with real funds. [Roadmap →](https://polyshield.xyz/roadmap)
@@ -263,6 +265,14 @@ In short, before writing any code:
 - Read [`CLAUDE.md`](CLAUDE.md) — the authoritative source for architecture decisions, naming conventions, and protocol constants that must not be overridden.
 - Read [`docs/open-questions.md`](docs/open-questions.md) before implementing anything in affected areas (Q4, Q5, Q7, Q8 are the most likely to be relevant). Check which questions are OPEN vs RESOLVED.
 - Read [`docs/zk-design.md`](docs/zk-design.md) before touching any circuit or any code that interacts with commitments or nullifiers. -->
+
+---
+
+## Links
+
+- Website — [polyshield.xyz](https://polyshield.xyz)
+- X / Twitter — [@PolyShieldapp](https://x.com/PolyShieldapp)
+- GitHub — [PolyShieldxyz](https://github.com/PolyShieldxyz)
 
 ---
 

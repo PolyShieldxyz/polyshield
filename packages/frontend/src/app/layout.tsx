@@ -5,6 +5,7 @@ import { Providers } from '@/providers'
 import { TopNav } from '@/components/ui/TopNav'
 import { SiteFooterGate } from '@/components/ui/SiteFooterGate'
 import { DevStatusBar } from '@/components/app/DevStatusBar'
+import { SITE_URL, TWITTER_HANDLE } from '@/lib/brand'
 
 // FINDING: PRIV-002 / PERF-002 — self-host fonts via next/font instead of the
 // third-party Google Fonts CDN @import (which leaked visitor IP/Referer to Google
@@ -23,9 +24,28 @@ const jetbrainsMono = JetBrains_Mono({
   display: 'swap',
 })
 
+const TITLE = 'PolyShield — Private prediction market trading'
+const DESCRIPTION =
+  'Zero-knowledge vault layer for Polymarket. Deposit USDC, place trades from a shared anonymity set, and settle privately.'
+
 export const metadata: Metadata = {
-  title: 'PolyShield — Private prediction market trading',
-  description: 'Zero-knowledge vault layer for Polymarket. Deposit USDC, place trades from a shared anonymity set, and settle privately.',
+  metadataBase: new URL(SITE_URL),
+  title: TITLE,
+  description: DESCRIPTION,
+  openGraph: {
+    type: 'website',
+    url: SITE_URL,
+    siteName: 'PolyShield',
+    title: TITLE,
+    description: DESCRIPTION,
+  },
+  twitter: {
+    card: 'summary_large_image',
+    site: TWITTER_HANDLE,
+    creator: TWITTER_HANDLE,
+    title: TITLE,
+    description: DESCRIPTION,
+  },
 }
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
