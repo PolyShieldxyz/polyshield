@@ -238,14 +238,14 @@ export default function MarketsPage() {
           {(isFetching || searching) && <span className="pill pill-cyan" style={{ fontSize: 10 }}>{searching ? 'Searching Polymarket…' : 'Updating'}</span>}
         </div>
         <div className="row gap-3">
-          <div className="row gap-2 panel" style={{ padding: '6px 10px', borderRadius: 6 }}>
+          <div className="row gap-2 panel" style={{ padding: '6px 10px', borderRadius: 6, flex: '1 1 140px', minWidth: 0, maxWidth: 240 }}>
             <Icon d={ICONS.search} size={12} />
             <input
               value={search}
               onChange={(event) => setSearch(event.target.value)}
               placeholder="Search markets…"
               aria-label="Search markets"
-              style={{ background: 'transparent', border: 'none', color: 'var(--text)', fontFamily: 'var(--mono)', fontSize: 12, width: 200 }}
+              style={{ background: 'transparent', border: 'none', color: 'var(--text)', fontFamily: 'var(--mono)', fontSize: 12, width: '100%', minWidth: 0 }}
             />
           </div>
           <div className="row gap-1">
@@ -309,7 +309,7 @@ export default function MarketsPage() {
               {visible.map((market) => <MarketCard key={market.id} market={market} />)}
             </div>
           ) : (
-            <div className="panel" style={{ padding: 0 }}>
+            <div className="panel scroll-x" style={{ padding: 0 }}>
               <table className="tbl">
                 <thead>
                   <tr>

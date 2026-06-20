@@ -25,7 +25,8 @@ import {
 import { getNoteSecret } from '@/lib/secretSession'
 import { consolidateNotes } from '@/lib/consolidate'
 import { fetchMerklePath, relayBet, requestLimitOrder, waitForTransactionConfirmation } from '@/lib/api'
-import { generateProofInWorker } from '@/lib/prover'
+import { generateProofInWorker, type AssetProgress } from '@/lib/prover'
+import { LiveRegion } from '@/components/app/LiveRegion'
 import { log, proofSummary } from '@/lib/logger'
 import { marketBuyCeilingFromBook, roundToTick, type BookLevel } from '@/lib/pricing'
 import { type OrderKind, ORDER_KIND_LABEL } from '@/lib/orderType'
@@ -111,9 +112,12 @@ export function BetModal({
   const [error, setError] = useState<string | null>(null)
   const [txHash, setTxHash] = useState('')
   const [autoSettle, setAutoSettle] = useState(true)
-  // FINDING: FUNC-001 — drive the progress bar from real elapsed time (not a fake
-  // hardcoded width) and surface an honest "this can take a while" message.
-  const [progress, setProgress] = useState(5)
+  // FUNC-001 / WCAG 4.1.3 — HONEST, staged proof status (replaces the old fake elapsed-time bar
+  // that eased toward 90% regardless of real work). `statusMsg` names the current step; `downloadPct`
+  // is the determinate proving-key download (the one step with a real %), null during the
+  // indeterminate proving/relay/confirm steps. Mirrors the deposit/withdraw flows.
+  const [statusMsg, setStatusMsg] = useState('')
+  const [downloadPct, setDownloadPct] = useState<number | null>(null)
   // FINDING: FUNC-001 — set when the worker fails and the prover falls back to the
   // main thread (polyshield:prover-fallback event), so we can tell the user.
   const [fallbackNote, setFallbackNote] = useState<string | null>(null)
@@ -127,29 +131,10 @@ export function BetModal({
     setError(null)
     setTxHash('')
     setAutoSettle(true)
-    setProgress(5)
+    setStatusMsg('')
+    setDownloadPct(null)
     setFallbackNote(null)
   }, [open, initialAmount, marketId, price])
-
-  // FINDING: FUNC-001 — advance the progress bar from ~5% toward ~90% over ~120s
-  // while proving. It approaches 90% asymptotically and never reaches 100% until
-  // the proof actually completes (phase leaves 'running'), so the bar reflects
-  // honest "still working" state rather than a fixed 72% lie. Resets on phase
-  // change away from 'running'.
-  useEffect(() => {
-    if (phase !== 'running') {
-      setProgress(5)
-      return
-    }
-    const start = Date.now()
-    const id = window.setInterval(() => {
-      const elapsed = (Date.now() - start) / 1000
-      // Asymptotic ease toward 90% with a ~120s time constant.
-      const next = 90 - 85 * Math.exp(-elapsed / 120)
-      setProgress((prev) => Math.max(prev, Math.min(90, next)))
-    }, 500)
-    return () => window.clearInterval(id)
-  }, [phase])
 
   // FINDING: FUNC-001 — when the Web Worker prover fails and falls back to the main
   // thread (prover.ts dispatches polyshield:prover-fallback), warn the user that it
@@ -291,6 +276,21 @@ export function BetModal({
     setPhase('running')
     setError(null)
     setTxHash('')
+    setStatusMsg('Preparing…')
+    setDownloadPct(null)
+
+    // Real prover progress: a determinate % during the (sometimes large) proving-key download, then
+    // an indeterminate "Generating proof…" while snarkjs crunches. Replaces the old fake timer.
+    const onProverProgress = (p: AssetProgress) => {
+      if (p.phase === 'download' && p.total > 0) {
+        const pct = Math.min(100, Math.round((p.loaded / p.total) * 100))
+        setDownloadPct(pct)
+        setStatusMsg(`Downloading proving key… ${pct}%`)
+      } else {
+        setDownloadPct(null)
+        setStatusMsg('Generating proof…')
+      }
+    }
 
     try {
       const stake = amountMicro
@@ -299,12 +299,15 @@ export function BetModal({
       if (cost > cashNote.balance) {
         const sel = selectNotesForAmount(address, cost)
         if (!sel.ok) throw new Error(sel.error)
+        setStatusMsg('Merging notes…')
         cashNote = await consolidateNotes({
           wallet: address,
           signMessageAsync,
           notes: sel.selection.notes,
-          onProgress: (m) => log('bet_modal_consolidate', { step: m }),
+          onProgress: (m) => { setStatusMsg(m); log('bet_modal_consolidate', { step: m }) },
+          onDownloadProgress: onProverProgress,
         })
+        setDownloadPct(null)
       }
       // FEE: final guard — the spent note must cover bet_amount + fee or the circuit underflows.
       if (cashNote.balance < stake + fee) {
@@ -313,6 +316,7 @@ export function BetModal({
         )
       }
       const secret = await getNoteSecret(signMessageAsync, address, cashNote.depositIndex, cashNote.derivationVersion ?? 1)
+      setStatusMsg('Fetching Merkle path…')
       let merkleProof
       try {
         merkleProof = await fetchMerklePath(cashNote.commitment)
@@ -357,7 +361,8 @@ export function BetModal({
           position_id: positionId,
           fee, // FEE: Vault-injected; circuit binds new_balance = current_balance - bet_amount - fee
         },
-      })
+      }, onProverProgress)
+      setDownloadPct(null)
 
       const relayInputs = {
         merkle_root: merkleRoot,
@@ -393,8 +398,10 @@ export function BetModal({
         })
       }
 
+      setStatusMsg('Submitting to relay…')
       const { txHash: nextTxHash } = await relayBet(proof, relayInputs)
       setTxHash(nextTxHash)
+      setStatusMsg('Waiting for on-chain confirmation…')
       await waitForTransactionConfirmation(nextTxHash as `0x${string}`)
 
       markNoteSpent(cashNote.commitment)
@@ -480,8 +487,20 @@ export function BetModal({
     onClose()
   }
 
+  // WCAG 4.1.3 — single persistent live region; assistive tech announces each phase/step change
+  // (the 30s–2min proof is otherwise silent) and the final success/failure without moving focus.
+  const announce =
+    phase === 'running'
+      ? statusMsg || 'Generating proof — this can take up to two minutes.'
+      : phase === 'success'
+        ? 'Bet placed successfully.'
+        : phase === 'error'
+          ? error ?? 'Bet placement failed.'
+          : ''
+
   return (
       <Modal open={open} title="Confirm bet" eyebrow="BET AUTH" onClose={closeSafely} width={720}>
+      <LiveRegion message={announce} assertive={phase === 'error'} />
       {phase === 'edit' && (
         <div className="col gap-4">
           <div className="panel" style={{ padding: 16 }}>
@@ -593,13 +612,27 @@ export function BetModal({
       {phase === 'running' && (
         <div className="col gap-4">
           <div>
-            <div className="micro">PROGRESS</div>
-            <h3 className="h4 mt-2" style={{ margin: 0 }}>Generating proof… this can take 30s–2min. Keep this tab open.</h3>
+            <div className="micro">PROOF</div>
+            <h3 className="h4 mt-2" style={{ margin: 0 }}>{statusMsg || 'Generating proof…'}</h3>
+            <div className="small mt-2" style={{ fontSize: 12, color: 'var(--text-2)' }}>
+              This can take 30s–2min and runs entirely in your browser. Keep this tab open.
+            </div>
           </div>
           <div className="panel" style={{ padding: 18 }}>
-            <div className="small" style={{ fontSize: 12 }}>The proof stays in your browser until it is relayed.</div>
-            <div className="mt-3" style={{ height: 4, background: 'rgba(255,255,255,0.06)', borderRadius: 2 }}>
-              <div style={{ height: 4, width: `${progress}%`, background: 'var(--cyan)', borderRadius: 2, transition: 'width 0.5s linear', animation: 'pulse-glow 1.2s ease-in-out infinite' }} />
+            <div className="row" style={{ justifyContent: 'space-between' }}>
+              <span className="small" style={{ fontSize: 12 }}>The proof stays on your device until it is relayed.</span>
+              {/* Only show a percentage for the one step that has a real one (the proving-key
+                  download); otherwise an indeterminate "working…" so we never imply false precision. */}
+              <span className="mono" style={{ fontSize: 11 }}>{downloadPct !== null ? `${downloadPct}%` : 'working…'}</span>
+            </div>
+            <div className="mt-3" style={{ height: 4, background: 'rgba(255,255,255,0.06)', borderRadius: 2, overflow: 'hidden' }}>
+              {downloadPct !== null ? (
+                <div style={{ height: 4, width: `${downloadPct}%`, background: 'var(--cyan)', borderRadius: 2, transition: 'width 0.2s linear' }} />
+              ) : (
+                // Indeterminate: a full-width pulsing bar shows activity without claiming a % of
+                // unknown work (prefers-reduced-motion neutralizes the pulse).
+                <div style={{ height: 4, width: '100%', background: 'var(--cyan)', borderRadius: 2, animation: 'pulse-glow 1.2s ease-in-out infinite' }} />
+              )}
             </div>
             {fallbackNote && (
               <div className="small mt-3" style={{ fontSize: 11, color: 'var(--amber)' }}>{fallbackNote}</div>

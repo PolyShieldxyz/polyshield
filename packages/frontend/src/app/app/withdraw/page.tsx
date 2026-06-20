@@ -11,7 +11,9 @@ import {
   computeNullifier,
   computeRecipientHash,
   formatUsdc,
+  getFreeNotes,
   markNoteSpent,
+  MAX_CONSOLIDATE_INPUTS,
   reconcileSpentStatus,
   recordWalletActivity,
   selectNotesForAmount,
@@ -27,6 +29,7 @@ import {
   type RelayWithdrawalInputs,
 } from '@/lib/api'
 import { USDC_ABI, VAULT_ABI } from '@/lib/vaultAbi'
+import { LiveRegion } from '@/components/app/LiveRegion'
 
 const VAULT_ADDRESS = (process.env.NEXT_PUBLIC_VAULT_ADDRESS ?? '0x0000000000000000000000000000000000000000') as `0x${string}`
 const USDC_ADDRESS  = (process.env.NEXT_PUBLIC_USDC_ADDRESS  ?? '0x0000000000000000000000000000000000000000') as `0x${string}`
@@ -69,6 +72,22 @@ export default function WithdrawPage() {
   const cashNote = state?.cashNote ?? null
   const cashBalance = state?.cashBalance ?? 0n
   const requestedAmount = useMemo(() => parseUsdcToMicro(amountInput), [amountInput])
+
+  // A single withdrawal can merge at most MAX_CONSOLIDATE_INPUTS notes. When cash is spread across
+  // more notes than that, the displayed balance isn't withdrawable in one step — surface this BEFORE
+  // submit instead of throwing deep inside the proof (selectNotesForAmount) after a sign + merge.
+  const maxSingleStep = useMemo(() => {
+    if (!address) return 0n
+    return getFreeNotes(address)
+      .sort((a, b) => (a.balance > b.balance ? -1 : 1))
+      .slice(0, MAX_CONSOLIDATE_INPUTS)
+      .reduce((sum, n) => sum + n.balance, 0n)
+  }, [address, state])
+  const fragmented =
+    requestedAmount !== null &&
+    requestedAmount > 0n &&
+    requestedAmount <= cashBalance &&
+    requestedAmount > maxSingleStep
 
   // H1: check that the vault actually holds enough USDC — it may be deployed to Polymarket.
   const { data: vaultUsdcBalance = 0n } = useReadContract({
@@ -122,7 +141,7 @@ export default function WithdrawPage() {
   }, [status, router])
 
   const submit = async () => {
-    if (!address || !cashNote || invalidAmount || requestedAmount === null) return
+    if (!address || !cashNote || invalidAmount || fragmented || requestedAmount === null) return
 
     setStatus('running')
     setStatusMsg('Preparing withdrawal proof...')
@@ -278,6 +297,8 @@ export default function WithdrawPage() {
 
   return (
     <div>
+      {/* WCAG 4.1.3 — announce the long proof/submit status + result to assistive tech. */}
+      <LiveRegion message={status === 'idle' ? '' : statusMsg} assertive={status === 'error'} />
       <div className="row hairline-b" style={{ padding: '14px 24px', justifyContent: 'space-between' }}>
         <div className="row gap-4">
           <div className="micro">WITHDRAW</div>
@@ -344,6 +365,13 @@ export default function WithdrawPage() {
                 Vault funds are currently deployed to Polymarket. Check back after open markets settle.
               </div>
             )}
+            {!invalidAmount && !fundsDeployed && fragmented && (
+              <div className="small mt-1" style={{ color: 'var(--amber)', fontSize: 11 }}>
+                Your balance is spread across more than {MAX_CONSOLIDATE_INPUTS} notes, so it can&apos;t all be
+                withdrawn at once. The most you can withdraw in one step is ${formatUsdc(maxSingleStep)} —
+                withdraw that first, then repeat for the rest.
+              </div>
+            )}
           </div>
 
           <div className="hairline-t mt-4" style={{ paddingTop: 12 }}>
@@ -364,8 +392,8 @@ export default function WithdrawPage() {
 
           <button
             className="btn btn-primary mt-4"
-            style={{ width: '100%', justifyContent: 'center', opacity: invalidAmount || fundsDeployed || !cashNote ? 0.5 : 1 }}
-            disabled={status === 'running' || invalidAmount || fundsDeployed || !cashNote || loading}
+            style={{ width: '100%', justifyContent: 'center', opacity: invalidAmount || fundsDeployed || fragmented || !cashNote ? 0.5 : 1 }}
+            disabled={status === 'running' || invalidAmount || fundsDeployed || fragmented || !cashNote || loading}
             onClick={() => void submit()}
           >
             Confirm Withdrawal

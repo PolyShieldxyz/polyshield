@@ -8,6 +8,7 @@ import { SettlementModal } from '@/components/app/SettlementModal'
 import { ClosePositionModal } from '@/components/app/ClosePositionModal'
 import { PartialFillCreditModal } from '@/components/app/PartialFillCreditModal'
 import { BetCancelRefundModal } from '@/components/app/BetCancelRefundModal'
+import { LiveRegion } from '@/components/app/LiveRegion'
 import { Icon, ICONS } from '@/components/ui/Icon'
 import { log } from '@/lib/logger'
 import { addNote, getNotes, recoverNotes, recoverNotesViaBackend, formatUsdc, type Note } from '@/lib/notes'
@@ -19,6 +20,12 @@ import { BET_STATUS, fetchAttestation, fetchBetStatus, cancelPendingBet } from '
 const REPORT_FILLED = 1
 const REPORT_FAILED = 2
 const REPORT_PARTIAL = 3
+// A market (FAK) order can't be recalled once authorized — it's submitted and fills synchronously, so
+// offering "Cancel" during the normal in-flight window is misleading (there's nothing to stop). We only
+// surface Cancel for a market bet after it's been pending this long (genuinely stuck — the operator was
+// slow/unable to submit), so the user can reclaim. The backend cancel is safe regardless (it reconciles
+// the true fill and never blind-FAILEDs a filled order). Resting limit orders are always cancellable.
+const STUCK_PENDING_SEC = 180
 import { portfolioSummaryRows, usePortfolioState, type PortfolioState } from '@/lib/accountState'
 
 const VAULT_ADDRESS = (process.env.NEXT_PUBLIC_VAULT_ADDRESS ??
@@ -597,16 +604,32 @@ function PortfolioContent() {
           ) : (
             (() => {
               const isCancelling = cancelSubmitted.has(receipt.id)
+              // A live RESTING limit order is genuinely on the book → always cancellable. A market
+              // (FAK) order fills synchronously and can't be recalled, so only offer Cancel once it's
+              // been pending long enough to be considered stuck (operator slow/unable to submit).
+              const isResting = betStatuses[receipt.id] === BET_STATUS.RESTING
+              const ageSec = receipt.createdAt ? Math.max(0, Math.floor(Date.now() / 1000) - receipt.createdAt) : 0
+              const stuck = ageSec >= STUCK_PENDING_SEC
+              const cancellable = !isFilled && (isResting || stuck)
+              const waitingLabel = isFilled
+                ? '—'
+                : isResting
+                  ? 'Resting limit order'
+                  : isCancelling
+                    ? 'Cancelling — please wait…'
+                    : stuck
+                      ? 'Taking longer than expected'
+                      : 'Submitting…'
               return (
                 <div className="row gap-2" style={{ justifyContent: 'flex-end', alignItems: 'center' }}>
                   <span className="small" style={{ fontSize: 10, color: 'var(--text-3)' }}>
-                    {isFilled ? '—' : isCancelling ? 'Cancelling — please wait…' : 'Waiting for fill…'}
+                    {waitingLabel}
                   </span>
-                  {!isFilled && (
+                  {cancellable && (
                     <button
                       className="btn btn-sm"
                       disabled={isCancelling}
-                      title="Cancel this bet and reclaim your stake"
+                      title={isResting ? 'Cancel this resting limit order and reclaim your stake' : 'Cancel this stuck bet and reclaim your stake'}
                       onClick={() => void handleCancelBet(receipt)}
                     >
                       {isCancelling ? 'Cancelling…' : 'Cancel'}
@@ -672,6 +695,17 @@ function PortfolioContent() {
       {recoverMsg && (
         <div className="row" style={{ padding: '8px 24px', fontSize: 12, color: 'var(--text-2)' }}>{recoverMsg}</div>
       )}
+      {/* WCAG 4.1.3 — recovery runs for many seconds and its count/result lives in the button text;
+          announce progress + the final result (incl. "found nothing") to assistive tech. */}
+      <LiveRegion
+        message={
+          recovering
+            ? recoverProgress && recoverProgress.total > 0
+              ? `Restoring ${recoverProgress.done} of ${recoverProgress.total} notes…`
+              : 'Restoring notes from chain…'
+            : recoverMsg || ''
+        }
+      />
 
       <div style={{ padding: 24 }}>
         {loading && !state && (
@@ -706,7 +740,7 @@ function PortfolioContent() {
             ) : (
             <>
             {/* Positions = bets that actually filled (you hold shares): settle / close / claim. */}
-            <div className="panel mt-4" style={{ padding: 0, overflow: 'hidden' }}>
+            <div className="panel mt-4 scroll-x" style={{ padding: 0, overflowX: 'auto' }}>
               <div className="row hairline-b" style={{ padding: '12px 16px', justifyContent: 'space-between' }}>
                 <div className="micro">OPEN POSITIONS</div>
                 <span className="small" style={{ fontSize: 11, color: 'var(--text-3)' }}>Filled — you hold shares</span>
@@ -738,7 +772,7 @@ function PortfolioContent() {
             </div>
 
             {/* Orders = bets not (yet) filled — resting limit orders and expired/unfilled orders. */}
-            <div className="panel mt-4" style={{ padding: 0, overflow: 'hidden' }}>
+            <div className="panel mt-4 scroll-x" style={{ padding: 0, overflowX: 'auto' }}>
               <div className="row hairline-b" style={{ padding: '12px 16px', justifyContent: 'space-between' }}>
                 <div className="micro">OPEN ORDERS</div>
                 <span className="small" style={{ fontSize: 11, color: 'var(--text-3)' }}>Not filled — no shares held yet</span>
@@ -806,7 +840,7 @@ function PortfolioContent() {
               )}
             </div>
 
-            <div className="panel mt-4" style={{ padding: 0, overflow: 'hidden' }}>
+            <div className="panel mt-4 scroll-x" style={{ padding: 0, overflowX: 'auto' }}>
               <div className="row hairline-b" style={{ padding: '12px 16px', justifyContent: 'space-between' }}>
                 <div className="micro">CLOSED BETS</div>
                 {state.lostBets.length > 0 && (
@@ -869,7 +903,7 @@ function PortfolioContent() {
             </div>
 
             <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(320px, 1fr))', gap: 16, marginTop: 16 }}>
-              <div className="panel" style={{ padding: 0, overflow: 'hidden' }}>
+              <div className="panel scroll-x" style={{ padding: 0, overflowX: 'auto' }}>
                 <div className="row hairline-b" style={{ padding: '12px 16px' }}>
                   <div className="micro">DEPOSIT HISTORY</div>
                 </div>
@@ -901,7 +935,7 @@ function PortfolioContent() {
                 </table>
               </div>
 
-              <div className="panel" style={{ padding: 0, overflow: 'hidden' }}>
+              <div className="panel scroll-x" style={{ padding: 0, overflowX: 'auto' }}>
                 <div className="row hairline-b" style={{ padding: '12px 16px' }}>
                   <div className="micro">WITHDRAWAL HISTORY</div>
                 </div>

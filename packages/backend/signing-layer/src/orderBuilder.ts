@@ -11,6 +11,9 @@ import {
   getAttestationDomainParams,
   markResting,
   getAttestation,
+  markMarketSubmitting,
+  setMarketOrderId,
+  type MarketSubmission,
 } from "./attestationStore";
 import { attestTerminal } from "./terminalAttestation";
 import { trackOrder, isOrderTracked } from "./wsFillTracker";
@@ -551,6 +554,12 @@ export async function submitFAKOrder(
       const isMock = clobHost.includes("localhost") || clobHost.includes("127.0.0.1");
       logger.info({ clobHost, isMock }, "submitting FAK order");
 
+      // Durable "an order is being POSTed" marker, written BEFORE the CLOB POST. Its ABSENCE proves
+      // no order was ever placed (so /cancel-bet may safely attest FAILED); its PRESENCE forces
+      // cancel-bet to reconcile the true fill instead of blind-FAILED (which would reclaim a position
+      // the pool actually bought). Survives a process restart — closes the restart-mid-submit race.
+      markMarketSubmitting(event.nullifier, event.market_id);
+
       let resp: Record<string, unknown>;
       // Prod only: the fee-reserved size we submitted (1e6-scaled shares), used to report `spent`
       // INCLUDING the CLOB fee so a full fill records the whole stake (fee not refunded). 0 = mock.
@@ -588,6 +597,11 @@ export async function submitFAKOrder(
       }
 
       logger.info({ nullifier: event.nullifier, resp }, "FAK CLOB response");
+
+      // Persist the CLOB order id so a later /cancel-bet (e.g. after a process restart that lost the
+      // in-memory in-flight set, before this path attested) can reconcile the TRUE fill via getOrder.
+      const orderId = String(resp?.["orderID"] ?? resp?.["orderId"] ?? resp?.["id"] ?? "");
+      if (orderId) setMarketOrderId(event.nullifier, orderId);
 
       const status = String(resp?.["status"] ?? "").toLowerCase();
       let filledShares = 0n;
@@ -656,6 +670,74 @@ export async function submitFAKOrder(
       logger.error({ err, nullifier: event.nullifier }, "FAK order submission failed");
     }
   });
+}
+
+/**
+ * /cancel-bet reconcile for a MARKET (FAK) order that was submitted to the CLOB but has no terminal
+ * attestation yet (e.g. submitFAKOrder crashed mid-flight, or a restart lost the in-memory in-flight
+ * set). Determines the TRUE fill from the CLOB and attests the real outcome — it NEVER blind-attests
+ * FAILED, so a filled position can't be wrongly reclaimed (no double-spend / pool drain).
+ *
+ * A FAK BUY is the TAKER, so getTrades-by-maker (used for resting orders) doesn't see it — the
+ * reliable source is getOrder(orderId).size_matched. If the fill can't be verified (no orderId, CLOB
+ * unavailable, or the order isn't in a terminal queryable state) we LEAVE THE BET PENDING ("processing")
+ * rather than risk a false reclaim; the WS/deep-sweep or a later retry finalizes it.
+ *
+ * Returns "finalized" once a terminal attestation exists, else "processing".
+ */
+export async function reconcileMarketSubmission(
+  wallet: ethers.Wallet,
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  clobClient: any,
+  provider: ethers.JsonRpcProvider,
+  nullifier: string,
+  sub: MarketSubmission,
+): Promise<"finalized" | "processing"> {
+  // submitFAKOrder usually attests synchronously — short-circuit if a terminal outcome already exists.
+  if (getAttestation(nullifier)) return "finalized";
+  if (!clobClient || !sub.orderId) {
+    logger.warn(
+      { nullifier, orderId: sub.orderId },
+      "cancel-bet: market order submitted but unverifiable (no clob client / orderId) — leaving pending (no false reclaim)",
+    );
+    return "processing";
+  }
+  // Committed bounds for the FILLED-vs-PARTIAL classification (attestTerminal needs them).
+  let expected_shares = 0n;
+  let bet_amount = 0n;
+  try {
+    const vault = new ethers.Contract(config.vaultContractAddress, BET_RECORDS_ABI, provider);
+    const rec = await vault.betRecords(nullifier);
+    expected_shares = BigInt(rec[3]);
+    bet_amount = BigInt(rec[4]);
+  } catch (err) {
+    logger.warn({ err: String(err), nullifier }, "cancel-bet: betRecords read failed — cannot classify fill; leaving pending");
+    return "processing";
+  }
+  try {
+    const od = await clobClient.getOrder(sub.orderId);
+    const st = String((od && od.status) || "").toUpperCase();
+    // Only act on a TERMINAL order state — a still-live/delayed FAK could still be matching, and a
+    // zero fill is only DEFINITE once the order is off the book.
+    if (od && st && st !== "LIVE" && st !== "DELAYED" && st !== "OPEN") {
+      const matched = Number((od && od.size_matched) || 0);
+      const priceFrac = Number((od && od.price) || 0);
+      const filled = BigInt(Math.round(matched * 1e6));
+      // spent omits the CLOB taker fee (the synchronous submitFAKOrder path accounts for it exactly);
+      // on this rare reconcile backstop a PARTIAL may over-refund by the fee on the filled portion —
+      // bounded and pool-safe, never a false full reclaim. A full fill maps to FILLED (amountB ignored).
+      const spent = BigInt(Math.round(matched * priceFrac * 1e6));
+      const status = matched <= 0 ? "unmatched" : "matched";
+      await attestTerminal(wallet, { nullifier, expected_shares, bet_amount }, status, filled, spent);
+      logger.info({ nullifier, orderStatus: st, matched }, "cancel-bet: reconciled market order from CLOB getOrder");
+      return getAttestation(nullifier) ? "finalized" : "processing";
+    }
+    logger.warn({ nullifier, orderStatus: st }, "cancel-bet: market order not terminal/queryable — leaving pending (no false reclaim)");
+    return "processing";
+  } catch (err) {
+    logger.warn({ err: String(err), nullifier, orderId: sub.orderId }, "cancel-bet: getOrder failed — leaving pending (no false reclaim)");
+    return "processing";
+  }
 }
 
 /**

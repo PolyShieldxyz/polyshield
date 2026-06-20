@@ -1,4 +1,7 @@
-const path = require('path')
+import path from 'path'
+import { fileURLToPath } from 'url'
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url))
 
 /** @type {import('next').NextConfig} */
 const nextConfig = {
@@ -38,11 +41,23 @@ const nextConfig = {
     //  - the CSP is applied in production only — Next dev (HMR) needs 'unsafe-eval' + ws to
     //    localhost, so we skip the CSP in dev but keep the other headers.
     const connectSrc = process.env.CSP_CONNECT_SRC ?? "'self' https: wss:"
+    // frame-src: ConnectKit (Family) and WalletConnect render their connect/verify flows in
+    // iframes. With no frame-src, CSP falls back to default-src 'self' and BLOCKS them —
+    // which silently breaks wallet connection on mobile, where there is no injected
+    // extension wallet and WalletConnect is the only path. Desktop hid the bug because an
+    // injected MetaMask never frames these origins. Allow the known wallet-infra frame hosts.
+    //  - app.family.co            ConnectKit's hosted connector UI
+    //  - *.walletconnect.org/.com verify.walletconnect.org + WC explorer/relay UIs
+    //  - keys.coinbase.com        Coinbase Smart Wallet popup/iframe
+    const frameSrc = process.env.CSP_FRAME_SRC ??
+      "'self' https://app.family.co https://verify.walletconnect.org https://verify.walletconnect.com " +
+      "https://*.walletconnect.org https://*.walletconnect.com https://keys.coinbase.com"
     const csp = [
       "default-src 'self'",
       "base-uri 'self'",
       "object-src 'none'",
       "frame-ancestors 'none'",
+      `frame-src ${frameSrc}`,
       "form-action 'self'",
       "script-src 'self' 'unsafe-inline' 'wasm-unsafe-eval'",
       "style-src 'self' 'unsafe-inline'",
@@ -119,4 +134,4 @@ const nextConfig = {
   },
 }
 
-module.exports = nextConfig
+export default nextConfig

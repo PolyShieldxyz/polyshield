@@ -2,6 +2,7 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { WagmiProvider } from 'wagmi'
 import { ConnectKitProvider } from 'connectkit'
+import * as Tooltip from '@radix-ui/react-tooltip'
 import { wagmiConfig } from '@/lib/wagmi'
 import { ReactNode, useEffect, useState } from 'react'
 import { getEnvProblems } from '@/lib/config'
@@ -29,7 +30,10 @@ export function Providers({ children }: { children: ReactNode }) {
     <WagmiProvider config={wagmiConfig}>
       <QueryClientProvider client={queryClient}>
         <ConnectKitProvider theme="auto" mode="dark">
-          {children}
+          {/* App-wide Radix Tooltip provider — single source of hover/focus delay for <Tip>. */}
+          <Tooltip.Provider delayDuration={200} skipDelayDuration={400}>
+            {children}
+          </Tooltip.Provider>
         </ConnectKitProvider>
       </QueryClientProvider>
     </WagmiProvider>

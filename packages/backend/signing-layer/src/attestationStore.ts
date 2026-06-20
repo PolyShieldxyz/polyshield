@@ -247,6 +247,67 @@ export function markResting(nullifierOfBet: string): void {
 }
 
 /**
+ * Durable record that a MARKET (FAK) order was submitted (or is being submitted) to the CLOB
+ * for a bet. Unlike a resting GTC/GTD order, a FAK leaves no tracked-order entry (wsFillTracker),
+ * so without this marker `/cancel-bet` had no way to tell "no order was ever placed" (safe to
+ * attest FAILED) apart from "an order was placed and may have filled" (NEVER safe to blind-FAILED
+ * — that reclaims a position the pool actually bought). The marker is written BEFORE the CLOB POST,
+ * so its ABSENCE is proof no order was placed; its PRESENCE forces cancel-bet to reconcile the true
+ * fill instead of blind-attesting FAILED. Survives a process restart (the in-memory in-flight set
+ * does not), closing the restart-mid-submission double-spend window. order_id is filled in once the
+ * CLOB returns it, so a reconcile can query getOrder/getTrades by id.
+ */
+export interface MarketSubmission {
+  conditionId: string;
+  orderId: string | null;
+  submittedAt: number;
+}
+
+function ensureMarketSubmissionsTable(d: Database.Database): void {
+  d.exec(`
+    CREATE TABLE IF NOT EXISTS market_submissions (
+      nullifier_of_bet TEXT PRIMARY KEY,
+      condition_id TEXT NOT NULL,
+      order_id TEXT,
+      submitted_at INTEGER NOT NULL
+    )
+  `);
+}
+
+/** Record that a market (FAK) order is about to be / has been POSTed to the CLOB. Idempotent. */
+export function markMarketSubmitting(nullifierOfBet: string, conditionId: string): void {
+  const d = db();
+  ensureMarketSubmissionsTable(d);
+  d.prepare(
+    `INSERT INTO market_submissions (nullifier_of_bet, condition_id, order_id, submitted_at)
+     VALUES (?, ?, NULL, ?) ON CONFLICT(nullifier_of_bet) DO NOTHING`,
+  ).run(nullifierOfBet, conditionId, Math.floor(Date.now() / 1000));
+}
+
+/** Attach the CLOB order id to a recorded market submission (best-effort; for later reconcile). */
+export function setMarketOrderId(nullifierOfBet: string, orderId: string): void {
+  if (!orderId) return;
+  const d = db();
+  ensureMarketSubmissionsTable(d);
+  d.prepare(`UPDATE market_submissions SET order_id = ? WHERE nullifier_of_bet = ?`).run(
+    orderId,
+    nullifierOfBet,
+  );
+}
+
+/** The market-submission record for a bet, or null if no FAK order was ever submitted. */
+export function getMarketSubmission(nullifierOfBet: string): MarketSubmission | null {
+  const d = db();
+  ensureMarketSubmissionsTable(d);
+  const row = d
+    .prepare(
+      `SELECT condition_id, order_id, submitted_at FROM market_submissions WHERE nullifier_of_bet = ?`,
+    )
+    .get(nullifierOfBet) as { condition_id: string; order_id: string | null; submitted_at: number } | undefined;
+  return row ? { conditionId: row.condition_id, orderId: row.order_id ?? null, submittedAt: row.submitted_at } : null;
+}
+
+/**
  * Module-level EIP-712 domain params, resolved once at startup (index.ts reads the
  * chainId from provider.getNetwork() and the verifyingContract from config). The
  * order builder reads this so the terminal-state call sites don't each have to

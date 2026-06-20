@@ -116,6 +116,15 @@ export function setOnRelayConfirmed(cb: () => void): void {
   _onRelayConfirmed = cb;
 }
 
+// The caches only ingest up to (head − CONFIRMATIONS) blocks (default 3). The nudge below fires at
+// tx.wait(1) — 1 confirmation — so at that instant the just-confirmed tx's OWN block is still inside
+// the confirmations buffer and the immediate sync can't ingest it; it would otherwise wait for the
+// slow reconcile (~10 min) or a WS push. The signing layer gates BetAuthorized detection on the event
+// index head, so this directly delayed every bet's order submission by up to the reconcile interval
+// when the WS accelerator was down. Fire a SECOND nudge after the buffer clears so the tx's own
+// event/leaf lands within seconds. Generous enough to cover Polygon block-time variance.
+const RELAY_RESYNC_DELAY_MS = Number(process.env.RELAY_RESYNC_DELAY_MS ?? "8000");
+
 // ── Nonce-aware tx sender ─────────────────────────────────────────────────────
 
 const NONCE_ERROR_PATTERNS = ["nonce too low", "nonce too high", "replacement underpriced", "NONCE_EXPIRED", "already known", "invalid nonce"];
@@ -169,6 +178,13 @@ function trackReceipt(label: string, tx: ethers.TransactionResponse, startMs: nu
     // C1: our tx just inserted a leaf / emitted an event — nudge the caches now instead of waiting
     // for the slow reconcile poll. Best-effort; the reconcile catches anything this misses.
     try { _onRelayConfirmed?.(); } catch { /* never let cache sync break receipt handling */ }
+    // …and again after the confirmations buffer clears, since the immediate nudge above can't yet
+    // ingest THIS tx's own block (it's only 1 conf deep). Without this, the bet's BetAuthorized event
+    // sat below the index head until the slow reconcile, stalling order submission by minutes.
+    const t = setTimeout(() => {
+      try { _onRelayConfirmed?.(); } catch { /* ignore */ }
+    }, RELAY_RESYNC_DELAY_MS);
+    if (typeof t.unref === "function") t.unref();
   }).catch((err: unknown) => {
     logger.warn({ event: `${label}:receipt_error`, txHash: tx.hash, err: String(err) }, `${label}:receipt_error`);
   });

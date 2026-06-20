@@ -41,6 +41,18 @@ const DEEP_LOOKBACK_BLOCKS = Number(process.env.DEEP_LOOKBACK_BLOCKS ?? "100000"
 // attestation yet) on a subsequent tick before its attestation lands.
 const inFlight = new Set<string>();
 
+/**
+ * Is the event listener currently submitting an order for this bet (in THIS process)? A bet enters
+ * the set the moment handleBetRecord starts processing it and never leaves (so a re-poll can't
+ * double-submit). `/cancel-bet` consults this so it never blind-attests FAILED while a market (FAK)
+ * order is mid-submission — that race would let a user reclaim a position the pool actually bought.
+ * In-memory only: it covers the live submission window; the durable market_submissions marker
+ * (attestationStore) covers the across-restart window.
+ */
+export function isBetInFlight(nullifier: string): boolean {
+  return inFlight.has(nullifier);
+}
+
 // BetAuthorized events come from vaultEventSource — the proof-relay's event index when available
 // (no per-service getLogs), falling back to a direct chain scan. The cursor/window/deep-sweep logic
 // below is unchanged; only the source of the events moved.

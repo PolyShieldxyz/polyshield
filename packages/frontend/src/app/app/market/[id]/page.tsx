@@ -2,13 +2,22 @@
 
 import Link from 'next/link'
 import { Suspense, useEffect, useRef, useState } from 'react'
+import * as Tabs from '@radix-ui/react-tabs'
+import * as ToggleGroup from '@radix-ui/react-toggle-group'
 import { useParams, useRouter, useSearchParams } from 'next/navigation'
+import { useAccount, useReadContract } from 'wagmi'
 import { Icon, ICONS } from '@/components/ui/Icon'
 import { AmountInput } from '@/components/ui/AmountInput'
+import { Tip } from '@/components/ui/Tip'
 import { BetModal } from '@/components/app/BetModal'
 import { MARKETS, type MarketEntry } from '@/lib/marketsData'
+import { getFreeNotes, MAX_CONSOLIDATE_INPUTS, formatUsdc } from '@/lib/notes'
+import { VAULT_ABI } from '@/lib/vaultAbi'
 import { marketBuyCeilingFromBook, roundToTick, type BookLevel } from '@/lib/pricing'
 import { type OrderKind, ORDER_KIND_LABEL } from '@/lib/orderType'
+
+const VAULT_ADDRESS = (process.env.NEXT_PUBLIC_VAULT_ADDRESS ??
+  '0x0000000000000000000000000000000000000000') as `0x${string}`
 
 // Order type is selected here on the market page (not in the bet-auth popup) so the user picks how
 // the order executes before generating a proof. Two user-facing types (matching Polymarket): a
@@ -94,7 +103,7 @@ function PriceChart({ tokenId, fallback }: { tokenId?: string; fallback: number 
   const line = series.map((v, i) => `${xs(i).toFixed(1)},${ys(v).toFixed(1)}`).join(' ')
   const area = `M${xs(0).toFixed(1)},${h - padB} L${series.map((v, i) => `${xs(i).toFixed(1)},${ys(v).toFixed(1)}`).join(' L')} L${xs(series.length - 1).toFixed(1)},${h - padB} Z`
   const up = series[series.length - 1] >= series[0]
-  const stroke = up ? 'oklch(0.78 0.16 152)' : 'oklch(0.70 0.18 25)'
+  const stroke = up ? 'var(--green)' : 'var(--red)'
   const fill = up ? 'oklch(0.78 0.16 152 / 0.08)' : 'oklch(0.70 0.18 25 / 0.08)'
   const gridVals = [0, 0.25, 0.5, 0.75, 1].map((f) => yMin + f * (yMax - yMin))
 
@@ -257,6 +266,40 @@ function MarketDetailContent() {
     : marketBuyCeilingFromBook(sideLevels, amount, tickSize, bestAsk)
   const shares = effectivePrice > 0 ? Math.floor(amount / effectivePrice) : 0
 
+  // Error prevention: surface affordability on the rail BEFORE the user opens the modal and pays for
+  // a proof. Mirror BetModal's guard exactly — combinable = the largest MAX_CONSOLIDATE_INPUTS free
+  // notes (the most that can merge into one bet), then maxBettable backs out the Vault-injected fee.
+  const { address } = useAccount()
+  const [combinableBalance, setCombinableBalance] = useState(0n)
+  useEffect(() => {
+    if (!address) { setCombinableBalance(0n); return }
+    const recompute = () => {
+      const sum = getFreeNotes(address)
+        .sort((a, b) => (a.balance > b.balance ? -1 : 1))
+        .slice(0, MAX_CONSOLIDATE_INPUTS)
+        .reduce((s, n) => s + n.balance, 0n)
+      setCombinableBalance(sum)
+    }
+    recompute()
+    window.addEventListener('polyshield:notes-changed', recompute)
+    return () => window.removeEventListener('polyshield:notes-changed', recompute)
+  }, [address])
+  const { data: feeConfigData } = useReadContract({
+    address: VAULT_ADDRESS,
+    abi: VAULT_ABI,
+    functionName: 'feeConfig',
+    query: { enabled: VAULT_ADDRESS !== '0x0000000000000000000000000000000000000000' },
+  })
+  const betFeeBps = feeConfigData ? BigInt(feeConfigData[0]) : 0n
+  const relayGasFeeUSDC = feeConfigData ? BigInt(feeConfigData[1]) : 0n
+  const maxBettable =
+    combinableBalance <= relayGasFeeUSDC
+      ? 0n
+      : ((combinableBalance - relayGasFeeUSDC) * 10_000n) / (10_000n + betFeeBps)
+  const amountMicro = Number.isFinite(amount) && amount > 0 ? BigInt(Math.round(amount * 1_000_000)) : 0n
+  const noFunds = combinableBalance === 0n
+  const exceedsBalance = amountMicro > 0n && amountMicro > maxBettable
+
   // Default the limit price to the current side's market price. Keyed on `side` only — not
   // `price` — so the user's manual limit edits aren't clobbered every 10s when the polled
   // market price drifts. Reads the latest price at the moment the side flips.
@@ -285,7 +328,7 @@ function MarketDetailContent() {
           <Link href="/app/markets" className="btn btn-sm btn-ghost" style={{ textDecoration: 'none' }}>← Markets</Link>
           <div className="skeleton" style={{ width: 280, height: 16, borderRadius: 4 }} />
         </div>
-        <div style={{ padding: 24, display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) 340px', gap: 20 }}>
+        <div className="market-grid" style={{ padding: 24, gap: 20 }}>
           <div className="col gap-4">
             <div className="skeleton" style={{ height: 96 }} />
             <div className="skeleton" style={{ height: 220 }} />
@@ -323,8 +366,8 @@ function MarketDetailContent() {
         </div>
       </div>
 
-      <div style={{ display: 'grid', gridTemplateColumns: '1fr 340px', gap: 0 }}>
-        <div className="hairline-r" style={{ padding: 24 }}>
+      <div className="market-grid" style={{ gap: 0 }}>
+        <div className="hairline-r" style={{ padding: 24, minWidth: 0 }}>
           <div className="row gap-6 mb-4" style={{ marginBottom: 16 }}>
             <div>
               <div className="micro">{yesLabel} probability</div>
@@ -340,9 +383,15 @@ function MarketDetailContent() {
               </div>
             </div>
             <div className="col gap-1">
-              {[['Vol', fmtVol(market.vol)], ['Liq', fmtVol(market.liq)], ['Traders', market.traders.toLocaleString()]].map(([label, value]) => (
-                <div key={label as string} className="row gap-3" style={{ justifyContent: 'space-between' }}>
-                  <span className="micro" style={{ fontSize: 9 }}>{label}</span>
+              {([
+                ['Vol', fmtVol(market.vol), 'Total USDC traded in this market over its lifetime.'],
+                ['Liq', fmtVol(market.liq), 'Order-book depth resting right now — how much you can trade against before moving the price.'],
+                ['Traders', market.traders.toLocaleString(), 'Unique addresses that have traded this market.'],
+              ] as [string, string, string][]).map(([label, value, hint]) => (
+                <div key={label} className="row gap-3" style={{ justifyContent: 'space-between' }}>
+                  <Tip label={hint}>
+                    <span className="micro" tabIndex={0} style={{ fontSize: 9, cursor: 'help', borderBottom: '1px dotted var(--line-bright)' }}>{label}</span>
+                  </Tip>
                   <span className="num" style={{ fontSize: 13 }}>{value}</span>
                 </div>
               ))}
@@ -351,15 +400,16 @@ function MarketDetailContent() {
 
           <PriceChart tokenId={market.yesTokenId} fallback={market.yes} />
 
-          <div className="row hairline-b mt-4" style={{ gap: 0, marginTop: 24 }}>
+          <Tabs.Root value={tab} onValueChange={(v) => setTab(v as 'book' | 'fills' | 'rules')}>
+          <Tabs.List className="row hairline-b mt-4" style={{ gap: 0, marginTop: 24 }} aria-label="Market details">
             {[
               ['book', 'Order book'],
               ['fills', 'Recent fills'],
               ['rules', 'Rules & sources'],
             ].map(([key, label]) => (
-              <button
+              <Tabs.Trigger
                 key={key}
-                onClick={() => setTab(key as 'book' | 'fills' | 'rules')}
+                value={key}
                 className="btn btn-ghost"
                 style={{
                   borderRadius: 0,
@@ -370,11 +420,11 @@ function MarketDetailContent() {
                 }}
               >
                 {label}
-              </button>
+              </Tabs.Trigger>
             ))}
-          </div>
+          </Tabs.List>
 
-          {tab === 'book' && (
+          <Tabs.Content value="book">
             <div className="panel mt-4" style={{ padding: 0 }}>
               <div>
                 <div className="row" style={{ padding: '8px 12px', fontSize: 10, color: 'var(--text-2)', fontFamily: 'var(--mono)', letterSpacing: '0.06em' }}>
@@ -405,40 +455,20 @@ function MarketDetailContent() {
                 </div>
               </div>
             </div>
-          )}
+          </Tabs.Content>
 
-          {tab === 'fills' && (
-            <div className="panel mt-4" style={{ padding: 0 }}>
-              <table className="tbl">
-                <thead>
-                  <tr>
-                    <th>Time</th>
-                    <th>Side</th>
-                    <th>Price</th>
-                    <th style={{ textAlign: 'right' }}>Size</th>
-                    <th>Origin</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {[
-                    { time: '14:02:08', side: 'YES', price: market.yes, size: 4250, vault: true },
-                    { time: '14:01:33', side: 'NO', price: 1 - market.yes, size: 800, vault: false },
-                    { time: '14:00:55', side: 'YES', price: market.yes, size: 12400, vault: true },
-                  ].map((fill, index) => (
-                    <tr key={index}>
-                      <td className="mono" style={{ fontSize: 11 }}>{fill.time}</td>
-                      <td><span className={`pill ${fill.side === 'YES' ? 'pill-green' : 'pill-red'}`} style={{ fontSize: 9 }}>{fill.side === 'YES' ? yesLabel : noLabel}</span></td>
-                      <td className="num">{fill.price.toFixed(3)}</td>
-                      <td style={{ textAlign: 'right' }} className="num">${fill.size.toLocaleString()}</td>
-                      <td><span className="pill pill-soft" style={{ fontSize: 9 }}>{fill.vault ? 'VAULT' : 'MARKET'}</span></td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
+          <Tabs.Content value="fills">
+            <div className="panel mt-4" style={{ padding: 32, textAlign: 'center' }}>
+              {/* Honest empty state — a per-market fills feed isn't wired yet. Showing fabricated
+                  fills on a live money page reads as broken once noticed. */}
+              <div className="small" style={{ color: 'var(--text-3)' }}>
+                A recent-fills feed for this market isn’t available yet. Vault trades are visible in the{' '}
+                <Link href="/explorer" style={{ color: 'var(--cyan)' }}>explorer</Link>.
+              </div>
             </div>
-          )}
+          </Tabs.Content>
 
-          {tab === 'rules' && (
+          <Tabs.Content value="rules">
             <div className="panel mt-4" style={{ padding: 20 }}>
               <div className="micro">RESOLUTION CRITERIA</div>
               <p className="body mt-3" style={{ fontSize: 14 }}>{market.desc ?? ''}</p>
@@ -452,7 +482,8 @@ function MarketDetailContent() {
                 ))}
               </div>
             </div>
-          )}
+          </Tabs.Content>
+          </Tabs.Root>
         </div>
 
         <div style={{ padding: 24 }}>
@@ -462,11 +493,11 @@ function MarketDetailContent() {
               <span className="pill pill-cyan" style={{ fontSize: 10 }}><span className="dot" />&nbsp;ZK-AUTH</span>
             </div>
             <div style={{ padding: 16 }}>
-              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 6 }}>
+              <ToggleGroup.Root type="single" value={side} onValueChange={(v) => { if (v) setSide(v as 'YES' | 'NO') }} aria-label="Bet side" style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 6 }}>
                 {(['YES', 'NO'] as const).map((choice) => (
-                  <button
+                  <ToggleGroup.Item
                     key={choice}
-                    onClick={() => setSide(choice)}
+                    value={choice}
                     className="btn"
                     style={{
                       justifyContent: 'center',
@@ -479,9 +510,9 @@ function MarketDetailContent() {
                     }}
                   >
                     {choice === 'YES' ? yesLabel : noLabel} · {choice === 'YES' ? market.yes.toFixed(2) : (1 - market.yes).toFixed(2)}
-                  </button>
+                  </ToggleGroup.Item>
                 ))}
-              </div>
+              </ToggleGroup.Root>
 
               <div className="mt-4">
                 <div className="micro">AMOUNT (USDC)</div>
@@ -508,25 +539,30 @@ function MarketDetailContent() {
                     </button>
                   ))}
                 </div>
+                {/* Affordability up-front (error prevention): the user sees what they can bet before
+                    paying for a proof, instead of dead-ending in the modal's "no balance" error. */}
+                <div className="row mt-2" style={{ justifyContent: 'space-between', fontSize: 11, color: exceedsBalance ? 'var(--red)' : 'var(--text-2)' }}>
+                  <span>Available <span className="num">${formatUsdc(combinableBalance)}</span></span>
+                  <span>Max bettable <span className="num">${formatUsdc(maxBettable)}</span></span>
+                </div>
               </div>
 
               <div className="hairline-t mt-4" style={{ paddingTop: 12 }}>
                 <div className="row gap-2" style={{ alignItems: 'center' }}>
                   <div className="micro">ORDER TYPE</div>
                 </div>
-                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 6, marginTop: 8 }}>
+                <ToggleGroup.Root type="single" value={orderKind} onValueChange={(v) => { if (v) setOrderKind(v as OrderKind) }} aria-label="Order type" style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 6, marginTop: 8 }}>
                   {(['MARKET', 'LIMIT'] as OrderKind[]).map((k) => (
-                    <button
+                    <ToggleGroup.Item
                       key={k}
-                      type="button"
-                      onClick={() => setOrderKind(k)}
+                      value={k}
                       className={`btn btn-sm ${orderKind === k ? 'btn-cyan' : 'btn-ghost'}`}
                       style={{ justifyContent: 'center', fontSize: 11 }}
                     >
                       {ORDER_KIND_LABEL[k]}
-                    </button>
+                    </ToggleGroup.Item>
                   ))}
-                </div>
+                </ToggleGroup.Root>
                 {isLimit ? (
                   <div className="mt-3">
                     <div className="micro">LIMIT PRICE (¢ / share)</div>
@@ -571,28 +607,55 @@ function MarketDetailContent() {
               <div className="hairline-t mt-4" style={{ paddingTop: 12 }}>
                 {/* FINDING: FUNC-001 — honest proof time (Groth16 in-browser proving is 30s–2min, not ~2s). */}
                 {([
-                  [isLimit ? 'Limit price' : 'Max price (ceiling)', effectivePrice.toFixed(3)],
-                  [isLimit ? 'Expected shares' : 'Minimum shares', shares.toLocaleString()],
-                  ['Order type', ORDER_KIND_LABEL[orderKind]],
-                  ...(isLimit && expiryEnabled ? [['Expires in', `${gtdMinutes} min`] as [string, string]] : []),
-                  ['Proof time', '30s–2min'],
-                ] as [string, string][]).map(([label, value]) => (
+                  [isLimit ? 'Limit price' : 'Max price (ceiling)', effectivePrice.toFixed(3),
+                    isLimit
+                      ? 'The price you bid; the order rests on the book until the market trades at or below it.'
+                      : 'The worst price your stake could fill at — walked from the live order book plus a small slippage pad. You commit a guaranteed-minimum number of shares; any surplus returns to the pool.'],
+                  [isLimit ? 'Expected shares' : 'Minimum shares', shares.toLocaleString(),
+                    'Shares ≈ stake ÷ price. For a market order this is the guaranteed minimum; a better fill yields more.'],
+                  ['Order type', ORDER_KIND_LABEL[orderKind], undefined],
+                  ...(isLimit && expiryEnabled ? [['Expires in', `${gtdMinutes} min`, 'If unfilled by this time the order is cancelled and your full stake becomes reclaimable.'] as [string, string, string]] : []),
+                  ['Proof time', '30s–2min', 'A zero-knowledge proof is generated in your browser before the bet is submitted — this is roughly how long that takes.'],
+                ] as [string, string, string | undefined][]).map(([label, value, hint]) => (
                   <div key={label} className="row" style={{ justifyContent: 'space-between', padding: '6px 0', borderBottom: '1px solid var(--line)' }}>
-                    <span className="small" style={{ fontSize: 12 }}>{label}</span>
+                    {hint ? (
+                      <Tip label={hint}>
+                        <span className="small" tabIndex={0} style={{ fontSize: 12, cursor: 'help', borderBottom: '1px dotted var(--line-bright)' }}>{label}</span>
+                      </Tip>
+                    ) : (
+                      <span className="small" style={{ fontSize: 12 }}>{label}</span>
+                    )}
                     <span className="mono" style={{ fontSize: 12 }}>{value}</span>
                   </div>
                 ))}
               </div>
 
-              <button
-                className="btn btn-primary mt-4"
-                onClick={() => setModalOpen(true)}
-                style={{ width: '100%', justifyContent: 'center', padding: '14px 0', fontSize: 14 }}
-              >
-                Generate ZK proof & authorize
-              </button>
+              {noFunds ? (
+                // First-run / never-deposited: route to deposit instead of opening a modal that
+                // would error after the user has already invested clicks.
+                <Link
+                  href="/app/deposit"
+                  className="btn btn-primary mt-4"
+                  style={{ width: '100%', justifyContent: 'center', padding: '14px 0', fontSize: 14, textDecoration: 'none' }}
+                >
+                  Deposit USDC to bet
+                </Link>
+              ) : (
+                <button
+                  className="btn btn-primary mt-4"
+                  onClick={() => setModalOpen(true)}
+                  disabled={exceedsBalance || amountMicro <= 0n}
+                  style={{ width: '100%', justifyContent: 'center', padding: '14px 0', fontSize: 14, opacity: exceedsBalance || amountMicro <= 0n ? 0.5 : 1 }}
+                >
+                  {exceedsBalance ? 'Amount exceeds balance' : 'Generate ZK proof & authorize'}
+                </button>
+              )}
               <div className="small mt-2" style={{ textAlign: 'center', color: 'var(--text-3)', fontSize: 11 }}>
-                Signed locally · proof relay
+                {noFunds
+                  ? 'No deposited funds yet'
+                  : exceedsBalance
+                    ? `Most you can bet now: $${formatUsdc(maxBettable)}`
+                    : 'Signed locally · proof relay'}
               </div>
             </div>
           </div>

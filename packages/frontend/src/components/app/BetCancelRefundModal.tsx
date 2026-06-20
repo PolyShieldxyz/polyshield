@@ -4,6 +4,7 @@ import { useEffect, useState } from 'react'
 import { useSignMessage } from 'wagmi'
 import { Modal } from '@/components/app/Modal'
 import { KV } from '@/components/app/KV'
+import { LiveRegion } from '@/components/app/LiveRegion'
 import {
   addNote,
   computeCommitment,
@@ -193,8 +194,19 @@ export function BetCancelRefundModal({
     }
   }
 
+  // WCAG 4.1.3 — announce proof generation + the reclaimed result (the proof step is otherwise silent).
+  const announce =
+    phase === 'proving'
+      ? 'Generating refund proof and crediting your stake back…'
+      : phase === 'done'
+        ? `Stake reclaimed. $${formatUsdc(betAmount + protocolFee)} returned to your balance.`
+        : phase === 'error'
+          ? error ?? 'Reclaim failed.'
+          : ''
+
   return (
     <Modal open={open} title="Reclaim stake (order did not fill)" onClose={() => { if (phase !== 'proving') onClose() }}>
+      <LiveRegion message={announce} assertive={phase === 'error'} />
       {phase === 'input' && (
         <div className="col gap-4">
           <p className="body" style={{ margin: 0 }}>

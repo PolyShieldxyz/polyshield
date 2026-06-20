@@ -16,7 +16,7 @@ const TYPE_COLOR: Record<string, string> = {
   DEPOSIT: 'var(--cyan)',
   BET_AUTH: 'var(--violet)',
   SETTLE_CRED: 'var(--green)',
-  CANCEL_CRED: 'oklch(0.80 0.15 55)',
+  CANCEL_CRED: 'var(--amber)',
   WITHDRAW: 'var(--text-2)',
 }
 
@@ -49,13 +49,27 @@ export default function ProofsPage() {
           <div className="micro">PROOF LEDGER</div>
           <span className="pill pill-soft" style={{ fontSize: 10 }}>{PROOFS.length} proofs</span>
         </div>
+        <span className="pill pill-amber" style={{ fontSize: 10 }}>PREVIEW · SAMPLE DATA</span>
       </div>
 
       <div style={{ padding: 24 }}>
+        {/* Honest framing: the rows below are illustrative sample data, not the connected
+            account's real proof history (the per-account proof feed isn't wired yet). Showing
+            specific-looking proofs as if real would be a trust violation. Mirrors /app/privacy. */}
+        <div className="callout" style={{ borderColor: 'var(--amber)', padding: '12px 16px', marginBottom: 20, display: 'flex', gap: 10, alignItems: 'flex-start' }}>
+          <span style={{ width: 8, height: 8, borderRadius: '50%', background: 'var(--amber)', flexShrink: 0, marginTop: 5 }} />
+          <div className="small" style={{ fontSize: 12, color: 'var(--text-1)' }}>
+            <strong style={{ color: 'var(--text)' }}>Illustrative preview.</strong> These proofs are sample data that
+            show how your proof ledger will look — they are <em>not</em> your account’s real proofs. Your live proof
+            history (deposits, bets, settlements, withdrawals) is visible in the{' '}
+            <a href="/explorer" style={{ color: 'var(--cyan)' }}>explorer</a>.
+          </div>
+        </div>
+
         {/* Stats row */}
-        <div className="row gap-3 mb-5" style={{ marginBottom: 20 }}>
+        <div className="row gap-3 mb-5" style={{ marginBottom: 20, flexWrap: 'wrap' }}>
           {stats.map(({ label, value }) => (
-            <div key={label} className="panel" style={{ padding: '12px 16px', flex: 1 }}>
+            <div key={label} className="panel" style={{ padding: '12px 16px', flex: '1 1 140px' }}>
               <div className="micro" style={{ fontSize: 9 }}>{label.toUpperCase()}</div>
               <div className="num mt-1" style={{ fontSize: 22 }}>{value}</div>
             </div>
@@ -70,7 +84,7 @@ export default function ProofsPage() {
         </div>
 
         {/* Proof table */}
-        <div className="panel" style={{ padding: 0 }}>
+        <div className="panel scroll-x" style={{ padding: 0 }}>
           <table className="tbl">
             <thead>
               <tr>

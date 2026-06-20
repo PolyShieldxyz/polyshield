@@ -44,7 +44,7 @@ COPY --from=build /app/node_modules ./node_modules
 COPY --from=build /app/.next ./.next
 COPY --from=build /app/public ./public
 COPY --from=build /app/package.json ./package.json
-COPY --from=build /app/next.config.js ./next.config.js
+COPY --from=build /app/next.config.mjs ./next.config.mjs
 EXPOSE 3000
 HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 \
   CMD node -e "require('http').get('http://127.0.0.1:3000/',r=>process.exit(r.statusCode<500?0:1)).on('error',()=>process.exit(1))"

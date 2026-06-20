@@ -65,9 +65,9 @@ function HeroVisual() {
       <svg viewBox={`0 0 ${w} ${h}`} width="100%" height="100%">
         <defs>
           <radialGradient id="vaultg" cx="0.5" cy="0.5" r="0.5">
-            <stop offset="0" stopColor="oklch(0.82 0.13 85)" stopOpacity="0.55" />
-            <stop offset="0.6" stopColor="oklch(0.82 0.13 85)" stopOpacity="0.08" />
-            <stop offset="1" stopColor="oklch(0.82 0.13 85)" stopOpacity="0" />
+            <stop offset="0" stopColor="var(--accent)" stopOpacity="0.55" />
+            <stop offset="0.6" stopColor="var(--accent)" stopOpacity="0.08" />
+            <stop offset="1" stopColor="var(--accent)" stopOpacity="0" />
           </radialGradient>
         </defs>
         {[60, 130, 200, 260].map((r) => (
@@ -77,14 +77,14 @@ function HeroVisual() {
         {lines.map(([a, b], i) => {
           const na = nodes[a], nb = nodes[b]
           const active = a === pulse || b === pulse
-          return <line key={i} x1={na.x} y1={na.y} x2={nb.x} y2={nb.y} stroke={active ? 'oklch(0.82 0.13 85)' : 'rgba(255,255,255,0.07)'} strokeWidth={active ? 1 : 0.6} />
+          return <line key={i} x1={na.x} y1={na.y} x2={nb.x} y2={nb.y} stroke={active ? 'var(--accent)' : 'rgba(255,255,255,0.07)'} strokeWidth={active ? 1 : 0.6} />
         })}
         {nodes.map((n, i) => {
           if (n.kind === 'vault') {
             return (
               <g key={i}>
-                <rect x={n.x - 22} y={n.y - 22} width="44" height="44" rx="8" fill="rgba(255,255,255,0.06)" stroke="oklch(0.82 0.13 85)" strokeWidth="1" />
-                <rect x={n.x - 14} y={n.y - 14} width="28" height="28" rx="4" fill="none" stroke="oklch(0.82 0.13 85)" strokeWidth="0.8" opacity="0.6" />
+                <rect x={n.x - 22} y={n.y - 22} width="44" height="44" rx="8" fill="rgba(255,255,255,0.06)" stroke="var(--accent)" strokeWidth="1" />
+                <rect x={n.x - 14} y={n.y - 14} width="28" height="28" rx="4" fill="none" stroke="var(--accent)" strokeWidth="0.8" opacity="0.6" />
                 <circle cx={n.x} cy={n.y} r="3" fill="oklch(0.85 0.13 85)" />
               </g>
             )
@@ -121,7 +121,10 @@ function HeroTape() {
         <div className="micro">Simulated vault tape</div>
         <div className="micro" style={{ color: 'var(--text-2)' }}>● SIMULATED</div>
       </div>
-      <table className="tbl">
+      {/* MOBILE-001: the 5-column tape is wider than a phone; scroll it horizontally inside the
+          panel instead of letting it clip (the panel's overflow:hidden would cut the State column). */}
+      <div style={{ overflowX: 'auto' }}>
+      <table className="tbl" style={{ minWidth: 460 }}>
         <thead><tr><th>Kind</th><th>Vault</th><th>Subject</th><th>Size</th><th>State</th></tr></thead>
         <tbody>
           {rows.map((r, i) => (
@@ -140,6 +143,7 @@ function HeroTape() {
           ))}
         </tbody>
       </table>
+      </div>
     </div>
   )
 }
@@ -164,10 +168,10 @@ const FEATURES = [
             <line x1="90" y1={y} x2="140" y2="80" stroke="oklch(0.82 0.13 85 / 0.35)" strokeDasharray="3 3" markerEnd="url(#arr)" />
           </g>
         ))}
-        <rect x="140" y="58" width="80" height="44" rx="6" fill="rgba(255,255,255,0.04)" stroke="oklch(0.82 0.13 85)" />
+        <rect x="140" y="58" width="80" height="44" rx="6" fill="rgba(255,255,255,0.04)" stroke="var(--accent)" />
         <text x="180" y="78" textAnchor="middle" fontFamily="Inter" fontSize="11" fill="#E6EAF0">Vault</text>
-        <text x="180" y="94" textAnchor="middle" fontFamily="JetBrains Mono" fontSize="9" fill="oklch(0.82 0.13 85)">0x7a4f</text>
-        <line x1="220" y1="80" x2="270" y2="80" stroke="oklch(0.82 0.13 85)" markerEnd="url(#arr)" />
+        <text x="180" y="94" textAnchor="middle" fontFamily="JetBrains Mono" fontSize="9" fill="var(--accent)">0x7a4f</text>
+        <line x1="220" y1="80" x2="270" y2="80" stroke="var(--accent)" markerEnd="url(#arr)" />
         <rect x="270" y="58" width="44" height="44" rx="6" fill="rgba(255,255,255,0.04)" stroke="rgba(255,255,255,0.18)" />
         <text x="292" y="82" textAnchor="middle" fontFamily="Inter" fontSize="10" fill="#B7C0CC">PM</text>
         <text x="180" y="148" textAnchor="middle" fontFamily="JetBrains Mono" fontSize="9" fill="rgba(255,255,255,0.35)">which depositor? unknowable.</text>
@@ -181,16 +185,16 @@ const FEATURES = [
       <svg viewBox="0 0 320 160" width="100%">
         <rect x="10" y="60" width="80" height="40" rx="4" fill="rgba(255,255,255,0.04)" stroke="rgba(255,255,255,0.14)" />
         <text x="50" y="78" textAnchor="middle" fontFamily="Inter" fontSize="10" fill="#B7C0CC">Browser</text>
-        <text x="50" y="92" textAnchor="middle" fontFamily="JetBrains Mono" fontSize="8" fill="oklch(0.82 0.13 85)">prove(π)</text>
+        <text x="50" y="92" textAnchor="middle" fontFamily="JetBrains Mono" fontSize="8" fill="var(--accent)">prove(π)</text>
         <line x1="90" y1="80" x2="130" y2="80" stroke="oklch(0.82 0.13 85 / 0.5)" strokeDasharray="3 3" />
         <text x="110" y="72" textAnchor="middle" fontFamily="JetBrains Mono" fontSize="8" fill="rgba(255,255,255,0.4)">384B</text>
         <rect x="130" y="60" width="80" height="40" rx="4" fill="rgba(255,255,255,0.04)" stroke="rgba(255,255,255,0.14)" />
         <text x="170" y="78" textAnchor="middle" fontFamily="Inter" fontSize="10" fill="#B7C0CC">Relay</text>
         <text x="170" y="92" textAnchor="middle" fontFamily="JetBrains Mono" fontSize="8" fill="rgba(255,255,255,0.4)">3-hop</text>
         <line x1="210" y1="80" x2="250" y2="80" stroke="oklch(0.82 0.13 85 / 0.5)" strokeDasharray="3 3" />
-        <rect x="250" y="60" width="60" height="40" rx="4" fill="rgba(255,255,255,0.04)" stroke="oklch(0.78 0.16 152)" />
+        <rect x="250" y="60" width="60" height="40" rx="4" fill="rgba(255,255,255,0.04)" stroke="var(--green)" />
         <text x="280" y="78" textAnchor="middle" fontFamily="Inter" fontSize="10" fill="#E6EAF0">Vault</text>
-        <text x="280" y="92" textAnchor="middle" fontFamily="JetBrains Mono" fontSize="8" fill="oklch(0.78 0.16 152)">✓</text>
+        <text x="280" y="92" textAnchor="middle" fontFamily="JetBrains Mono" fontSize="8" fill="var(--green)">✓</text>
         {['commitment', 'nullifier', 'merkle path'].map((t, i) => (
           <text key={t} x="50" y={130 + i * 12} textAnchor="middle" fontFamily="JetBrains Mono" fontSize="8" fill="rgba(255,255,255,0.3)">{t}</text>
         ))}
@@ -204,14 +208,14 @@ const FEATURES = [
       <svg viewBox="0 0 320 160" width="100%">
         <text x="10" y="24" fontFamily="JetBrains Mono" fontSize="9" fill="var(--red)" opacity="0.7">EXPOSED (today)</text>
         <rect x="10" y="34" width="140" height="30" rx="4" fill="oklch(0.70 0.18 25 / 0.06)" stroke="oklch(0.70 0.18 25 / 0.3)" />
-        <text x="80" y="53" textAnchor="middle" fontFamily="JetBrains Mono" fontSize="9" fill="oklch(0.70 0.18 25)">wallet → polymarket fill</text>
+        <text x="80" y="53" textAnchor="middle" fontFamily="JetBrains Mono" fontSize="9" fill="var(--red)">wallet → polymarket fill</text>
         <text x="10" y="94" fontFamily="JetBrains Mono" fontSize="9" fill="var(--green)" opacity="0.7">SHIELDED (PolyShield)</text>
         <rect x="10" y="104" width="140" height="30" rx="4" fill="oklch(0.78 0.16 152 / 0.06)" stroke="oklch(0.78 0.16 152 / 0.3)" />
-        <text x="80" y="123" textAnchor="middle" fontFamily="JetBrains Mono" fontSize="9" fill="oklch(0.78 0.16 152)">vault → polymarket fill</text>
+        <text x="80" y="123" textAnchor="middle" fontFamily="JetBrains Mono" fontSize="9" fill="var(--green)">vault → polymarket fill</text>
         <text x="170" y="50" fontFamily="JetBrains Mono" fontSize="8" fill="rgba(255,255,255,0.3)">observed by anyone →</text>
-        <text x="170" y="62" fontFamily="JetBrains Mono" fontSize="8" fill="oklch(0.70 0.18 25)">copy bots, chain analysts</text>
+        <text x="170" y="62" fontFamily="JetBrains Mono" fontSize="8" fill="var(--red)">copy bots, chain analysts</text>
         <text x="170" y="120" fontFamily="JetBrains Mono" fontSize="8" fill="rgba(255,255,255,0.3)">observed by anyone →</text>
-        <text x="170" y="132" fontFamily="JetBrains Mono" fontSize="8" fill="oklch(0.78 0.16 152)">vault traded · no attribution</text>
+        <text x="170" y="132" fontFamily="JetBrains Mono" fontSize="8" fill="var(--green)">vault traded · no attribution</text>
       </svg>
     ),
   },
@@ -239,14 +243,14 @@ const FEATURES = [
       <svg viewBox="0 0 320 160" width="100%">
         <rect x="10" y="50" width="90" height="60" rx="6" fill="rgba(255,255,255,0.04)" stroke="rgba(255,255,255,0.14)" />
         <text x="55" y="74" textAnchor="middle" fontFamily="Inter" fontSize="10" fill="#E6EAF0">Your browser</text>
-        <text x="55" y="90" textAnchor="middle" fontFamily="JetBrains Mono" fontSize="8" fill="oklch(0.82 0.13 85)">secret = rand()</text>
+        <text x="55" y="90" textAnchor="middle" fontFamily="JetBrains Mono" fontSize="8" fill="var(--accent)">secret = rand()</text>
         <text x="55" y="102" textAnchor="middle" fontFamily="JetBrains Mono" fontSize="8" fill="rgba(255,255,255,0.35)">never sent</text>
         <line x1="100" y1="80" x2="130" y2="80" stroke="var(--line-strong)" strokeDasharray="3 3" />
-        <text x="115" y="72" textAnchor="middle" fontFamily="JetBrains Mono" fontSize="8" fill="oklch(0.78 0.16 152)">C = H(s,v)</text>
-        <rect x="130" y="50" width="90" height="60" rx="6" fill="rgba(255,255,255,0.04)" stroke="oklch(0.82 0.13 85)" />
+        <text x="115" y="72" textAnchor="middle" fontFamily="JetBrains Mono" fontSize="8" fill="var(--green)">C = H(s,v)</text>
+        <rect x="130" y="50" width="90" height="60" rx="6" fill="rgba(255,255,255,0.04)" stroke="var(--accent)" />
         <text x="175" y="74" textAnchor="middle" fontFamily="Inter" fontSize="10" fill="#E6EAF0">Vault contract</text>
         <text x="175" y="90" textAnchor="middle" fontFamily="JetBrains Mono" fontSize="8" fill="rgba(255,255,255,0.5)">commitment tree</text>
-        <text x="175" y="102" textAnchor="middle" fontFamily="JetBrains Mono" fontSize="8" fill="oklch(0.78 0.16 152)">USDC</text>
+        <text x="175" y="102" textAnchor="middle" fontFamily="JetBrains Mono" fontSize="8" fill="var(--green)">USDC</text>
         <text x="240" y="55" fontFamily="JetBrains Mono" fontSize="8" fill="rgba(255,255,255,0.3)">withdraw to</text>
         <text x="240" y="67" fontFamily="JetBrains Mono" fontSize="8" fill="rgba(255,255,255,0.3)">your own</text>
         <text x="240" y="79" fontFamily="JetBrains Mono" fontSize="8" fill="rgba(255,255,255,0.3)">address.</text>
@@ -272,10 +276,12 @@ const ARCH_EDGES = [
 ]
 
 function ArchitectureDiagram() {
-  const [hover, setHover] = useState<string | null>(null)
+  // A11Y: default to the first node so keyboard + touch users (who can't hover) always
+  // see a role, and the selection is sticky (never cleared on mouse-leave/blur).
+  const [hover, setHover] = useState<string | null>(ARCH_NODES[0].id)
   const hoverNode = ARCH_NODES.find((n) => n.id === hover)
   return (
-    <div style={{ display: 'grid', gridTemplateColumns: '1fr 280px', gap: 24 }}>
+    <div className="m-grid" style={{ display: 'grid', gridTemplateColumns: '1fr 280px', gap: 24 }}>
       <div className="panel-strong" style={{ padding: 24 }}>
         <svg viewBox="0 0 680 420" width="100%" style={{ display: 'block' }}>
           <defs>
@@ -296,7 +302,17 @@ function ArchitectureDiagram() {
           {ARCH_NODES.map((n) => {
             const active = hover === n.id
             return (
-              <g key={n.id} onMouseEnter={() => setHover(n.id)} onMouseLeave={() => setHover(null)} style={{ cursor: 'pointer' }}>
+              <g
+                key={n.id}
+                role="button"
+                tabIndex={0}
+                aria-label={`${n.label}: ${n.role}`}
+                onMouseEnter={() => setHover(n.id)}
+                onFocus={() => setHover(n.id)}
+                onClick={() => setHover(n.id)}
+                onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setHover(n.id) } }}
+                style={{ cursor: 'pointer' }}
+              >
                 {active && <circle cx={n.x} cy={n.y} r="22" fill="oklch(0.82 0.13 85 / 0.12)" />}
                 <circle cx={n.x} cy={n.y} r="14" fill="rgba(255,255,255,0.04)" stroke={active ? n.color : 'rgba(255,255,255,0.15)'} strokeWidth={active ? 1.5 : 1} />
                 <circle cx={n.x} cy={n.y} r="4" fill={n.color} opacity={active ? 1 : 0.6} />
@@ -314,7 +330,7 @@ function ArchitectureDiagram() {
             <p className="body mt-2" style={{ fontSize: 13 }}>{hoverNode.role}</p>
           </div>
         ) : (
-          <div className="small mt-3" style={{ color: 'var(--text-3)' }}>Hover a node to see its role in the protocol.</div>
+          <div className="small mt-3" style={{ color: 'var(--text-3)' }}>Hover, tap, or focus a node to see its role in the protocol.</div>
         )}
         <div className="hairline-t mt-6" style={{ paddingTop: 12 }}>
           <div className="micro">LEGEND</div>
@@ -373,7 +389,7 @@ export default function LandingPage() {
       {/* Hero */}
       <section style={{ paddingTop: 64, paddingBottom: 80 }}>
         <div className="container">
-          <div style={{ display: 'grid', gridTemplateColumns: '1.05fr 0.95fr', gap: 56, alignItems: 'center' }}>
+          <div className="m-grid" style={{ display: 'grid', gridTemplateColumns: '1.05fr 0.95fr', gap: 56, alignItems: 'center' }}>
             <div>
               <div className="pill pill-cyan" style={{ fontSize: 11 }}>
                 <span className="dot" />&nbsp;{NETWORK_STATUS}
@@ -391,7 +407,9 @@ export default function LandingPage() {
                 <Link href="/docs" className="btn">Read the docs</Link>
                 <Link href="/how" className="btn btn-ghost">How it works →</Link>
               </div>
-              <div className="row gap-6 mt-12">
+              {/* MOBILE: .row has no wrap; 4 stats overflow a phone and get clipped by
+                  overflow-x:clip, hiding the last stat. Wrap to a 2×2 on narrow widths. */}
+              <div className="row gap-6 mt-12" style={{ flexWrap: 'wrap', rowGap: 18 }}>
                 {[
                   ['Network', 'Polygon', 'mainnet beta'],
                   ['Per-address cap', '$50k', 'USDC'],
@@ -423,7 +441,7 @@ export default function LandingPage() {
           <div className="col gap-6 mt-12">
             {FEATURES.map((f, i) => (
               <div key={f.num} className="panel" style={{ padding: 40 }}>
-                <div style={{ display: 'grid', gridTemplateColumns: i % 2 === 0 ? '1fr 1.2fr' : '1.2fr 1fr', gap: 48, alignItems: 'center' }}>
+                <div className="m-grid" style={{ display: 'grid', gridTemplateColumns: i % 2 === 0 ? '1fr 1.2fr' : '1.2fr 1fr', gap: 48, alignItems: 'center' }}>
                   <div style={{ order: i % 2 === 0 ? 0 : 1 }}>
                     <div className="micro" style={{ color: 'var(--cyan)' }}>{f.num}</div>
                     <h2 className="h3 mt-3" style={{ margin: 0 }}>{f.title}</h2>
@@ -440,7 +458,7 @@ export default function LandingPage() {
       {/* Architecture */}
       <section style={{ paddingBottom: 80 }}>
         <div className="container">
-          <SectionHead kicker="ARCHITECTURE" title="Eight components. One privacy invariant." sub="Hover any node to see its role. Every component can be audited in isolation." />
+          <SectionHead kicker="ARCHITECTURE" title="Eight components. One privacy invariant." sub="Select any node to see its role. Every component can be audited in isolation." />
           <div className="mt-10">
             <ArchitectureDiagram />
           </div>
@@ -451,7 +469,7 @@ export default function LandingPage() {
       <section style={{ paddingBottom: 80 }}>
         <div className="container">
           <SectionHead kicker="SECURITY" title="What the protocol promises." />
-          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 16, marginTop: 40 }}>
+          <div className="m-grid" style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 16, marginTop: 40 }}>
             {SECURITY.map((s) => (
               <div key={s.title} className="panel" style={{ padding: 24 }}>
                 <Icon d={s.icon} size={18} className="text-cyan" />

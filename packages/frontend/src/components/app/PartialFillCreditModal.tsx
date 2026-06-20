@@ -4,6 +4,7 @@ import { useEffect, useState } from 'react'
 import { useSignMessage } from 'wagmi'
 import { Modal } from '@/components/app/Modal'
 import { KV } from '@/components/app/KV'
+import { LiveRegion } from '@/components/app/LiveRegion'
 import {
   addNote,
   computeCommitment,
@@ -197,8 +198,19 @@ export function PartialFillCreditModal({
     }
   }
 
+  // WCAG 4.1.3 — announce proof generation + the refunded result (the proof step is otherwise silent).
+  const announce =
+    phase === 'proving'
+      ? 'Generating refund proof and crediting the unfilled remainder…'
+      : phase === 'done'
+        ? `Refund credited. $${formatUsdc(refundAmount)} returned to your balance.`
+        : phase === 'error'
+          ? error ?? 'Refund failed.'
+          : ''
+
   return (
     <Modal open={open} title="Claim partial-fill refund" onClose={() => { if (phase !== 'proving') onClose() }}>
+      <LiveRegion message={announce} assertive={phase === 'error'} />
       {phase === 'input' && (
         <div className="col gap-4">
           <p className="body" style={{ margin: 0 }}>

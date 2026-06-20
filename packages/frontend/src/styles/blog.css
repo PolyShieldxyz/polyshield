@@ -1,0 +1,193 @@
+/* PolyShield blog — scoped styles. Ported from the accepted /tmp/blog-mockups
+   design, scoped under `.blog` so generic class names (.card/.prose/.answer…)
+   can never collide with app/marketing code. All color/spacing comes from the
+   P5 tokens in globals.css; only the blog-specific reading-layer tokens are new. */
+:root {
+  --prose-measure: 690px;
+  --blog-max: 1200px;
+  --blog-hero-grad: linear-gradient(135deg, oklch(0.30 0.08 280) 0%, oklch(0.205 0.018 280) 62%);
+}
+
+.blog { display: block; }
+.blog .b-container { max-width: var(--blog-max); margin: 0 auto; padding: 0 32px; }
+.blog .b-line-grid {
+  background-image:
+    linear-gradient(to right, var(--line) 1px, transparent 1px),
+    linear-gradient(to bottom, var(--line) 1px, transparent 1px);
+  background-size: 80px 80px;
+}
+
+/* ── Index: hero band ─────────────────────────────────────────────────────── */
+.blog .hero { position: relative; overflow: hidden; background: var(--blog-hero-grad); border-bottom: 1px solid var(--line); }
+.blog .hero .b-line-grid { position: absolute; inset: 0; opacity: .5; -webkit-mask-image: radial-gradient(120% 120% at 80% 0%, #000, transparent 75%); mask-image: radial-gradient(120% 120% at 80% 0%, #000, transparent 75%); }
+.blog .hero-inner { position: relative; max-width: var(--blog-max); margin: 0 auto; padding: 84px 32px 72px; }
+.blog .hero h1 { font-size: 56px; line-height: 1.02; letter-spacing: -.035em; font-weight: 600; margin: 14px 0 0; max-width: 880px; }
+.blog .hero .deck { font-size: 19px; line-height: 1.6; color: var(--text-1); max-width: 620px; margin: 18px 0 28px; }
+
+/* ── Index: featured pillar ───────────────────────────────────────────────── */
+.blog .featured { margin-top: 40px; display: grid; grid-template-columns: 1.1fr .9fr; border: 1px solid var(--line-strong); border-radius: var(--r-4); overflow: hidden; background: var(--surface-1); }
+.blog .featured .f-body { padding: 34px 36px; }
+.blog .featured h2 { font-size: 32px; line-height: 1.08; letter-spacing: -.02em; font-weight: 600; margin: 14px 0 12px; }
+.blog .featured .deck { color: var(--text-1); font-size: 15.5px; line-height: 1.6; max-width: 46ch; }
+.blog .meta-row { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; color: var(--text-3); font-size: 12px; margin: 18px 0 22px; font-family: var(--mono); }
+.blog .meta-row .sep { opacity: .4; }
+.blog .level { display: inline-block; padding: 2px 8px; border-radius: 999px; border: 1px solid var(--line-strong); color: var(--text-2); font-size: 11px; letter-spacing: .04em; }
+.blog .gold-link { color: var(--accent); font-weight: 500; display: inline-flex; align-items: center; gap: 6px; }
+.blog .gold-link:hover { text-decoration: underline; }
+.blog .thumb { position: relative; min-height: 300px; background: var(--blog-hero-grad); display: flex; align-items: flex-end; padding: 18px; border-left: 1px solid var(--line); }
+.blog .thumb .b-line-grid { position: absolute; inset: 0; opacity: .45; }
+.blog .thumb .tag { position: relative; font-family: var(--mono); font-size: 11px; color: var(--text-2); letter-spacing: .06em; }
+.blog .thumb svg { position: absolute; inset: 0; margin: auto; width: 78%; height: auto; }
+.blog .thumb img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
+
+/* ── Index: toolbar + chips + grid ────────────────────────────────────────── */
+.blog .toolbar { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin: 56px 0 22px; flex-wrap: wrap; }
+.blog .toolbar h3 { font-size: 13px; letter-spacing: .08em; text-transform: uppercase; color: var(--text-2); font-family: var(--mono); margin: 0; }
+.blog .chips { display: flex; gap: 8px; flex-wrap: wrap; }
+.blog .chip { min-height: 32px; padding: 6px 14px; border-radius: 999px; border: 1px solid var(--line-strong); background: transparent; color: var(--text-2); font-size: 12.5px; cursor: pointer; font-family: inherit; transition: all .12s ease; }
+.blog .chip:hover { border-color: var(--line-bright); color: var(--text-1); }
+.blog .chip[aria-pressed="true"] { background: var(--accent-soft); border-color: var(--accent-line); color: var(--accent); }
+.blog .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 24px; padding-bottom: 24px; }
+.blog .card { display: flex; flex-direction: column; border: 1px solid var(--line); border-radius: var(--r-3); background: var(--surface); overflow: hidden; transition: border-color .15s ease, transform .15s ease, box-shadow .15s ease; }
+.blog .card:hover { border-color: oklch(0.55 0.10 85); transform: translateY(-2px); box-shadow: var(--shadow-2); }
+.blog .card .cthumb { position: relative; aspect-ratio: 16 / 9; background: var(--blog-hero-grad); overflow: hidden; }
+.blog .card .cthumb .b-line-grid { position: absolute; inset: 0; opacity: .4; }
+.blog .card .cthumb img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
+.blog .card .cbody { padding: 16px 18px 20px; display: flex; flex-direction: column; flex: 1; }
+.blog .eyebrow { display: flex; align-items: center; gap: 7px; color: var(--text-3); font-family: var(--mono); font-size: 10.5px; letter-spacing: .07em; text-transform: uppercase; margin-bottom: 9px; }
+.blog .card h4 { font-size: 17px; line-height: 1.3; letter-spacing: -.01em; font-weight: 600; margin: 0 0 8px; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.blog .card p { margin: 0 0 14px; color: var(--text-2); font-size: 13.5px; line-height: 1.55; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.blog .card .cmeta { margin-top: auto; display: flex; gap: 9px; align-items: center; color: var(--text-3); font-size: 11px; font-family: var(--mono); }
+.blog .empty { padding: 48px; text-align: center; color: var(--text-2); border: 1px dashed var(--line-strong); border-radius: var(--r-3); }
+
+/* ── Post: header zone ────────────────────────────────────────────────────── */
+.blog .posthead { position: relative; overflow: hidden; border-bottom: 1px solid var(--line); background: linear-gradient(180deg, oklch(0.205 0.03 280) 0%, var(--bg) 100%); }
+.blog .posthead .b-line-grid { position: absolute; inset: 0; opacity: .4; -webkit-mask-image: radial-gradient(120% 90% at 70% 0%, #000, transparent 70%); mask-image: radial-gradient(120% 90% at 70% 0%, #000, transparent 70%); }
+.blog .posthead-inner { position: relative; max-width: 760px; margin: 0 auto; padding: 30px 32px 34px; }
+.blog .crumb { font-family: var(--mono); font-size: 11.5px; color: var(--text-3); margin-bottom: 22px; }
+.blog .crumb a:hover { color: var(--text-1); }
+.blog .crumb .sep { opacity: .4; margin: 0 6px; }
+.blog .p-eyebrow { color: var(--brand); font-family: var(--mono); font-size: 11px; letter-spacing: .08em; text-transform: uppercase; }
+.blog .posthead h1 { font-size: 40px; line-height: 1.08; letter-spacing: -.025em; font-weight: 600; margin: 14px 0 0; }
+.blog .posthead .deck { font-size: 19px; line-height: 1.55; color: var(--text-1); font-style: italic; margin: 16px 0 0; max-width: 60ch; }
+.blog .byline { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; color: var(--text-3); font-size: 12.5px; margin: 22px 0 0; font-family: var(--mono); }
+.blog .byline .sep { opacity: .4; }
+.blog .byline .upd { color: var(--accent); }
+
+/* ── Post: hero image ─────────────────────────────────────────────────────── */
+.blog .herofig { max-width: 1000px; margin: 28px auto 0; padding: 0 32px; }
+.blog .heroimg { position: relative; aspect-ratio: 16 / 9; border-radius: var(--r-4); overflow: hidden; border: 1px solid var(--line-strong); background: var(--blog-hero-grad); }
+.blog .heroimg img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
+.blog .caption { color: var(--text-2); font-size: 12.5px; margin: 10px 2px 0; line-height: 1.6; }
+
+/* ── Post: body grid (prose + sticky TOC) ─────────────────────────────────── */
+.blog .wrap { max-width: var(--blog-max); margin: 0 auto; padding: 8px 32px 40px; display: grid; grid-template-columns: 1fr var(--prose-measure) 220px 1fr; gap: 0 40px; }
+.blog .prose { grid-column: 2; min-width: 0; padding-top: 34px; }
+.blog .toc { grid-column: 3; position: sticky; top: 80px; align-self: start; padding-top: 38px; max-height: calc(100vh - 100px); overflow: auto; }
+.blog .toc .ttl { font-family: var(--mono); font-size: 10.5px; letter-spacing: .08em; text-transform: uppercase; color: var(--text-3); margin-bottom: 12px; }
+.blog .toc a { display: block; font-size: 13px; color: var(--text-3); padding: 5px 0 5px 12px; border-left: 2px solid var(--line); line-height: 1.35; min-height: 28px; }
+.blog .toc a:hover { color: var(--text-1); }
+.blog .toc a.active { color: var(--accent); border-left-color: var(--accent); }
+
+/* ── Post: prose typography ───────────────────────────────────────────────────
+   Scoped to `.mdx` (the wrapper around the rendered Markdown) so these rules can't
+   leak into component internals (CTA buttons, related cards, the public/private
+   table) that also live inside `.prose`. Bullet/list rules use child combinators
+   so component lists (.pptable, .steps) keep their own styling. */
+.blog .mdx p { font-size: var(--fs-read); line-height: var(--lh-read); color: var(--text-1); margin: 14px 0; }
+.blog .mdx > p:first-child { font-size: var(--fs-read-lead); line-height: 1.7; color: var(--text); margin-top: 0; }
+.blog .mdx h2 { font-size: 26px; line-height: 1.2; letter-spacing: -.02em; font-weight: 600; margin: 48px 0 8px; border-left: 3px solid var(--brand); padding-left: 14px; scroll-margin-top: 80px; }
+.blog .mdx h3 { font-size: var(--fs-read-h3); font-weight: 600; margin: 28px 0 6px; letter-spacing: -.01em; }
+.blog .mdx strong { color: var(--text); }
+.blog .mdx em { color: var(--text-1); }
+.blog .mdx a { color: var(--accent); border-bottom: 1px solid var(--accent-line); }
+.blog .mdx a:hover { border-bottom-color: var(--accent); }
+.blog .mdx > ul, .blog .mdx > ol { margin: 12px 0; padding-left: 0; list-style: none; }
+.blog .mdx > ul > li { position: relative; padding-left: 20px; margin: 9px 0; font-size: var(--fs-read); line-height: 1.65; color: var(--text-1); }
+.blog .mdx > ul > li::before { content: "·"; position: absolute; left: 4px; color: var(--accent); font-size: 18px; line-height: 1.3; }
+.blog .mdx code { font-family: var(--mono); font-size: 13px; background: var(--bg-1); border: 1px solid var(--line); border-radius: 4px; padding: 1px 6px; color: var(--text-1); }
+.blog .mdx pre { font-family: var(--mono); font-size: 12.5px; line-height: 1.7; background: var(--bg-1); border: 1px solid var(--line); border-radius: var(--r-2); padding: 12px 14px; margin: 14px 0; overflow-x: auto; color: var(--text-1); }
+.blog .mdx pre code { background: none; border: none; padding: 0; }
+
+/* ── Post: answer block (AEO) ─────────────────────────────────────────────── */
+.blog .answer { margin: 22px 0; border: 1px solid var(--accent-line); background: var(--accent-soft); border-radius: var(--r-3); padding: 16px 20px; }
+.blog .answer .k { font-family: var(--mono); font-size: 11px; letter-spacing: .07em; text-transform: uppercase; color: var(--accent); margin-bottom: 7px; display: flex; align-items: center; gap: 7px; }
+.blog .answer p { margin: 0; font-size: 16.5px; line-height: 1.6; color: var(--text); }
+
+/* ── Post: public/private table (the honesty beat) ────────────────────────── */
+.blog .pptable { display: grid; grid-template-columns: 1fr 1fr; border: 1px solid var(--line-strong); border-radius: var(--r-3); overflow: hidden; margin: 22px 0; }
+.blog .pptable .col { padding: 18px 20px; }
+.blog .pptable .col + .col { border-left: 1px solid var(--line-strong); }
+.blog .pptable .h { display: flex; align-items: center; gap: 8px; font-size: 13px; font-weight: 600; margin-bottom: 12px; }
+.blog .pptable .pub .h { color: var(--amber); }
+.blog .pptable .priv .h { color: var(--green); }
+.blog .pptable ul { margin: 0; padding: 0; list-style: none; }
+.blog .pptable li { font-size: 14px; color: var(--text-1); padding: 6px 0 6px 18px; position: relative; line-height: 1.5; }
+.blog .pptable li::before { content: ""; position: absolute; left: 0; top: 11px; width: 7px; height: 7px; border-radius: 50%; }
+.blog .pptable .pub li::before { background: var(--amber); }
+.blog .pptable .priv li::before { background: var(--green); }
+.blog .pptable li.muted { color: var(--text-3); }
+.blog .pptable li.muted::before { background: var(--text-3); }
+
+/* ── Post: figure / inline diagram ────────────────────────────────────────── */
+.blog .mdx figure { margin: 26px 0; }
+.blog .fig { border: 1px solid var(--line); background: var(--bg-1); border-radius: var(--r-3); padding: 22px 18px; }
+.blog .fig svg { display: block; width: 100%; height: auto; font-family: var(--mono); }
+
+/* ── Post: key-terms box ──────────────────────────────────────────────────── */
+.blog .terms { border: 1px solid var(--brand-line); background: var(--brand-soft); border-radius: var(--r-3); padding: 16px 20px; margin: 24px 0; }
+.blog .terms .k { font-family: var(--mono); font-size: 11px; letter-spacing: .07em; text-transform: uppercase; color: var(--brand); margin-bottom: 10px; }
+.blog .terms dl { margin: 0; display: grid; grid-template-columns: max-content 1fr; gap: 8px 16px; }
+.blog .terms dt { font-family: var(--mono); font-size: 13px; }
+.blog .terms dt a { color: var(--accent); border: none; }
+.blog .terms dt a:hover { text-decoration: underline; }
+.blog .terms dd { margin: 0; font-size: 14px; color: var(--text-1); line-height: 1.5; }
+
+/* ── Post: numbered steps ─────────────────────────────────────────────────── */
+.blog .steps { counter-reset: s; list-style: none; padding: 0; margin: 16px 0; }
+.blog .steps li { display: flex; gap: 12px; align-items: flex-start; margin: 12px 0; padding-left: 0; }
+.blog .steps li::before { content: counter(s); counter-increment: s; flex: 0 0 26px; width: 26px; height: 26px; border-radius: 50%; border: 1px solid var(--accent-line); color: var(--accent); background: var(--accent-soft); font-family: var(--mono); font-size: 12px; display: flex; align-items: center; justify-content: center; position: static; }
+.blog .steps li > span { font-size: 16px; line-height: 1.65; color: var(--text-1); padding-top: 2px; }
+
+/* ── Post: CTA band + risk line ───────────────────────────────────────────── */
+.blog .ctaband { margin: 40px 0 8px; border: 1px solid var(--line-strong); background: var(--surface-1); border-radius: var(--r-4); padding: 26px 28px; display: flex; align-items: center; justify-content: space-between; gap: 20px; flex-wrap: wrap; }
+.blog .ctaband h3 { margin: 0 0 4px; font-size: 19px; font-weight: 600; letter-spacing: -.01em; }
+.blog .ctaband p { margin: 0; color: var(--text-2); font-size: 14px; }
+.blog .ctaband .acts { display: flex; gap: 12px; flex-wrap: wrap; }
+.blog .risk { margin: 18px 0; border: 1px solid oklch(0.80 0.14 55 / 0.40); background: oklch(0.80 0.14 55 / 0.10); border-radius: var(--r-2); padding: 11px 16px; color: var(--text-1); font-size: 13px; line-height: 1.55; display: flex; gap: 10px; }
+.blog .risk .ic { color: var(--amber); flex: 0 0 auto; }
+
+/* ── Post: FAQ + related ──────────────────────────────────────────────────── */
+.blog .faq h3 { font-size: 17px; margin: 22px 0 4px; }
+.blog .faq p { margin: 6px 0 0; }
+.blog .related { border-top: 1px solid var(--line); margin-top: 48px; padding-top: 30px; }
+.blog .related .k { font-family: var(--mono); font-size: 11px; letter-spacing: .08em; text-transform: uppercase; color: var(--text-3); margin-bottom: 16px; }
+.blog .rgrid { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 16px; }
+.blog .rcard { border: 1px solid var(--line); border-radius: var(--r-3); background: var(--surface); padding: 16px 18px; transition: border-color .15s, transform .15s; }
+.blog .rcard:hover { border-color: oklch(0.55 0.10 85); transform: translateY(-2px); }
+.blog .rcard .e { color: var(--text-3); font-family: var(--mono); font-size: 10px; letter-spacing: .06em; text-transform: uppercase; }
+.blog .rcard h4 { margin: 8px 0 0; font-size: 15px; line-height: 1.35; font-weight: 600; }
+.blog .rcard.pillar { border-color: var(--brand-line); background: var(--brand-soft); }
+
+/* ── Mobile TOC + responsive ──────────────────────────────────────────────── */
+.blog .toc-mobile { display: none; }
+@media (max-width: 1080px) {
+  .blog .wrap { grid-template-columns: 1fr; max-width: 760px; }
+  .blog .prose { grid-column: 1; }
+  .blog .toc { display: none; }
+  .blog .toc-mobile { display: block; margin: 24px 0 0; }
+  .blog .toc-mobile summary { cursor: pointer; font-family: var(--mono); font-size: 12px; color: var(--text-2); padding: 10px 14px; border: 1px solid var(--line-strong); border-radius: var(--r-2); }
+  .blog .toc-mobile a { display: block; font-size: 14px; color: var(--text-2); padding: 8px 14px; }
+}
+@media (max-width: 860px) {
+  .blog .featured { grid-template-columns: 1fr; }
+  .blog .thumb { min-height: 200px; order: -1; border-left: none; border-bottom: 1px solid var(--line); }
+  .blog .hero h1 { font-size: 38px; }
+  .blog .hero-inner { padding: 56px 22px 48px; }
+}
+@media (max-width: 760px) {
+  .blog .posthead h1 { font-size: 30px; }
+  .blog .pptable { grid-template-columns: 1fr; }
+  .blog .pptable .col + .col { border-left: none; border-top: 1px solid var(--line-strong); }
+  .blog .terms dl { grid-template-columns: 1fr; }
+}

@@ -6,10 +6,11 @@ import path from "path";
 import crypto from "crypto";
 import { z } from "zod";
 import { resolveMarketManually } from "./settlementResolver";
-import { submitMarketSellOrder, submitLimitSellOrder, getOrCreateClobClient, attestFailedFor } from "./orderBuilder";
+import { submitMarketSellOrder, submitLimitSellOrder, getOrCreateClobClient, attestFailedFor, reconcileMarketSubmission } from "./orderBuilder";
 import { getTrackedOrder, cancelTrackedOrder } from "./wsFillTracker";
+import { isBetInFlight } from "./eventListener";
 import { recordLimitOrder } from "./limitOrderStore";
-import { getAttestation } from "./attestationStore";
+import { getAttestation, getMarketSubmission } from "./attestationStore";
 import { syncOneMarket } from "./marketRegistry";
 import { config } from "./config";
 
@@ -218,12 +219,21 @@ export function startAutoSettlementServer(
    * POST /cancel-bet
    * Body: { nullifier_of_bet }
    *
-   * User-initiated cancel/recover for a bet that is stuck pending — e.g. its order never reached
-   * Polymarket (rejected/400), or a resting GTC/GTD the user wants to abandon. Safe by design:
-   *   - already has a terminal attestation → no-op (idempotent).
-   *   - no live CLOB order (never placed) → attest FAILED so the stake is reclaimable.
-   *   - resting order → cancel it on the CLOB and let the fill tracker finalize with the TRUE
-   *     fill (FAILED if zero, PARTIAL if partly filled). Never blind-FAILED → no double-spend.
+   * User-initiated cancel/recover for a bet that is stuck pending. Safe by design — it NEVER
+   * blind-attests FAILED while an order could have filled (that would reclaim a position the pool
+   * actually bought = double-spend / pool drain). Decision order:
+   *   - terminal attestation already exists                 → no-op (idempotent).
+   *   - the event listener is mid-submission (in-flight)    → "processing": don't touch it; the
+   *     submit path will write the true terminal outcome momentarily. Caller retries.
+   *   - a resting GTC/GTD order is tracked                  → cancel it on the CLOB and finalize
+   *     with the TRUE fill (cancelTrackedOrder; FAILED if zero, PARTIAL if partly filled).
+   *   - a MARKET (FAK) order was submitted (durable marker) → reconcile the TRUE fill from the CLOB
+   *     (reconcileMarketSubmission); never blind-FAILED. "finalized" or "processing".
+   *   - NO order was ever submitted (no marker, not in-flight) → safe to attest FAILED (reclaimable).
+   *
+   * The FAK race this closes: a market order is the TAKER and fills synchronously, leaving no tracked
+   * order — the old code took the no-tracked-order branch as "never placed" and blind-FAILED it, so a
+   * cancel during the in-flight window could reclaim a filled position. See docs/threat-model.md.
    */
   app.post("/cancel-bet", operatorAuth, async (req, res) => {
     const parsed = cancelBetSchema.safeParse(req.body);
@@ -236,23 +246,52 @@ export function startAutoSettlementServer(
       res.json({ ok: true, outcome: "already-finalized" });
       return;
     }
+    // A tracked RESTING (GTC/GTD) order is checked FIRST — it's a successfully-placed order on the
+    // book, and cancelTrackedOrder cancels it on the CLOB then reconciles the TRUE fill (never blind-
+    // FAILED). NB: the event listener's in-flight set includes resting orders too and never clears,
+    // so the in-flight guard below must NOT pre-empt this branch.
     const order = getTrackedOrder(nullifier_of_bet);
-    if (!order) {
-      // No resting CLOB order can fill → safe to attest FAILED (reclaimable).
-      await attestFailedFor(wallet, nullifier_of_bet);
-      logger.info({ nullifier_of_bet }, "cancel-bet: no live order — attested FAILED (reclaimable)");
-      res.json({ ok: true, outcome: "failed" });
+    if (order) {
+      let client: unknown = null;
+      try {
+        client = await getOrCreateClobClient(wallet);
+      } catch (err) {
+        logger.warn({ err: String(err) }, "cancel-bet: clob client unavailable");
+      }
+      const outcome = await cancelTrackedOrder(nullifier_of_bet, client);
+      logger.info({ nullifier_of_bet, outcome }, "cancel-bet: resting order cancel processed");
+      res.json({ ok: true, outcome });
       return;
     }
-    let client: unknown = null;
-    try {
-      client = await getOrCreateClobClient(wallet);
-    } catch (err) {
-      logger.warn({ err: String(err) }, "cancel-bet: clob client unavailable");
+    // No tracked resting order. MARKET (FAK) path — this is where the blind-FAILED double-spend lived.
+    // The listener is actively submitting this bet's order right now — DO NOT attest anything; the
+    // synchronous submit will record the real terminal outcome. (Covers the live FAK race in-process.)
+    if (isBetInFlight(nullifier_of_bet)) {
+      logger.info({ nullifier_of_bet }, "cancel-bet: order submission in flight — leaving pending (no false reclaim)");
+      res.json({ ok: true, outcome: "processing" });
+      return;
     }
-    const outcome = await cancelTrackedOrder(nullifier_of_bet, client);
-    logger.info({ nullifier_of_bet, outcome }, "cancel-bet: resting order cancel processed");
-    res.json({ ok: true, outcome });
+    // Was a MARKET (FAK) order ever POSTed? The durable marker is the source of truth: present ⇒ an
+    // order may have filled (reconcile via the CLOB, never blind-FAILED); absent ⇒ no order was ever
+    // placed (safe to attest FAILED so the stuck stake is reclaimable). The marker survives restarts,
+    // closing the window the in-memory in-flight set can't (a crash mid-submit).
+    const sub = getMarketSubmission(nullifier_of_bet);
+    if (sub) {
+      let client: unknown = null;
+      try {
+        client = await getOrCreateClobClient(wallet);
+      } catch (err) {
+        logger.warn({ err: String(err) }, "cancel-bet: clob client unavailable for market reconcile");
+      }
+      const outcome = await reconcileMarketSubmission(wallet, client, provider, nullifier_of_bet, sub);
+      logger.info({ nullifier_of_bet, outcome }, "cancel-bet: market order reconcile processed");
+      res.json({ ok: true, outcome });
+      return;
+    }
+    // No order ever reached the CLOB → nothing could have filled → safe FAILED (reclaimable).
+    await attestFailedFor(wallet, nullifier_of_bet);
+    logger.info({ nullifier_of_bet }, "cancel-bet: no order ever submitted — attested FAILED (reclaimable)");
+    res.json({ ok: true, outcome: "failed" });
   });
 
   app.post("/limit-order", operatorAuth, (req, res) => {

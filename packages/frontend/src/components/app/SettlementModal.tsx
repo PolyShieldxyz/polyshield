@@ -4,6 +4,7 @@ import { useEffect, useMemo, useState } from 'react'
 import { useSignMessage } from 'wagmi'
 import { Modal } from '@/components/app/Modal'
 import { KV } from '@/components/app/KV'
+import { LiveRegion } from '@/components/app/LiveRegion'
 import { Icon, ICONS } from '@/components/ui/Icon'
 import {
   addNote,
@@ -254,8 +255,21 @@ export function SettlementModal({
     onClose()
   }
 
+  // WCAG 4.1.3 — announce the long settlement run + result to assistive tech (otherwise silent).
+  const announce =
+    phase === 'running'
+      ? `Settling bet ${progressIndex + 1} of ${selectedBets.length}. Generating proof and waiting for on-chain confirmation.`
+      : phase === 'done'
+        ? (isCloseLosses
+            ? `Closed ${completed.length} position${completed.length === 1 ? '' : 's'}.`
+            : `Settled ${completed.length} bet${completed.length === 1 ? '' : 's'}. $${formatUsdc(totalCredit)} added to your balance.`)
+        : phase === 'error'
+          ? error ?? 'Settlement failed.'
+          : ''
+
   return (
     <Modal open={open} title={isCloseLosses ? 'Close lost positions' : 'Settle resolved bets'} onClose={closeSafely}>
+      <LiveRegion message={announce} assertive={phase === 'error'} />
       {phase === 'select' && (
         <div className="col gap-4">
           <p className="body" style={{ margin: 0 }}>

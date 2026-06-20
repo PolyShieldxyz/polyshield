@@ -123,7 +123,7 @@ export default function PrivacyPage() {
         </div>
 
         {/* Metric tiles */}
-        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 12, marginBottom: 24 }}>
+        <div className="m-grid" style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 12, marginBottom: 24 }}>
           {metrics.map(({ label, value, color, note }) => (
             <div key={label} className="panel" style={{ padding: '14px 16px', position: 'relative' }}>
               <div className="row" style={{ justifyContent: 'space-between', alignItems: 'baseline' }}>
@@ -136,7 +136,7 @@ export default function PrivacyPage() {
           ))}
         </div>
 
-        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 20 }}>
+        <div className="m-grid" style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 20 }}>
           <div>
             <div className="panel" style={{ padding: 20 }}>
               <div className="micro">ANONYMITY SET GROWTH</div>
@@ -180,7 +180,7 @@ export default function PrivacyPage() {
                   ['Merkle anonymity', 'Your commitment is one leaf among many in the append-only Merkle tree. A root-membership proof shows inclusion without revealing which leaf is yours.', 'var(--cyan)'],
                   ['Nullifier unlinkability', 'Nullifiers are poseidon(secret, nonce). No observer can link a nullifier to a deposit address.', 'var(--green)'],
                   ['Relay separation', 'Proof relay submits transactions. Your wallet never appears in bet, settle, or withdraw calldata.', 'var(--violet)'],
-                  ['Timing entropy', 'Withdraw relay adds random jitter (3–12 min standard, up to 60 min paranoid). Breaks timing correlation.', 'oklch(0.80 0.15 55)'],
+                  ['Timing entropy', 'Withdraw relay adds random jitter (3–12 min standard, up to 60 min paranoid). Breaks timing correlation.', 'var(--amber)'],
                   ['Anonymous analytics', 'During beta we count which markets/tags/sorts/searches are popular to tune what we fetch. Aggregate counts only — no wallet address, no IP, no per-user id. Browsing is never linked to your wallet or bets.', 'oklch(0.72 0.10 200)'],
                 ].map(([label, desc, color]) => (
                   <div key={label as string}>

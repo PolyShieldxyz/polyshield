@@ -2,8 +2,10 @@
 
 import { useEffect, useState } from 'react'
 import { useSignMessage } from 'wagmi'
+import * as ToggleGroup from '@radix-ui/react-toggle-group'
 import { Modal } from '@/components/app/Modal'
 import { KV } from '@/components/app/KV'
+import { LiveRegion } from '@/components/app/LiveRegion'
 import {
   addNote,
   computeCommitment,
@@ -225,8 +227,21 @@ export function ClosePositionModal({
     }
   }
 
+  // WCAG 4.1.3 — announce sell submission, proof generation, and the credited result.
+  const announce =
+    phase === 'selling'
+      ? 'Waiting for your close order to fill on Polymarket…'
+      : phase === 'proving'
+        ? 'Generating the close proof and crediting your proceeds…'
+        : phase === 'done'
+          ? `Position closed. $${formatUsdc(proceeds)} credited to your balance.`
+          : phase === 'error'
+            ? error ?? 'Close failed.'
+            : ''
+
   return (
     <Modal open={open} title="Close position (sell before settlement)" onClose={() => { if (phase !== 'selling' && phase !== 'proving') onClose() }}>
+      <LiveRegion message={announce} assertive={phase === 'error'} />
       {phase === 'input' && (
         <div className="col gap-4">
           <p className="body" style={{ margin: 0 }}>
@@ -242,19 +257,18 @@ export function ClosePositionModal({
           </div>
           <div className="col gap-2">
             <span className="micro">ORDER TYPE</span>
-            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 6 }}>
+            <ToggleGroup.Root type="single" value={orderKind} onValueChange={(v) => { if (v) setOrderKind(v as OrderKind) }} aria-label="Order type" style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 6 }}>
               {(['MARKET', 'LIMIT'] as OrderKind[]).map((k) => (
-                <button
+                <ToggleGroup.Item
                   key={k}
-                  type="button"
-                  onClick={() => setOrderKind(k)}
+                  value={k}
                   className={`btn btn-sm ${orderKind === k ? 'btn-cyan' : 'btn-ghost'}`}
                   style={{ justifyContent: 'center', fontSize: 11 }}
                 >
                   {ORDER_KIND_LABEL[k]}
-                </button>
+                </ToggleGroup.Item>
               ))}
-            </div>
+            </ToggleGroup.Root>
           </div>
           {/* Market close sells at the best available bid → no price to enter. Only a LIMIT close
               takes a price (cents, up to 2 decimals; Polymarket allows below 1¢ and above 99¢). */}

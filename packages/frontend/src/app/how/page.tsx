@@ -1,17 +1,84 @@
+import type { Metadata } from 'next'
 import Link from 'next/link'
 
-/* ── Palette (mirrors styles/globals.css :root) ──────────────────────────── */
+// SEO: unique, keyword-led metadata for the /how route + self-canonical.
+export const metadata: Metadata = {
+  title: 'How It Works — Private Polymarket trading with ZK proofs',
+  description:
+    'How PolyShield makes Polymarket trading private: deposit USDC, prove bets in your browser with zero-knowledge proofs, and trade from a shared anonymity set. Plus answers to common questions.',
+  alternates: { canonical: '/how' },
+}
+
+// SEO/AEO: FAQ content. Each answer is a single plain string so the visible copy
+// and the FAQPage JSON-LD below stay byte-identical (a Google rich-result
+// requirement). Claim-safe: PolyShield protects which depositor authorized which
+// bet — not that a wallet used the vault (deposits are public by design).
+type QA = { q: string; a: string }
+const FAQS: QA[] = [
+  {
+    q: 'What is PolyShield?',
+    a: 'PolyShield is a non-custodial, zero-knowledge privacy vault for Polymarket. Many users deposit USDC into one shared vault that holds a single Polymarket account. Every bet is placed from that one shared account, so on-chain observers cannot tell which depositor authorized which trade. It is live on Polygon mainnet in an open beta.',
+  },
+  {
+    q: 'What does PolyShield hide, and what stays public?',
+    a: 'Hidden: which depositor authorized which bet, and your running position — this is enforced by cryptography, not a promise. Public: that some wallet deposited into the vault and how much, because a deposit is an ordinary on-chain USDC transfer. PolyShield hides your trading activity, not the fact that you deposited.',
+  },
+  {
+    q: 'Is PolyShield a mixer?',
+    a: 'No. A mixer breaks the link between a sender and an arbitrary recipient. PolyShield is withdraw-to-self only: your funds can only return to the same wallet that deposited them, enforced inside the zero-knowledge circuit and re-checked on-chain. It hides which bets are yours, not where your money goes.',
+  },
+  {
+    q: 'Is PolyShield non-custodial? Can it take my funds?',
+    a: 'PolyShield is non-custodial and cannot move your balance to anyone but you — withdraw-to-self is enforced by the circuit and the contract. The main trust assumption is the contract upgrade key, which can replace contract logic; in production that key is held by a multisig or HSM. PolyShield is experimental beta software handling real funds, so only deposit what you can afford to risk.',
+  },
+  {
+    q: 'Do I need KYC to use PolyShield?',
+    a: 'No. PolyShield is a permissionless smart-contract protocol — you connect a self-custodial EVM wallet on Polygon and deposit USDC. There is no account, no email, and no identity verification.',
+  },
+  {
+    q: 'How do I get my money out? Can I withdraw to any wallet?',
+    a: 'You can only withdraw to the same wallet that made the deposit. This is enforced cryptographically: the recipient is bound inside the withdrawal proof and independently re-checked by the vault. There is no way to redirect a withdrawal to a third-party address.',
+  },
+  {
+    q: 'Is there a deposit limit?',
+    a: 'Yes. During the beta there is a $50,000 USDC maximum cumulative deposit per address, enforced on-chain. Minimum bet and withdrawal amounts are $1.',
+  },
+  {
+    q: 'How long does it take to place a private bet?',
+    a: 'Each action generates a zero-knowledge proof locally in your browser using WebAssembly, which typically takes 30 seconds to about 2 minutes depending on your device. Keep the tab open while it runs — proving is CPU-bound and happens entirely on your device; no secret is ever sent to a server.',
+  },
+  {
+    q: 'What are the fees?',
+    a: 'PolyShield charges a 0.3% fee on each bet plus a small flat relay reimbursement (about $0.15 in USDC), and a flat $1 fee (in USDC) on each withdrawal. Fees accumulate in the vault. The relay reimbursement covers Polygon network costs — it is taken in USDC from your note, so PolyShield never asks your wallet to pay gas for a bet directly; the relay submits it.',
+  },
+  {
+    q: 'Does the operator or relay see my bets?',
+    a: 'No. The relay and signing layer only ever see zero-knowledge proofs and public inputs, which contain no depositor identity. The one opt-in exception is auto-settlement, where you may hand the operator an encrypted blob so it can settle a single bet for you — that links you to that one bet at the operator level and nothing more.',
+  },
+  {
+    q: 'What happens if I lose my device or clear my browser?',
+    a: 'Your notes are recoverable from your wallet alone. Note secrets are derived deterministically from wallet signatures, so signing once on a new device reconstructs every note. The only unrecoverable loss is losing the depositing wallet itself — there is no admin override or server-side recovery.',
+  },
+  {
+    q: 'What network and token does PolyShield use?',
+    a: 'PolyShield runs on Polygon mainnet, the same chain as Polymarket, and accepts and pays out in USDC only. All conversion between USDC and Polymarket collateral is handled internally by the vault.',
+  },
+]
+
+/* ── Palette — references the globals.css :root tokens directly (SVG fill/stroke
+   resolve CSS custom properties), so the diagrams never drift from the design
+   system. --blue has no token (a one-off wallet accent), so it stays a literal. */
 const C = {
-  node: '#15161f',
-  line: 'rgba(255,255,255,0.14)',
-  lineSoft: 'rgba(255,255,255,0.07)',
-  text: '#E6EAF0',
-  text2: '#8B94A2',
-  cyan: 'oklch(0.82 0.13 85)',
-  violet: 'oklch(0.70 0.15 280)',
-  green: 'oklch(0.78 0.16 152)',
-  red: 'oklch(0.70 0.18 25)',
-  amber: 'oklch(0.82 0.14 55)',
+  node: 'var(--bg-1)',
+  line: 'var(--line-strong)',
+  lineSoft: 'var(--line)',
+  text: 'var(--text)',
+  text2: 'var(--text-2)',
+  cyan: 'var(--accent)',
+  violet: 'var(--brand)',
+  green: 'var(--green)',
+  red: 'var(--red)',
+  amber: 'var(--amber)',
   blue: 'oklch(0.74 0.13 250)',
 }
 
@@ -30,7 +97,7 @@ function ArchitectureDiagram() {
   )
 
   return (
-    <div style={{ overflowX: 'auto', border: '1px solid var(--line)', borderRadius: 12, background: 'linear-gradient(180deg, var(--bg-1), var(--bg))', padding: 8 }}>
+    <div style={{ overflowX: 'auto', maxWidth: '100%', border: '1px solid var(--line)', borderRadius: 12, background: 'linear-gradient(180deg, var(--bg-1), var(--bg))', padding: 8 }}>
       <svg viewBox="0 0 920 430" width="100%" style={{ minWidth: 760, display: 'block' }} role="img" aria-label="PolyShield privacy architecture">
         <defs>
           <marker id="arw" markerWidth="9" markerHeight="9" refX="6.5" refY="3" orient="auto">
@@ -198,7 +265,7 @@ export default function HowItWorksPage() {
       </p>
 
       {/* Hero architecture diagram */}
-      <div className="mt-12" style={{ marginTop: 40 }}>
+      <div style={{ marginTop: 40 }}>
         <ArchitectureDiagram />
         <p className="small mt-3" style={{ fontSize: 12, color: 'var(--text-2)', maxWidth: 720, marginTop: 12 }}>
           Your wallet only ever signs <code className="mono" style={{ color: 'var(--text-1)' }}>deposit()</code> (public by design). Every bet, settlement, and withdrawal is
@@ -225,7 +292,7 @@ export default function HowItWorksPage() {
       </div>
 
       {/* Threat model */}
-      <div className="mt-16" style={{ marginTop: 64 }}>
+      <div style={{ marginTop: 64 }}>
         <div className="micro">THREAT MODEL SUMMARY</div>
         <p className="small mt-2" style={{ fontSize: 12, color: 'var(--text-2)', maxWidth: 640, marginTop: 8 }}>
           What an observer with full on-chain visibility can and cannot learn. The contracts protect funds on every path;
@@ -253,7 +320,60 @@ export default function HowItWorksPage() {
         </div>
       </div>
 
-      <div className="row gap-4 mt-12" style={{ marginTop: 48, display: 'flex', gap: 16 }}>
+      {/* FAQ — answers the high-intent questions surfaced in the SEO audit. */}
+      <div id="faq" style={{ marginTop: 72 }}>
+        <div className="micro">FREQUENTLY ASKED QUESTIONS</div>
+        <h2 className="h3 mt-2" style={{ margin: 0, marginTop: 8 }}>Common questions about private trading.</h2>
+        <div className="panel mt-4" style={{ marginTop: 20, padding: 0 }}>
+          {FAQS.map(({ q, a }, i) => (
+            <details
+              key={q}
+              style={{
+                borderTop: i === 0 ? 'none' : '1px solid var(--line)',
+                padding: '4px 20px',
+              }}
+            >
+              <summary
+                style={{
+                  cursor: 'pointer',
+                  listStyle: 'none',
+                  padding: '16px 0',
+                  fontSize: 15,
+                  fontWeight: 600,
+                  color: 'var(--text-1)',
+                  display: 'flex',
+                  justifyContent: 'space-between',
+                  gap: 16,
+                }}
+              >
+                {q}
+                <span aria-hidden className="mono disclosure" style={{ color: 'var(--text-2)', fontSize: 13 }} />
+              </summary>
+              <p className="body" style={{ fontSize: 14, margin: 0, padding: '0 0 18px', maxWidth: 760, color: 'var(--text-2)' }}>
+                {a}
+              </p>
+            </details>
+          ))}
+        </div>
+      </div>
+
+      {/* SEO/AEO: FAQPage structured data — mirrors the visible Q&A verbatim. */}
+      <script
+        type="application/ld+json"
+        dangerouslySetInnerHTML={{
+          __html: JSON.stringify({
+            '@context': 'https://schema.org',
+            '@type': 'FAQPage',
+            mainEntity: FAQS.map(({ q, a }) => ({
+              '@type': 'Question',
+              name: q,
+              acceptedAnswer: { '@type': 'Answer', text: a },
+            })),
+          }),
+        }}
+      />
+
+      <div style={{ marginTop: 48, display: 'flex', gap: 16 }}>
         <Link href="/app/deposit" className="btn btn-primary" style={{ textDecoration: 'none' }}>Start depositing</Link>
         <Link href="/docs" className="btn" style={{ textDecoration: 'none' }}>Read the docs</Link>
       </div>

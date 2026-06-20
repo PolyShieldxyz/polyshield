@@ -5,6 +5,7 @@ import { useAccount, useWriteContract, useWaitForTransactionReceipt, useReadCont
 import { parseUnits } from 'viem'
 import { FlowShell } from '@/components/app/FlowShell'
 import { KV } from '@/components/app/KV'
+import { LiveRegion } from '@/components/app/LiveRegion'
 import { Icon, ICONS } from '@/components/ui/Icon'
 import { AmountInput } from '@/components/ui/AmountInput'
 import { VAULT_ABI, USDC_ABI } from '@/lib/vaultAbi'
@@ -23,8 +24,13 @@ const USDC_ADDRESS  = (process.env.NEXT_PUBLIC_USDC_ADDRESS  ?? '0x0000000000000
 function short(hex: string) { return hex.slice(0, 8) + '…' + hex.slice(-6) }
 
 // Minimum deposit enforced in the UI ($1 USDC). Keeps dust deposits out of the pool and
-// matches the protocol's $1 minimums elsewhere (minBet / minWithdrawal).
+// matches the protocol's minimums elsewhere (minBet $1; minWithdrawal $5).
 const MIN_DEPOSIT = 1
+
+// Per-address cumulative deposit cap (MVP): $50,000 USDC, enforced on-chain in deposit() via
+// cumulativeDeposits[msg.sender]. Surfaced here so the user never spends a signature + 30s–2min
+// proof + approve gas only to hit an opaque on-chain revert. Keep in sync with the contract.
+const DEPOSIT_CAP_MICRO = 50_000_000_000n // 50,000 * 1e6
 
 // ── Visual components ────────────────────────────────────────────────────────
 
@@ -52,7 +58,7 @@ function MerkleInsertionVisual({ pct }: { pct: number }) {
           <g key={i}>
             {isNew && pct < 100 && <circle cx={x} cy={140} r={8} fill="oklch(0.82 0.13 85 / 0.2)" />}
             <circle cx={x} cy={140} r="5" fill={color} opacity={opacity} />
-            {isNew && <text x={x} y={170} textAnchor="middle" fontFamily="JetBrains Mono" fontSize="9" fill="oklch(0.82 0.13 85)">NEW</text>}
+            {isNew && <text x={x} y={170} textAnchor="middle" fontFamily="JetBrains Mono" fontSize="9" fill="var(--accent)">NEW</text>}
           </g>
         )
       })}
@@ -65,7 +71,7 @@ function MerkleInsertionVisual({ pct }: { pct: number }) {
 
 function Step0({
   amount, setAmount, onNext, deriving,
-  usdcBalance, mintUsdc, minting,
+  usdcBalance, mintUsdc, minting, remainingCap,
 }: {
   amount: number
   setAmount: (v: number) => void
@@ -74,13 +80,18 @@ function Step0({
   usdcBalance: bigint
   mintUsdc: () => void
   minting: boolean
+  // Dollars remaining under the $50k per-address cumulative cap (50,000 minus prior deposits).
+  remainingCap: number
 }) {
   const balanceFormatted = (Number(usdcBalance) / 1e6).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })
   const insufficient = usdcBalance < parseUnits(String(amount), 6)
   const belowMin = amount > 0 && amount < MIN_DEPOSIT
+  // T20/cap: block before the signature+proof+gas instead of letting deposit() revert on-chain.
+  const capReached = remainingCap <= 0
+  const overCap = amount > 0 && amount > remainingCap + 1e-9
 
   return (
-    <div style={{ display: 'grid', gridTemplateColumns: '1.2fr 1fr', gap: 32 }}>
+    <div className="m-grid" style={{ display: 'grid', gridTemplateColumns: '1.2fr 1fr', gap: 32 }}>
       <div>
         <div className="micro">DEPOSIT AMOUNT</div>
         {/* COPY-001: distinct from the FlowShell "Deposit USDC" title — a prompt, not a repeat. */}
@@ -122,12 +133,36 @@ function Step0({
           {insufficient && amount > 0 && (
             <div className="small mt-1" style={{ fontSize: 11, color: 'var(--red)' }}>Insufficient USDC balance{IS_DEV && ' — click "+ Get test USDC" above'}</div>
           )}
+          {/* Cap: surface the remaining capacity BEFORE the user proves/pays, never via a revert. */}
+          {capReached ? (
+            <div className="small mt-1" style={{ fontSize: 11, color: 'var(--red)' }}>
+              You&apos;ve reached the $50,000 per-address deposit cap. Withdraw before depositing more.
+            </div>
+          ) : overCap ? (
+            <div className="small mt-1" style={{ fontSize: 11, color: 'var(--red)' }}>
+              Exceeds your remaining ${remainingCap.toLocaleString()} deposit capacity (max $50,000 per address).
+            </div>
+          ) : (
+            <div className="small mt-1" style={{ fontSize: 11, color: 'var(--text-3)' }}>
+              Remaining deposit capacity: ${remainingCap.toLocaleString()} of $50,000
+            </div>
+          )}
           <div className="row mt-2 gap-2">
-            {[5000, 10000, 25000, 50000].map((v) => (
-              <button key={v} onClick={() => setAmount(v)} className={`btn btn-sm ${amount === v ? 'btn-cyan' : 'btn-ghost'}`} style={{ flex: 1, justifyContent: 'center', padding: '6px 0', fontSize: 11 }}>
-                ${v >= 1000 ? `${v / 1000}k` : v}
-              </button>
-            ))}
+            {[5000, 10000, 25000, 50000].map((v) => {
+              const disabled = v > remainingCap
+              return (
+                <button
+                  key={v}
+                  onClick={() => setAmount(v)}
+                  disabled={disabled}
+                  title={disabled ? `Above your remaining $${remainingCap.toLocaleString()} capacity` : undefined}
+                  className={`btn btn-sm ${amount === v ? 'btn-cyan' : 'btn-ghost'}`}
+                  style={{ flex: 1, justifyContent: 'center', padding: '6px 0', fontSize: 11, opacity: disabled ? 0.4 : 1 }}
+                >
+                  ${v >= 1000 ? `${v / 1000}k` : v}
+                </button>
+              )
+            })}
           </div>
         </div>
       </div>
@@ -135,6 +170,7 @@ function Step0({
         <div className="micro">SUMMARY</div>
         <div className="panel mt-3" style={{ padding: 20 }}>
           <KV l="Amount" v={`$${amount.toLocaleString()} USDC`} />
+          <KV l="Remaining cap" v={`$${remainingCap.toLocaleString()} of $50,000`} />
           <KV l="Vault" v={VAULT_ADDRESS ? short(VAULT_ADDRESS) : '(not connected)'} />
           <KV l="Network fee" v="~$0.04 (Polygon)" />
           <KV l="PolyShield fee" v="$0.00" />
@@ -144,7 +180,7 @@ function Step0({
             className="btn btn-primary mt-4"
             style={{ width: '100%', justifyContent: 'center', padding: '14px 0', fontSize: 13 }}
             onClick={onNext}
-            disabled={amount < MIN_DEPOSIT || insufficient || deriving}
+            disabled={amount < MIN_DEPOSIT || insufficient || deriving || overCap || capReached}
           >
             {deriving ? 'Signing…' : <>Sign to derive key <Icon d={ICONS.arrow} size={12} /></>}
           </button>
@@ -219,7 +255,7 @@ function Step1({
   }, [phase, depositTx])
 
   return (
-    <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 32 }}>
+    <div className="m-grid" style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 32 }}>
       <div>
         <div className="micro">{inProof ? 'ZERO-KNOWLEDGE PROOF · IN BROWSER' : 'VAULT SUBMIT · ON-CHAIN'}</div>
         <h3 className="h3 mt-3" style={{ margin: 0 }}>{inProof ? 'Generating your deposit proof.' : 'Submitting deposit on-chain.'}</h3>
@@ -282,7 +318,7 @@ function Step1({
 
 function Step2({ amount, commitment, txHash, onDone }: { amount: number; commitment: string; txHash: string; onDone: () => void }) {
   return (
-    <div style={{ display: 'grid', gridTemplateColumns: '1.2fr 1fr', gap: 32 }}>
+    <div className="m-grid" style={{ display: 'grid', gridTemplateColumns: '1.2fr 1fr', gap: 32 }}>
       <div>
         <div className="row gap-3">
           <div style={{ width: 40, height: 40, borderRadius: 8, background: 'oklch(0.78 0.16 152 / 0.18)', color: 'var(--green)', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
@@ -370,6 +406,18 @@ export default function DepositPage() {
     args: [address ?? '0x0000000000000000000000000000000000000000'],
     query: { enabled: !!address },
   })
+
+  // ── Per-address deposit cap (cumulative, on-chain) ─────────────────────────
+  const { data: cumulativeDeposited = 0n } = useReadContract({
+    address: VAULT_ADDRESS,
+    abi: VAULT_ABI,
+    functionName: 'cumulativeDeposits',
+    args: [address ?? '0x0000000000000000000000000000000000000000'],
+    query: { enabled: !!address && VAULT_ADDRESS !== '0x0000000000000000000000000000000000000000' },
+  })
+  const remainingCapMicro =
+    (cumulativeDeposited as bigint) >= DEPOSIT_CAP_MICRO ? 0n : DEPOSIT_CAP_MICRO - (cumulativeDeposited as bigint)
+  const remainingCap = Number(remainingCapMicro) / 1e6
 
   // ── USDC allowance ────────────────────────────────────────────────────────
   const { data: allowance = 0n, refetch: refetchAllowance } = useReadContract({
@@ -626,6 +674,22 @@ export default function DepositPage() {
     ['03', 'Done',     'Deposit complete. Ready to authorize bets.'],
   ]
 
+  // WCAG 4.1.3 — announce the multi-step deposit (proof → approve → deposit → done) and any
+  // failure to assistive tech; the long proof/tx steps are otherwise silent.
+  const depositAnnounce = txError
+    ? `Deposit error: ${txError}`
+    : step === 2
+      ? 'Deposit complete. You are in the pool.'
+      : step === 1
+        ? phase === 'prove'
+          ? provingPhase === 'prove' ? 'Generating deposit proof…' : 'Downloading proving key…'
+          : phase === 'approve' ? 'Waiting for USDC approval in your wallet…'
+          : phase === 'wait-approve' ? 'Confirming approval on-chain…'
+          : phase === 'deposit' ? 'Submitting deposit…'
+          : phase === 'wait-deposit' ? 'Confirming deposit on-chain…'
+          : ''
+        : ''
+
   return (
     <FlowShell
       title="Deposit USDC"
@@ -635,10 +699,12 @@ export default function DepositPage() {
       step={step}
       onBack={() => router.push('/app/vault')}
     >
+      <LiveRegion message={depositAnnounce} assertive={!!txError} />
       {step === 0 && (
         <Step0
           amount={amount} setAmount={setAmount} onNext={handleDeriveAndDeposit} deriving={deriving}
           usdcBalance={usdcBalance as bigint} mintUsdc={mintUsdc} minting={minting}
+          remainingCap={remainingCap}
         />
       )}
       {step === 1 && (

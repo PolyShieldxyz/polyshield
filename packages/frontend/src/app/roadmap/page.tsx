@@ -137,7 +137,7 @@ export default function RoadmapPage() {
 
       <div className="col mt-12 gap-6" style={{ marginTop: 48 }}>
         {PHASES.map(({ id, label, title, status, items, sections }) => (
-          <div key={id} style={{ display: 'grid', gridTemplateColumns: '140px 1fr', gap: 32 }}>
+          <div key={id} className="m-grid" style={{ display: 'grid', gridTemplateColumns: '140px 1fr', gap: 32 }}>
             <div style={{ paddingTop: 2 }}>
               <div className="num" style={{ fontSize: 28, color: STATUS_COLOR[status] }}>{id}</div>
               <div className="small mt-1" style={{ fontSize: 11, color: 'var(--text-2)' }}>{label}</div>

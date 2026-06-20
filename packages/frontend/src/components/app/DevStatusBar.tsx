@@ -15,6 +15,9 @@ export function DevStatusBar() {
   const [open, setOpen] = useState(false)
 
   useEffect(() => {
+    // Only poll in dev. In production the /api/dev/status route 404s, so the old unconditional
+    // poll spammed a failed request + console error every 10s on the live site for no reason.
+    if (process.env.NEXT_PUBLIC_DEV_MODE !== 'true') return
     let cancelled = false
 
     async function check() {
