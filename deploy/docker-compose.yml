@@ -77,6 +77,10 @@ services:
       - ./env/proof-relay.env    # RELAYER_PRIVATE_KEY (secret)
     environment:
       - PROOF_RELAY_DB_PATH=/data/merkle.db   # backend merkle read-cache (persists across restarts)
+      # Catalog DB on the persistent volume so the DURABLE market-name registry (market_names table)
+      # survives rebuilds/restarts — it's the whole point (a wiped registry would re-need the backfill).
+      # The bettable catalog re-syncs every ~10 min regardless, so persisting it is otherwise harmless.
+      - MARKET_CATALOG_DB_PATH=/data/catalog.db
     volumes:
       - proofrelay_data:/data
     networks: [internal]

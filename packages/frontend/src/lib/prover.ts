@@ -399,6 +399,22 @@ export function onProverReady(cb: () => void): void {
   _readyCallbacks.push(cb)
 }
 
+// PERF-002: below this many GB of device RAM, a single Groth16 proof's transient allocation
+// (zkey + depth-32 witness, 1–4 GB+) can OOM/crash the browser tab mid-proof. Used to warn the
+// user UP FRONT (see components/app/LowMemoryNotice) instead of only after an opaque crash/timeout.
+export const LOW_MEMORY_GB = 4
+
+/**
+ * Coarse device-RAM hint in GB, or null when unavailable. `navigator.deviceMemory` is a
+ * privacy-bucketed value (0.25/0.5/1/2/4/8, capped at 8) exposed only by Chromium browsers —
+ * Firefox/Safari return undefined, in which case we make no claim (null) rather than guess.
+ */
+export function deviceMemoryGB(): number | null {
+  if (typeof navigator === 'undefined') return null
+  const dm = (navigator as Navigator & { deviceMemory?: number }).deviceMemory
+  return typeof dm === 'number' && dm > 0 ? dm : null
+}
+
 // ── Public API ────────────────────────────────────────────────────────────────
 
 export async function generateBetAuthProof(inputs: BetAuthInputs): Promise<ProofResult> {
@@ -561,7 +577,30 @@ const PROOF_TIMEOUT_MS = 3 * 60 * 1000
  * Run a proof in a dedicated Web Worker to keep the UI responsive.
  * Falls back to main-thread execution if the worker fails to start.
  */
+// PERF-002: serialize proof generation. snarkjs holds the zkey (up to ~22 MB for consolidate) plus
+// the depth-32 witness in memory while proving, transiently spiking to 1–4 GB+. If two proofs overlap
+// — e.g. a user-initiated bet while the portfolio's background close/partial finalizer fires — those
+// peaks STACK and can OOM a low-RAM tab. This gate runs proofs strictly one-at-a-time: each call waits
+// for the previous proof to fully settle (its worker terminated → WASM heap returned to the OS) before
+// starting its own. Throughput is unchanged (proving was already the bottleneck); only the peak is.
+let _proofChain: Promise<unknown> = Promise.resolve()
+
 export function generateProofInWorker(
+  message: ProverWorkerMessage,
+  onProgress?: (p: AssetProgress) => void,
+): Promise<ProofResult> {
+  // Chain onto the prior proof regardless of how it settled — a previous proof's failure must not
+  // block or reject this one.
+  const run = _proofChain.then(
+    () => runProofInWorker(message, onProgress),
+    () => runProofInWorker(message, onProgress),
+  )
+  // Advance the chain; swallow here so the gate survives a rejection (the real result is `run`).
+  _proofChain = run.then(() => undefined, () => undefined)
+  return run
+}
+
+function runProofInWorker(
   message: ProverWorkerMessage,
   onProgress?: (p: AssetProgress) => void,
 ): Promise<ProofResult> {

@@ -8,7 +8,7 @@ import { Sparkline } from '@/components/ui/Sparkline'
 import { type MarketEntry } from '@/lib/marketsData'
 import { track } from '@/lib/analytics'
 
-const CATEGORIES = ['ALL', 'POLITICS', 'CRYPTO', 'MACRO', 'TECH', 'GEO', 'SPORTS', 'CULTURE', 'OTHER']
+const CATEGORIES = ['ALL', 'POLITICS', 'CRYPTO', 'MACRO', 'COMMODITIES', 'TECH', 'GEO', 'SPORTS', 'CULTURE', 'WEATHER', 'OTHER']
 const SORTS = ['Volume', 'Liquidity', 'Δ24h', 'Resolves soon']
 const PAGE = 60
 

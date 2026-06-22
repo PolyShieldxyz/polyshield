@@ -35,6 +35,9 @@ export interface PortfolioState {
   openReceipts: Note[]
   readyToSettle: ReadyToSettleBet[]
   lostBets: Note[]
+  // BUG 1: never-filled orders whose market has resolved — reclaimable now (shown with an immediate
+  // reclaim action rather than stuck "pending"). Still members of openReceipts.
+  unfilledResolved: Note[]
   totalBalance: bigint
   totalOpenExposure: bigint
   totalDeposited: bigint
@@ -49,6 +52,9 @@ type SettlementStatus =
   | { kind: 'ready'; payoutPerShare: bigint; claimAmount: bigint }
   | { kind: 'lost' }
   | { kind: 'pending' }
+  // BUG 1: a never-filled order whose market has RESOLVED — it can never fill, so it's not "pending"
+  // forever; it's immediately reclaimable (reclaim/refund path, not settlement).
+  | { kind: 'unfilled-resolved' }
 
 /**
  * Did this bet actually fill (i.e. does the depositor hold shares)? A market-order fill stays
@@ -77,7 +83,14 @@ async function checkSettlementStatus(receipt: Note): Promise<SettlementStatus> {
   const nullifierOfBet = (receipt.nullifier_of_bet ?? receipt.nullifier) as `0x${string}`
   try {
     // Gate on ACTUAL fill: an unfilled/resting order holds no shares and must NEVER settle.
-    if (!(await betDidFill(nullifierOfBet))) return { kind: 'pending' }
+    if (!(await betDidFill(nullifierOfBet))) {
+      // BUG 1: if the market has already RESOLVED, this order can never fill — surface it as
+      // reclaimable immediately instead of leaving it "pending" forever (the operator won't attest a
+      // never-submitted order on its own, so the user must reclaim). Still pending if unresolved.
+      const resolvedAt = await fetchMarketResolvedAt(VAULT_ADDRESS, circuitKey)
+      if (resolvedAt > 0n) return { kind: 'unfilled-resolved' }
+      return { kind: 'pending' }
+    }
 
     // The AUTHORITATIVE on-chain record decides settleability — NOT the FILLED attestation alone. A bet
     // that filled and was then closed (CLOSING/CLOSED_CREDITED), already settled (CREDITED), or reclaimed
@@ -111,18 +124,21 @@ async function checkSettlementStatus(receipt: Note): Promise<SettlementStatus> {
   }
 }
 
-async function buildReadyToSettle(receipts: Note[]): Promise<{ ready: ReadyToSettleBet[]; lost: Note[] }> {
+async function buildReadyToSettle(receipts: Note[]): Promise<{ ready: ReadyToSettleBet[]; lost: Note[]; unfilledResolved: Note[] }> {
   const results = await Promise.all(receipts.map(async (receipt) => ({ receipt, status: await checkSettlementStatus(receipt) })))
   const ready: ReadyToSettleBet[] = []
   const lost: Note[] = []
+  const unfilledResolved: Note[] = []
   for (const { receipt, status } of results) {
     if (status.kind === 'ready') {
       ready.push({ receipt, payoutPerShare: status.payoutPerShare, claimAmount: status.claimAmount } satisfies ReadyToSettleBet)
     } else if (status.kind === 'lost') {
       lost.push(receipt)
+    } else if (status.kind === 'unfilled-resolved') {
+      unfilledResolved.push(receipt)
     }
   }
-  return { ready, lost }
+  return { ready, lost, unfilledResolved }
 }
 
 export async function loadPortfolioState(wallet: `0x${string}`): Promise<PortfolioState> {
@@ -135,7 +151,7 @@ export async function loadPortfolioState(wallet: `0x${string}`): Promise<Portfol
   const cashBalance = getCashBalance(wallet)
   const openReceipts = getOpenBetReceipts(wallet)
   const activity = getWalletActivity(wallet)
-  const { ready: readyToSettle, lost: lostBets } = await buildReadyToSettle(openReceipts)
+  const { ready: readyToSettle, lost: lostBets, unfilledResolved } = await buildReadyToSettle(openReceipts)
   // Exclude lost bets from "open" exposure — they're already shown in closed bets
   const lostBetIds = new Set(lostBets.map((n) => n.id))
   const totalOpenExposure = openReceipts
@@ -204,6 +220,7 @@ export async function loadPortfolioState(wallet: `0x${string}`): Promise<Portfol
     openReceipts,
     readyToSettle,
     lostBets,
+    unfilledResolved,
     totalBalance: cashBalance + totalOpenExposure,
     totalOpenExposure,
     totalDeposited,

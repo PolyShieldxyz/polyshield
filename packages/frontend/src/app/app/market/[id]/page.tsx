@@ -10,8 +10,10 @@ import { Icon, ICONS } from '@/components/ui/Icon'
 import { AmountInput } from '@/components/ui/AmountInput'
 import { Tip } from '@/components/ui/Tip'
 import { BetModal } from '@/components/app/BetModal'
+import { MarketPositionPanel } from '@/components/app/MarketPositionPanel'
+import { ClosePositionModal } from '@/components/app/ClosePositionModal'
 import { MARKETS, type MarketEntry } from '@/lib/marketsData'
-import { getFreeNotes, MAX_CONSOLIDATE_INPUTS, formatUsdc } from '@/lib/notes'
+import { getFreeNotes, MAX_CONSOLIDATE_INPUTS, formatUsdc, type Note } from '@/lib/notes'
 import { VAULT_ABI } from '@/lib/vaultAbi'
 import { marketBuyCeilingFromBook, roundToTick, type BookLevel } from '@/lib/pricing'
 import { type OrderKind, ORDER_KIND_LABEL } from '@/lib/orderType'
@@ -178,6 +180,10 @@ function MarketDetailContent() {
   const [limitCents, setLimitCents] = useState(50)
   const [expiryEnabled, setExpiryEnabled] = useState(false)
   const [gtdMinutes, setGtdMinutes] = useState(60)
+  // "Your Position" panel: a receipt being closed from this page, and a counter to re-read the local
+  // position after a bet/close lands.
+  const [closeReceipt, setCloseReceipt] = useState<Note | null>(null)
+  const [posRefresh, setPosRefresh] = useState(0)
 
   useEffect(() => {
     if (searchParams.get('modal') === 'bet') {
@@ -250,6 +256,12 @@ function MarketDetailContent() {
     side === 'YES'
       ? (askPrices.length ? Math.min(...askPrices) : price)
       : (bidPrices.length ? 1 - Math.max(...bidPrices) : price)
+  // Live YES midpoint for mark-to-market of any held position: (best bid + best ask)/2 from the live
+  // book when both sides exist, else the market's quoted YES price. Feeds the "Your Position" panel.
+  const yesMid =
+    askPrices.length && bidPrices.length
+      ? (Math.min(...askPrices) + Math.max(...bidPrices)) / 2
+      : market.yes
   // Executable ask ladder for the selected side (ascending by price). YES → the YES asks; NO → the
   // binary complement of the YES bids (a YES bid at p is NO liquidity at 1−p), matching how bestAsk
   // is derived above. Fed to the walk-the-book market ceiling.
@@ -660,13 +672,26 @@ function MarketDetailContent() {
             </div>
           </div>
 
-          <div className="panel mt-3" style={{ padding: 20 }}>
-            <div className="micro">YOUR POSITION</div>
-            <div className="small mt-2" style={{ color: 'var(--text-3)' }}>No open position in this market.</div>
-            <div className="row gap-2 mt-3">
-              <Link href="/app/deposit" className="btn btn-sm" style={{ flex: 1, justifyContent: 'center', textDecoration: 'none', fontSize: 12 }}>Deposit USDC</Link>
+          {address ? (
+            <MarketPositionPanel
+              address={address}
+              vaultAddress={VAULT_ADDRESS}
+              conditionId={market.conditionId}
+              yesLabel={yesLabel}
+              noLabel={noLabel}
+              yesMid={yesMid}
+              refreshKey={posRefresh}
+              onCloseReceipt={setCloseReceipt}
+            />
+          ) : (
+            <div className="panel mt-3" style={{ padding: 20 }}>
+              <div className="micro">YOUR POSITION</div>
+              <div className="small mt-2" style={{ color: 'var(--text-3)' }}>Connect your wallet to see your position in this market.</div>
+              <div className="row gap-2 mt-3">
+                <Link href="/app/deposit" className="btn btn-sm" style={{ flex: 1, justifyContent: 'center', textDecoration: 'none', fontSize: 12 }}>Deposit USDC</Link>
+              </div>
             </div>
-          </div>
+          )}
         </div>
       </div>
 
@@ -689,8 +714,20 @@ function MarketDetailContent() {
           gtdMinutes={gtdMinutes}
           onClose={closeModal}
           onSuccess={async () => {
-            // no-op for now; modal drives portfolio refresh by local storage state
+            // Re-read the local position so the "Your Position" panel reflects the new bet.
+            setPosRefresh((n) => n + 1)
           }}
+        />
+      )}
+
+      {address && closeReceipt && (
+        <ClosePositionModal
+          open={!!closeReceipt}
+          address={address}
+          receipt={closeReceipt}
+          vaultAddress={VAULT_ADDRESS}
+          onClose={() => setCloseReceipt(null)}
+          onComplete={() => { setCloseReceipt(null); setPosRefresh((n) => n + 1) }}
         />
       )}
     </div>

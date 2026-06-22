@@ -21,6 +21,7 @@ import {
   ingestByConditionId,
   resolveMarketName,
   searchMarkets,
+  syncCategoryLive,
   fetchMidpoints,
 } from "./marketCatalog";
 import { recordEvents } from "./analytics";
@@ -633,15 +634,28 @@ export function createApp(): express.Application {
   // Light rate-limit on the Gamma-touching/search surface so it can't be abused into upstream load.
   const marketsLimiter = rateLimit({ windowMs: 60_000, max: 120, standardHeaders: true, legacyHeaders: false });
 
-  // Browse: paginated/sorted/filtered read from the local catalog (no Gamma call).
-  app.get("/markets", marketsLimiter, (req, res) => {
-    const { markets, total } = queryCatalog({
-      offset: parseInt(String(req.query.offset ?? "0"), 10) || 0,
-      limit: parseInt(String(req.query.limit ?? "60"), 10) || 60,
-      sort: req.query.sort ? String(req.query.sort) : undefined,
-      category: req.query.category ? String(req.query.category) : undefined,
-      q: req.query.q ? String(req.query.q) : undefined,
-    });
+  // Browse: paginated/sorted/filtered read from the local catalog (no Gamma call) — EXCEPT a tag
+  // click (first page of a specific category) live-deepens that category from Gamma first, so a
+  // low-volume tag surfaces its real top markets instead of just its slice of the global volume sync.
+  app.get("/markets", marketsLimiter, async (req, res) => {
+    const offset = parseInt(String(req.query.offset ?? "0"), 10) || 0;
+    const limit = parseInt(String(req.query.limit ?? "60"), 10) || 60;
+    const sort = req.query.sort ? String(req.query.sort) : undefined;
+    const category = req.query.category ? String(req.query.category) : undefined;
+    const q = req.query.q ? String(req.query.q) : undefined;
+    // Live-deepen only the first page of a real category (not ALL, no search, no "Load more"). The
+    // call is internally bounded (per-category cooldown + catalog-sufficiency short-circuit) so a
+    // well-covered category serves instantly and Gamma isn't hit on every click. Fail-soft to catalog.
+    if (category && category.toUpperCase() !== "ALL" && !q && offset === 0 && limit <= 60) {
+      try {
+        const r = await syncCategoryLive(category, limit, sort ?? "Volume");
+        res.json({ markets: r.markets, total: r.total, wentLive: r.wentLive });
+        return;
+      } catch (err) {
+        logger.warn({ err: String(err), category }, "category live fetch failed; serving catalog");
+      }
+    }
+    const { markets, total } = queryCatalog({ offset, limit, sort, category, q });
     res.json({ markets, total });
   });
 

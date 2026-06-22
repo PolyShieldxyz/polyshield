@@ -380,6 +380,6 @@ Full detail in `docs/threat-model.md`. Critical items:
 See `docs/open-questions.md`. The following directly affect this architecture document and will cause revisions when resolved:
 
 - **Q4:** How to prove CLOB share ownership in a ZK circuit -- gates the Settlement Credit proof design.
-- **Q5:** Concurrent open positions -- gates whether partial withdrawal is possible.
+- **Q5 (RESOLVED, FC-16):** Concurrent open positions / partial withdrawal. Partial withdrawal (change note) is implemented; open-position payout stranding is fixed frontend-only via drain-to-dust + a one-click Settle & Withdraw flow.
 - **Bet descriptor privacy:** Whether to encrypt bet descriptors on-chain -- gates the `authorizeBet` function signature and the Signing Layer's decryption path.
 - **Multi-EOA rotation** -- gates the `polymarketSigner` field design in the Vault.

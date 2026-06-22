@@ -39,18 +39,31 @@ const DEEP_LOOKBACK_BLOCKS = Number(process.env.DEEP_LOOKBACK_BLOCKS ?? "100000"
 // Nullifiers whose processing we've already STARTED this process-lifetime. Prevents the
 // poller from re-submitting an order (especially a resting GTC/GTD that has no terminal
 // attestation yet) on a subsequent tick before its attestation lands.
-const inFlight = new Set<string>();
+// nullifier → ms when submission STARTED. Kept forever (never deleted) so a re-poll can't double-
+// submit; the timestamp lets `/cancel-bet` distinguish an order that's ACTIVELY submitting right now
+// from a long-dead submission that errored (the set is intentionally retained on error) — the latter
+// must NOT block reclaim forever.
+const inFlight = new Map<string, number>();
+// A real FAK/limit submit completes in seconds. Past this, an in-flight entry is a DEAD submission,
+// not an active one — cancel may safely proceed to the durable-marker reconcile / FAILED path.
+const ACTIVE_SUBMIT_WINDOW_MS = 120_000;
 
 /**
- * Is the event listener currently submitting an order for this bet (in THIS process)? A bet enters
- * the set the moment handleBetRecord starts processing it and never leaves (so a re-poll can't
- * double-submit). `/cancel-bet` consults this so it never blind-attests FAILED while a market (FAK)
- * order is mid-submission — that race would let a user reclaim a position the pool actually bought.
- * In-memory only: it covers the live submission window; the durable market_submissions marker
- * (attestationStore) covers the across-restart window.
+ * Has the event listener EVER started submitting this bet (in THIS process)? Used for re-poll
+ * dedup — once true it stays true so a subsequent tick can't double-submit.
  */
 export function isBetInFlight(nullifier: string): boolean {
   return inFlight.has(nullifier);
+}
+
+/**
+ * Is a submission for this bet ACTIVELY in progress right now (started within the submit window)?
+ * `/cancel-bet` uses THIS (not isBetInFlight) so it never blind-attests FAILED mid-submission — but a
+ * stale entry (errored/hung submit, kept in the set to block re-submit) no longer blocks reclaim.
+ */
+export function isActivelySubmitting(nullifier: string): boolean {
+  const started = inFlight.get(nullifier);
+  return started !== undefined && Date.now() - started < ACTIVE_SUBMIT_WINDOW_MS;
 }
 
 // BetAuthorized events come from vaultEventSource — the proof-relay's event index when available
@@ -182,7 +195,7 @@ async function handleBetRecord(
     const market_id = rec[0] as string;
     if (!market_id || market_id === ethers.ZeroHash) return;
 
-    inFlight.add(nullifier); // mark before submitting; kept on error to avoid double-submit
+    inFlight.set(nullifier, Date.now()); // mark before submitting; kept on error to avoid double-submit
     logger.warn({ nullifier }, "event-listener: found un-attested bet — processing");
     await processBetEvent(
       nullifier,

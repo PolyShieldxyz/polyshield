@@ -72,6 +72,11 @@ async function attest(
   }
 }
 
+// A FAK submission completes in seconds. A market-submission marker with NO orderId that is older
+// than this is a dead submission whose order was never placed (a FAK never rests) → safe to FAILED so
+// the stake is reclaimable. Generous so any real submit has definitively finished.
+const STALE_SUBMISSION_SEC = 300;
+
 /**
  * Operator-driven FAILED attestation for a bet with NO live CLOB order (never placed / rejected
  * / user-cancelled-before-resting). Makes the stake reclaimable via betCancellationCredit. Safe
@@ -695,11 +700,26 @@ export async function reconcileMarketSubmission(
 ): Promise<"finalized" | "processing"> {
   // submitFAKOrder usually attests synchronously — short-circuit if a terminal outcome already exists.
   if (getAttestation(nullifier)) return "finalized";
-  if (!clobClient || !sub.orderId) {
-    logger.warn(
-      { nullifier, orderId: sub.orderId },
-      "cancel-bet: market order submitted but unverifiable (no clob client / orderId) — leaving pending (no false reclaim)",
-    );
+  if (!sub.orderId) {
+    // No orderId ⇒ the FAK POST never placed an order on the book (setMarketOrderId only runs after the
+    // CLOB returns an id; a FAK never rests, so it can't fill later). The original code left this
+    // "processing" FOREVER → the stake was unreclaimable (the user's stuck-Reclaim bug). Once the
+    // submission window has CLEARLY passed (any real submit finished long ago), it's a definitive
+    // zero-fill → attest FAILED so the stake is reclaimable. Before the window, the synchronous submit
+    // may still be completing → stay pending.
+    const ageSec = Math.floor(Date.now() / 1000) - sub.submittedAt;
+    if (ageSec > STALE_SUBMISSION_SEC) {
+      logger.warn({ nullifier, ageSec }, "cancel-bet: FAK never placed (no orderId) and stale — attesting FAILED (reclaimable)");
+      await attestFailedFor(wallet, nullifier);
+      return "finalized";
+    }
+    logger.warn({ nullifier, ageSec }, "cancel-bet: FAK has no orderId yet but is within the submit window — leaving pending");
+    return "processing";
+  }
+  if (!clobClient) {
+    // An order WAS placed (orderId present) but we have no client to read its fill — never risk a
+    // false reclaim of a position that may have filled.
+    logger.warn({ nullifier, orderId: sub.orderId }, "cancel-bet: clob client unavailable — leaving pending (no false reclaim)");
     return "processing";
   }
   // Committed bounds for the FILLED-vs-PARTIAL classification (attestTerminal needs them).
@@ -1182,12 +1202,28 @@ export async function submitLimitOrder(
       }
 
       if (!orderID) {
-        // The order was rejected (e.g. 400) — it is NOT resting on the book. Attest FAILED so
-        // the depositor can reclaim their full stake via betCancellationCredit, instead of the
-        // bet sitting ACTIVE forever with no order and no terminal state (frontend stuck pending).
+        // CRITICAL fund-safety: only a GENUINE rejection may be attested FAILED. If the CLOB accepted
+        // the order — it is LIVE (resting), matched, or delayed — a missing orderID is just a
+        // response-shape mismatch, NOT a rejection. NEVER attest FAILED for a still-live order: it can
+        // fill at any moment, and FAILED unlocks betCancellationCredit, so the user could reclaim the
+        // stake WHILE the order is still fillable → they get the refund AND the fill = a double-credit
+        // that drains the pool. A GTC has no expiry, so it must stay reclaim-via-cancel only, never
+        // auto-FAILED while live. Leave a live order resting (cancel/reconcile by nullifier recovers
+        // it); fail only when it is clearly NOT on the book.
+        const accepted =
+          initialStatus === "live" || initialStatus === "matched" || initialStatus === "delayed";
+        if (accepted) {
+          logger.warn(
+            { nullifier: event.nullifier, initialStatus, resp },
+            "limit order accepted (live/matched) but orderID not parsed — leaving it RESTING, NOT failing",
+          );
+          return;
+        }
+        // No orderID AND not accepted → genuine rejection (e.g. 400). Attest FAILED so the depositor
+        // can reclaim via betCancellationCredit instead of the bet sitting ACTIVE forever.
         logger.warn(
           { nullifier: event.nullifier, initialStatus, resp },
-          "limit order returned no orderID (rejected) — attesting FAILED (reclaimable)",
+          "limit order returned no orderID and was not accepted (rejected) — attesting FAILED (reclaimable)",
         );
         await attest(wallet, event.nullifier, ReportType.FAILED, 0n, 0n);
         return;

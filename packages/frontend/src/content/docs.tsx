@@ -164,6 +164,15 @@ const SECTIONS: Record<string, RawDocPage[]> = {
             signatures, so a single signature on a new device reconstructs every note. The only unrecoverable
             loss is losing the depositing <strong>wallet</strong> itself — there is no admin override.
           </P>
+          <H3>Can I withdraw while I still have open bets?</H3>
+          <P>
+            Yes. You can withdraw your free balance any time, and a withdrawal can never strand an open bet&apos;s
+            payout: if withdrawing would empty a deposit that still holds an open position, the app keeps a
+            fraction of a cent behind so that position&apos;s payout can still be claimed later. To cash out
+            everything at once, use <strong>Settle &amp; Withdraw</strong> on the Withdraw screen — it settles
+            every resolved bet, sells your open positions at the current market price, reclaims any unfilled
+            orders, then withdraws your full balance in one flow.
+          </P>
           <H3>Does the operator see my bets?</H3>
           <P>
             The operator sees ZK proofs and public inputs — never a depositor identity. (One opt-in exception:

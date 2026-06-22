@@ -607,3 +607,29 @@ Status: **implemented** (data/UX layer; **no on-chain/circuit/Vault change**). P
 
 ### Non-goals
 No on-chain/circuit/Vault change; not mirroring ALL Polymarket markets (large curated pool + live search for the tail); no per-user analytics (aggregate only); FC-11 settlement `conditionId` placeholder untouched.
+
+---
+
+## FC-16: Open-position withdrawal stranding fix — drain-to-dust + Settle & Withdraw (IMPLEMENTED 2026-06-22)
+
+**Status:** IMPLEMENTED (frontend-only; no circuit / contract / verifier change).
+**Driving item:** Q5 (`open-questions.md`) + a fund-safety foot-gun found in review.
+
+### Problem
+A position's payout — settlement OR close — can only be credited into a live note that shares the bet note's `secret`, i.e. the current tip of that deposit lineage (`depositIndex`). `settlement_credit`/`position_close` enforce `nullifier_of_bet == Poseidon2(secret, bet_nonce)` with `bet_nonce < nonce`. Two client ops permanently STRAND an open position's payout by killing its lineage: (1) a **full withdrawal** (the withdrawal circuit forces `new_commitment = 0` on a full drain → no successor note), and (2) **consolidating** the lineage's note as a NON-slot-0 input (it's nullified and its value merges into slot-0's lineage). This is a self-harm / fund-loss bug; it **cannot** be enforced on-chain without leaking the wallet↔bet link, so the fix is necessarily client-side.
+
+### Key insight (why no circuit change)
+A dust (`balance = 1`) note is a valid spendable note, and the settlement/close circuits have no `balance > 0` precondition. A partial withdrawal that leaves `balance = 1` keeps the lineage alive; the later credit lands on the dust note. (Partial withdrawal with a change note was already implemented via the withdrawal circuit's `isPartial` branch — no new "Withdrawal with Change" circuit is needed.)
+
+### Option A — make withdrawing safe (withdraw page + lib)
+- `selectNotesForAmount` (`notes.ts`) now **defaults the open-position set internally** from `getOpenBetReceipts(wallet)` — so EVERY consolidation path (withdraw AND bet) is protected, not just callers that pass it. It prefers clear notes, admits at most ONE open lineage forced to consolidate **slot 0** (so it survives the merge), and refuses to merge two open lineages.
+- Withdraw page (`app/app/withdraw/page.tsx`): `effectiveWithdrawal` **drain-to-dust** (leave 1 micro-USDC on a full drain of an open lineage), `safeMax`/`hardBlocked` button gate, soft/hard copy.
+
+### Option D — Settle & Withdraw (force-close everything)
+- `lib/settleCloseAndWithdraw.ts`: settle resolved → reclaim unfilled + retire lost → close/cancel remaining open (RESTING→reclaim, FILLED→market-sell + `finalizeClose`, ~90s SOLD poll) → withdraw. The final withdraw **only drains CLEAR lineages**; residual open positions (timeouts) are left fully intact, never stranded. Extracted primitives `settlePosition.ts` (SettlementModal now delegates to it — also fixed a latent multi-lineage tip bug), `submitMarketClose.ts`, `cancelAndReclaim.ts` (reuse the shipped `bet_cancel`/`finalizePartial` credit math verbatim). UI `SettleWithdrawModal.tsx`, mounted on the **Withdraw page only** (a secondary button when you hold open positions + the hard-block CTA) — intentionally NOT on the portfolio header (de-crowded; it's a withdrawal action).
+
+### Verification
+`tsc` + production `next build` clean; 37 frontend unit tests incl. 5 new `selectNotesStranding.test.ts` (the no-stranding invariant). Interactive mock-stack e2e (T1 drain-to-dust, T2 Settle & Withdraw, T3 multi-lineage hard-block) not yet run.
+
+### Privacy / soundness
+Every credit lands in a note (nothing secret leaves the client); the final withdrawal is W-to-W; all proofs use existing circuits unchanged. Drain-to-dust changes only a public `withdrawal_amount` (by 1 micro-USDC) and the public remainder commitment — no new wallet↔bet linkage.

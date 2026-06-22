@@ -26,6 +26,7 @@ import {
 } from 'viem'
 import { fetchSpentNullifiers, fetchBetStatus, BET_STATUS } from './api'
 import { readEncrypted, writeEncrypted, removeEncrypted } from './cacheStore'
+import { CLOSE_MARKER_KEY_PREFIX } from './closeMarker'
 
 export type NoteKind = 'DEPOSIT' | 'BET_OUTPUT' | 'SETTLE_CREDIT' | 'CANCEL_CREDIT' | 'BET_RECEIPT'
 
@@ -305,33 +306,77 @@ export interface NoteSelection {
  * sum to >= `amount`, for a consolidate-then-spend flow. Returns an error when even the
  * largest 4 notes cannot cover the amount in one merge. The largest selected note is
  * placed first (slot 0) so the merged note continues its lineage.
+ *
+ * Option A (stranding-safety): a consolidate continues slot-0's lineage and spends the rest, so a
+ * note whose deposit still holds an OPEN POSITION must never be merged away as a non-slot-0 input —
+ * its settlement/close payout can only land on a note in its own lineage, and merging it away strands
+ * that payout permanently. When `opts.openPositionDeposits` is supplied the selection therefore
+ * prefers CLEAR notes and admits AT MOST ONE open-position lineage, forced to slot 0 so the merged
+ * note continues it (kept alive; the caller drains it only to a dust remainder). This mirrors the
+ * `safeMax` the withdraw page uses to gate the button, so selection and the hard-block never disagree.
  */
 export function selectNotesForAmount(
   wallet: `0x${string}`,
   amount: bigint,
+  opts?: { openPositionDeposits?: Set<number>; preferredSlot0DepositIndex?: number },
 ): { ok: true; selection: NoteSelection } | { ok: false; error: string } {
-  const free = getFreeNotes(wallet).sort((a, b) => (a.balance > b.balance ? -1 : 1))
-  if (free.length === 0) return { ok: false, error: 'No spendable notes.' }
+  const all = getFreeNotes(wallet).sort((a, b) => (a.balance > b.balance ? -1 : 1))
+  if (all.length === 0) return { ok: false, error: 'No spendable notes.' }
 
   const picked: Note[] = []
   let total = 0n
-  for (const n of free) {
-    if (total >= amount) break
-    if (picked.length >= MAX_CONSOLIDATE_INPUTS) break
+  const tryAdd = (n: Note): void => {
+    if (total >= amount || picked.length >= MAX_CONSOLIDATE_INPUTS) return
     picked.push(n)
     total += n.balance
   }
 
+  // Default to the wallet's own open-position deposits so EVERY consolidation path (withdraw, bet, …)
+  // is stranding-safe — not only callers that remember to pass the set. An explicit set overrides
+  // (the withdraw page passes its already-computed set, which equals this default).
+  const openDeposits =
+    opts?.openPositionDeposits ?? new Set(getOpenBetReceipts(wallet).map((r) => r.depositIndex))
+  let slot0Deposit = opts?.preferredSlot0DepositIndex
+  if (openDeposits.size > 0) {
+    const clear = all.filter((n) => !openDeposits.has(n.depositIndex))
+    const open = all.filter((n) => openDeposits.has(n.depositIndex))
+    // Prefer a clear-only merge when the 4 largest clear notes already cover the amount (don't disturb
+    // an open lineage needlessly). Otherwise admit the single largest open note (4-largest of clear ∪
+    // that note) and force it to slot 0 below so its lineage survives the merge.
+    const clearCovers =
+      clear.slice(0, MAX_CONSOLIDATE_INPUTS).reduce((s, n) => s + n.balance, 0n) >= amount
+    const pool =
+      clearCovers || !open[0]
+        ? clear
+        : [...clear, open[0]].sort((a, b) => (a.balance > b.balance ? -1 : 1))
+    for (const n of pool) tryAdd(n)
+    const usedOpen = picked.find((n) => openDeposits.has(n.depositIndex))
+    if (usedOpen) slot0Deposit = usedOpen.depositIndex
+  } else {
+    for (const n of all) tryAdd(n)
+  }
+
   if (total < amount) {
-    const top = free.slice(0, MAX_CONSOLIDATE_INPUTS).reduce((s, n) => s + n.balance, 0n)
+    const reachable =
+      openDeposits.size > 0
+        ? total
+        : all.slice(0, MAX_CONSOLIDATE_INPUTS).reduce((s, n) => s + n.balance, 0n)
     return {
       ok: false,
       error:
-        `This amount is split across too many notes to combine in one step ` +
-        `(your ${Math.min(free.length, MAX_CONSOLIDATE_INPUTS)} largest total ${top}, need ${amount}). ` +
-        `Withdraw or spend some notes to consolidate further, or use a smaller amount.`,
+        `This amount can't be combined in one step without stranding an open position ` +
+        `(reachable safely in one merge: ${reachable}, need ${amount}). ` +
+        `Use "Settle & Withdraw" to clear your open positions, or withdraw a smaller amount.`,
     }
   }
+
+  // Force the slot-0 lineage to index 0 — consolidate continues notes[0], so the merged note inherits
+  // its depositIndex/derivationVersion. For an open lineage this is what keeps the position claimable.
+  if (slot0Deposit !== undefined) {
+    const idx = picked.findIndex((n) => n.depositIndex === slot0Deposit)
+    if (idx > 0) picked.unshift(picked.splice(idx, 1)[0]!)
+  }
+
   return { ok: true, selection: { notes: picked, total } }
 }
 
@@ -348,13 +393,87 @@ export function getFreeNoteForDeposit(wallet: `0x${string}`, depositIndex: numbe
   return notes.sort((a, b) => (a.nonce > b.nonce ? -1 : 1))[0] ?? null
 }
 
+// ── One-off maintenance: hide a permanently-stranded open position ────────────
+// A bet whose deposit lineage was fully withdrawn/consolidated away (pre-FC-16) can never be settled
+// or closed — its payout has no note to land on — yet it is a real on-chain bet, so recovery and the
+// reconcile self-heal keep rebuilding/re-showing its BET_RECEIPT. We suppress it at THIS single READ
+// chokepoint (downstream of both), keyed by the public `nullifier_of_bet`, so it stops showing AND
+// stops the background finalize polls (which iterate open receipts → the wasted proving / RAM).
+// NOT a product feature: the set is empty by default and managed only via `hideReceipt()` / the
+// dev-console helper below (`window.polyshield`).
+const HIDDEN_RECEIPTS_KEY = 'polyshield:hidden_receipts'
+
+function loadHiddenReceipts(): Set<string> {
+  if (typeof window === 'undefined' || typeof localStorage === 'undefined') return new Set()
+  try {
+    const raw = localStorage.getItem(HIDDEN_RECEIPTS_KEY)
+    return new Set(raw ? (JSON.parse(raw) as string[]).map((s) => s.toLowerCase()) : [])
+  } catch {
+    return new Set()
+  }
+}
+
+/** Hide ONE stranded open position locally, by its `nullifier_of_bet` (idempotent, reversible). The
+ *  nullifier is already public on-chain, so this stores nothing sensitive. */
+export function hideReceipt(nullifierOfBet: string): void {
+  if (typeof window === 'undefined') return
+  const set = loadHiddenReceipts()
+  set.add(nullifierOfBet.toLowerCase())
+  try { localStorage.setItem(HIDDEN_RECEIPTS_KEY, JSON.stringify([...set])) } catch { /* quota */ }
+}
+
+/** Un-hide a previously hidden position. */
+export function unhideReceipt(nullifierOfBet: string): void {
+  if (typeof window === 'undefined') return
+  const set = loadHiddenReceipts()
+  set.delete(nullifierOfBet.toLowerCase())
+  try { localStorage.setItem(HIDDEN_RECEIPTS_KEY, JSON.stringify([...set])) } catch { /* quota */ }
+}
+
+export function getHiddenReceipts(): string[] {
+  return [...loadHiddenReceipts()]
+}
+
 export function getOpenBetReceipts(wallet: `0x${string}`): Note[] {
+  const hidden = loadHiddenReceipts()
   return loadAll().filter(
     (n) =>
       !n.spent &&
       n.kind === 'BET_RECEIPT' &&
-      sameAddress(n.owner_address, wallet),
+      sameAddress(n.owner_address, wallet) &&
+      !hidden.has((n.nullifier_of_bet ?? n.nullifier).toLowerCase()),
   )
+}
+
+// Dev-only console maintenance. Call once from a client effect (app/app/layout.tsx). NOT a product
+// feature — no UI. Available in `next dev` (NODE_ENV !== 'production') or any build with
+// NEXT_PUBLIC_DEV_MODE=true. Exposes `window.polyshield`:
+//   polyshield.listOpenReceipts()            → every open BET_RECEIPT + whether its lineage still has a
+//                                              spendable note (`hasFreeNote:false` ⇒ stranded) + hidden flag
+//   polyshield.hideReceipt('0x<nullifier>')   → hide that one + reload
+//   polyshield.unhideReceipt('0x<nullifier>') → undo + reload
+export function installDevConsole(): void {
+  if (typeof window === 'undefined') return
+  // Reachable in `next dev`, in a NEXT_PUBLIC_DEV_MODE build, OR when explicitly opted in via
+  // localStorage `ps_debug=1` + reload — so it can be enabled on a prod Docker build (NODE_ENV=
+  // production, dev-mode off) for one-off maintenance, without changing env vars or rebuilding.
+  const debugFlag = (() => { try { return localStorage.getItem('ps_debug') === '1' } catch { return false } })()
+  if (process.env.NODE_ENV === 'production' && process.env.NEXT_PUBLIC_DEV_MODE !== 'true' && !debugFlag) return
+  ;(window as unknown as { polyshield?: unknown }).polyshield = {
+    listOpenReceipts: (wallet?: `0x${string}`) =>
+      loadAll()
+        .filter((n) => n.kind === 'BET_RECEIPT' && !n.spent && (!wallet || sameAddress(n.owner_address, wallet)))
+        .map((n) => ({
+          market: n.marketName ?? n.marketId,
+          nullifier_of_bet: n.nullifier_of_bet ?? n.nullifier,
+          depositIndex: n.depositIndex,
+          hasFreeNote: !!getFreeNoteForDeposit(n.owner_address, n.depositIndex),
+          hidden: loadHiddenReceipts().has((n.nullifier_of_bet ?? n.nullifier).toLowerCase()),
+        })),
+    hideReceipt: (n: string) => { hideReceipt(n); location.reload() },
+    unhideReceipt: (n: string) => { unhideReceipt(n); location.reload() },
+    getHiddenReceipts,
+  }
 }
 
 export function clearNoteCache(): void {
@@ -1593,11 +1712,12 @@ export function resetAllLocalState(): void {
   localStorage.removeItem(STORAGE_KEY)
   localStorage.removeItem(ACTIVITY_STORAGE_KEY)
   localStorage.removeItem(LAST_BLOCK_KEY)
-  // Clear all deposit-index counters (may be one per wallet address)
+  // Clear all deposit-index counters (may be one per wallet address) and pending-close markers
+  // (per-wallet; pseudonymous) so a shared device doesn't leak either to the next connector.
   const toRemove: string[] = []
   for (let i = 0; i < localStorage.length; i++) {
     const key = localStorage.key(i)
-    if (key?.startsWith(INDEX_KEY_PREFIX)) toRemove.push(key)
+    if (key?.startsWith(INDEX_KEY_PREFIX) || key?.startsWith(CLOSE_MARKER_KEY_PREFIX)) toRemove.push(key)
   }
   toRemove.forEach((k) => localStorage.removeItem(k))
 }

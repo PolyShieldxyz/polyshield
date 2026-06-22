@@ -6,28 +6,9 @@ import { Modal } from '@/components/app/Modal'
 import { KV } from '@/components/app/KV'
 import { LiveRegion } from '@/components/app/LiveRegion'
 import { Icon, ICONS } from '@/components/ui/Icon'
-import {
-  addNote,
-  computeCommitment,
-  computeNullifier,
-  formatUsdc,
-  getCurrentCashNote,
-  getFreeNoteForDeposit,
-  markBetReceiptSpent,
-  markNoteSpent,
-  recordWalletActivity,
-  type Note,
-  type ReadyToSettleBet,
-} from '@/lib/notes'
-import { getNoteSecret } from '@/lib/secretSession'
-import {
-  fetchAttestation,
-  fetchMerklePath,
-  relaySettlement,
-  waitForTransactionConfirmation,
-} from '@/lib/api'
-import { generateSettlementProof } from '@/lib/prover'
-import { log, proofSummary } from '@/lib/logger'
+import { formatUsdc, type Note, type ReadyToSettleBet } from '@/lib/notes'
+import { settlePosition } from '@/lib/settlePosition'
+import { log } from '@/lib/logger'
 
 type Phase = 'select' | 'running' | 'done' | 'error'
 
@@ -41,7 +22,7 @@ interface SettlementModalProps {
   onComplete: () => Promise<void> | void
 }
 
-const ZERO_BYTES32 = `0x${'00'.repeat(32)}` as `0x${string}`
+const VAULT_ADDRESS = (process.env.NEXT_PUBLIC_VAULT_ADDRESS ?? '0x0000000000000000000000000000000000000000') as `0x${string}`
 
 export function SettlementModal({
   open,
@@ -118,123 +99,30 @@ export function SettlementModal({
     setProgressIndex(previouslyCompleted.length)
     setError(null)
 
-    // Settlement proofs require Poseidon(secret, nonce−1) === nullifier_of_bet.
-    // The note must come from the same deposit chain as the receipt so that the
-    // same secret is used. getCurrentCashNote (highest balance) is wrong when
-    // multiple deposits exist — it may return a note from a different deposit,
-    // causing a different secret and a circuit assertion failure at line 67.
-    const firstReceipt = betsToProcess[0].receipt
-    let currentFreeNote =
-      getFreeNoteForDeposit(address, firstReceipt.depositIndex) ??
-      getCurrentCashNote(address)
-    if (!currentFreeNote) {
-      setPhase('error')
-      setError('No cash balance is available to receive settlement credit.')
-      return
-    }
-
     const applied: ReadyToSettleBet[] = [...previouslyCompleted]
 
     try {
       for (let i = 0; i < betsToProcess.length; i++) {
         const bet = betsToProcess[i]
-        const receipt = bet.receipt
-        const secret = await getNoteSecret(signMessageAsync, address, currentFreeNote.depositIndex, currentFreeNote.derivationVersion ?? 1)
-        const merkle = await fetchMerklePath(currentFreeNote.commitment)
-        const marketIdField = receipt.condition_id ?? ZERO_BYTES32
-        const newNonce = currentFreeNote.nonce + 1n
-        const newBalance = currentFreeNote.balance + bet.claimAmount
-        const newCommitment = computeCommitment(secret, newBalance, newNonce, address)
-        const newNullifier = computeNullifier(secret, newNonce)
-        const nullifierOfBet = receipt.nullifier_of_bet ?? receipt.nullifier
-
         log('settle_batch_item_start', {
-          marketId: receipt.marketId,
-          receiptId: receipt.id,
+          marketId: bet.receipt.marketId,
+          receiptId: bet.receipt.id,
           sequence: previouslyCompleted.length + i + 1,
           totalSelected: selectedBets.length,
           claimAmount: bet.claimAmount.toString(),
         })
 
-        const { proof } = await generateSettlementProof({
-          secret,
-          balance_before_credit: currentFreeNote.balance,
-          nonce: currentFreeNote.nonce,
-          // bet_nonce is the nonce of the note that was spent at bet auth time.
-          // Stored on the BET_RECEIPT as receipt.nonce. Using this instead of
-          // hardcoded (nonce-1) allows settling any open bet regardless of
-          // how many subsequent actions have occurred on the deposit chain.
-          bet_nonce: receipt.nonce,
-          merkle_path: merkle.path,
-          merkle_path_indices: merkle.pathIndices,
-          owner_address: address,
-          merkle_root: merkle.root,
-          nullifier: currentFreeNote.nullifier,
-          new_commitment: newCommitment,
-          nullifier_of_bet: nullifierOfBet,
-          market_id: marketIdField,
-          total_credit: bet.claimAmount,
-        })
-
-        const inputs = {
-          merkle_root: merkle.root,
-          nullifier: currentFreeNote.nullifier,
-          new_commitment: newCommitment,
-          nullifier_of_bet: nullifierOfBet,
-          market_id: marketIdField,
-          total_credit: bet.claimAmount.toString(),
+        // settlePosition resolves THIS bet's lineage tip itself (correct per-deposit secret), proves +
+        // relays the settlement, and advances the note cache — so a multi-lineage batch and sequential
+        // same-lineage settles both work without tracking the tip here.
+        const res = await settlePosition(address, bet, VAULT_ADDRESS, signMessageAsync)
+        if (!res.done) {
+          throw new Error('No spendable note is available in this deposit to receive the settlement credit.')
         }
 
-        log('settle_relay_start', {
-          ...proofSummary(proof),
-          inputs: { ...inputs },
-          receiptId: receipt.id,
-          marketId: receipt.marketId,
-        })
-
-        // FC-9: a full-fill bet is ACTIVE on-chain and needs the operator's FILLED attestation;
-        // a post-partial bet is already FILLED and ignores it. Pass whatever the operator signed.
-        const settleAtt = await fetchAttestation(nullifierOfBet as `0x${string}`)
-        const { txHash } = await relaySettlement(proof, inputs, settleAtt ?? undefined)
-        await waitForTransactionConfirmation(txHash as `0x${string}`)
-
-        markNoteSpent(currentFreeNote.commitment)
-        markBetReceiptSpent(nullifierOfBet)
-        recordWalletActivity({
-          id: `settlement-${txHash}-${bet.receipt.id}`,
-          wallet: address,
-          kind: 'settlement',
-          amount: bet.claimAmount,
-          createdAt: Date.now(),
-          txHash,
-          marketId: receipt.marketId as `0x${string}` | undefined,
-          receiptId: bet.receipt.id,
-          receiptNullifier: nullifierOfBet as `0x${string}`,
-          payout: bet.claimAmount,
-        })
-
-        const nextFreeNote: Note = {
-          id: newCommitment,
-          kind: 'SETTLE_CREDIT',
-          owner_address: address,
-          depositIndex: currentFreeNote.depositIndex,
-          balance: newBalance,
-          nonce: newNonce,
-          commitment: newCommitment,
-          nullifier: newNullifier,
-          spent: false,
-          createdAt: Date.now(),
-          txHash,
-          marketId: receipt.marketId,
-          condition_id: marketIdField,
-          derivationVersion: currentFreeNote.derivationVersion ?? 1, // FC-13: inherit lineage version
-        }
-        addNote(nextFreeNote)
-
-        currentFreeNote = nextFreeNote
         applied.push(bet)
         setCompleted([...applied])
-        setLastCreditNote(nextFreeNote)
+        if (res.nextNote) setLastCreditNote(res.nextNote)
         setProgressIndex(previouslyCompleted.length + i + 1)
       }
 

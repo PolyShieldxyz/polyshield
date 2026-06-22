@@ -304,7 +304,7 @@ fn main(
 
 The `recipient_address` is private. The contract receives `recipient_hash` and the actual `recipientAddress` as separate arguments, then verifies `poseidon2(recipientAddress) == recipient_hash` before transferring. This prevents MEV bots from replacing the recipient address in the mempool.
 
-If `withdrawal_amount < final_balance`, the remaining balance is forfeit in the current design. A "partial withdrawal" flow that creates a new note with the remaining balance is a future enhancement (requires a new proof type: Withdrawal with Change).
+**Partial withdrawal is supported** (no separate "Withdrawal with Change" circuit needed). If `withdrawal_amount < final_balance`, the `isPartial` selector emits `new_commitment = Poseidon4(secret, final_balance − withdrawal_amount, nonce+1, owner)` — a change note for the remainder; a full drain (`withdrawal_amount == final_balance`) sets `new_commitment = 0`. The frontend uses this branch for **drain-to-dust** (FC-16): a withdrawal that would fully empty a deposit lineage still holding an open position instead leaves a `balance = 1` note, so the lineage stays alive to receive that position's later settlement/close credit (see Q5).
 
 ---
 
@@ -516,7 +516,7 @@ For very small bets, a proof batching/recursion layer (Nova or ProtoGalaxy foldi
 - **Q7 (RESOLVED):** FOK orders eliminate partial fill accounting entirely.
 - **Q7a (RESOLVED):** Bet Cancellation Credit circuit specified. See Section 5.
 - **Q8 (RESOLVED):** N/A Cancellation Credit circuit specified. See Section 6.
-- **Q5 (ACCEPTED LIMITATION for v1):** Users must wait for all open positions to settle before withdrawing. A "Withdrawal with Change" circuit is planned for v2.
+- **Q5 (RESOLVED, 2026-06-22, FC-16):** Withdrawing no longer strands open positions. Partial withdrawal (change note) is implemented, and the frontend (a) **drains to dust** — a full drain of a lineage still holding an open position leaves a 1-unit note so the payout can still be credited — and (b) offers **Settle & Withdraw**, a one-click flow that settles/closes/reclaims every open position then withdraws the full balance. Frontend-only; no circuit change (no "Withdrawal with Change" circuit needed).
 
 ### Complete Proof Type Registry
 

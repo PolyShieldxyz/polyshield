@@ -10,6 +10,14 @@ const nextConfig = {
   // warning and keeps output file tracing scoped to this repo.
   outputFileTracingRoot: path.join(__dirname, '..', '..'),
 
+  // The repo previously shipped no ESLint config, so `next build` printed "No ESLint configuration
+  // detected" and skipped linting entirely. A config now exists ONLY to enforce the PERF-001/004
+  // guard (.eslintrc.json: no main-thread proof generators outside the prover module). Keep lint OUT
+  // of the build so adding that config doesn't suddenly gate `next build` on the full next ruleset
+  // across pre-existing code — the guard runs via `pnpm lint` (next lint) instead. Same build
+  // behavior as before; strictly more linting available on demand.
+  eslint: { ignoreDuringBuilds: true },
+
   // FINDING: PERF-001 — circuit .wasm/.zkey artifacts are content-stable in production
   // (a release ships one fixed set), so cache them immutably for a year. Combined with
   // lazy on-demand loading in prover.ts, repeat visits and on-demand fetches are instant.

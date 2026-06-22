@@ -80,14 +80,16 @@ Option B is viable because of two confirmed facts from API research:
 
 ### Q5 — Concurrent open positions and partial withdrawal
 
-**Status:** RESOLVED (2026-05-20)
-**Resolution:** Option A for v1. Option C targeted for v2.
+**Status:** RESOLVED (2026-05-20; stranding foot-gun fully closed 2026-06-22, FC-16)
+**Resolution:** Partial withdrawal (change note) shipped; open-position payout stranding fixed frontend-only (drain-to-dust + Settle & Withdraw). No circuit change.
 
-The v1 design accepts that users must wait for all open positions to settle before withdrawing their full balance. Open positions are not reflected in the current note balance — the user can only withdraw what has been credited via Settlement Credit proofs.
+Open-position *value* is still locked until the position settles or closes — you cannot withdraw money that is sitting in an unsettled bet. What changed is that a withdrawal can no longer **strand** a position. A settlement/close credit can only land on a live note sharing the bet note's secret (its deposit lineage), so fully withdrawing or consolidating that lineage away used to leave the payout uncreditable *forever*. As of FC-16:
 
-This limitation must be communicated clearly in the frontend: display a breakdown of settled balance (withdrawable) vs. in-flight balance (locked in active positions) so users understand the state of their funds.
+- **Partial withdrawal is implemented** — the withdrawal circuit's `isPartial` branch keeps a change note for `balance − withdrawal_amount`, so settled funds can be moved without forfeiting the remainder.
+- **Drain-to-dust (frontend):** a withdrawal that would fully empty a lineage still holding an open position instead leaves a 1-unit dust note, keeping the lineage claimable. Consolidation forces an open lineage to slot 0 (never merges it away); the withdraw button hard-blocks the rare cases that can't be made safe.
+- **Settle & Withdraw (frontend):** a one-click flow on the Withdraw screen that settles every resolved bet, force-closes/cancels every other open position, then withdraws the full balance.
 
-**v2 path:** A "Withdrawal with Change" circuit (Option C) will allow partial withdrawal. It spends the current note, transfers `withdrawal_amount`, and creates a new note for `balance - withdrawal_amount`. All active positions must still be settled before the total balance can be accessed, but the user can at least move settled funds without waiting for unrelated markets to resolve.
+No circuit or contract change was needed (the protocol already represents a dust note as a valid spendable note). The earlier "Withdrawal with Change" (Option C) circuit is therefore unnecessary for this purpose. See `docs/future-changes.md` FC-16.
 
 ---
 

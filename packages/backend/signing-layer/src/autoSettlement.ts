@@ -8,7 +8,7 @@ import { z } from "zod";
 import { resolveMarketManually } from "./settlementResolver";
 import { submitMarketSellOrder, submitLimitSellOrder, getOrCreateClobClient, attestFailedFor, reconcileMarketSubmission } from "./orderBuilder";
 import { getTrackedOrder, cancelTrackedOrder } from "./wsFillTracker";
-import { isBetInFlight } from "./eventListener";
+import { isActivelySubmitting } from "./eventListener";
 import { recordLimitOrder } from "./limitOrderStore";
 import { getAttestation, getMarketSubmission } from "./attestationStore";
 import { syncOneMarket } from "./marketRegistry";
@@ -264,10 +264,13 @@ export function startAutoSettlementServer(
       return;
     }
     // No tracked resting order. MARKET (FAK) path — this is where the blind-FAILED double-spend lived.
-    // The listener is actively submitting this bet's order right now — DO NOT attest anything; the
-    // synchronous submit will record the real terminal outcome. (Covers the live FAK race in-process.)
-    if (isBetInFlight(nullifier_of_bet)) {
-      logger.info({ nullifier_of_bet }, "cancel-bet: order submission in flight — leaving pending (no false reclaim)");
+    // The listener is ACTIVELY submitting this bet's order RIGHT NOW (within the submit window) — DO
+    // NOT attest anything; the synchronous submit will record the real terminal outcome. Use
+    // isActivelySubmitting (not isBetInFlight): a stale in-flight entry from a long-dead submission
+    // (errored/hung — the set is kept on error to block re-submit) must NOT block reclaim forever, so
+    // we fall through to the durable-marker reconcile / FAILED below.
+    if (isActivelySubmitting(nullifier_of_bet)) {
+      logger.info({ nullifier_of_bet }, "cancel-bet: order submission actively in flight — leaving pending (no false reclaim)");
       res.json({ ok: true, outcome: "processing" });
       return;
     }

@@ -5,7 +5,7 @@ import { WalletConnect } from '@/components/ui/WalletConnect'
 import { BetaConsentGate } from '@/components/app/BetaConsentGate'
 import { Logo } from '@/components/ui/Logo'
 import { AppBackdrop } from '@/components/ui/AppBackdrop'
-import { clearNoteCache, getFreeNotes, resetAllLocalState, resetWalletConnectorStorage } from '@/lib/notes'
+import { clearNoteCache, getFreeNotes, installDevConsole, resetAllLocalState, resetWalletConnectorStorage } from '@/lib/notes'
 import { clearSession } from '@/lib/secretSession'
 import { useNotesHydration } from '@/lib/useNotesHydration'
 import { useChainResetDetector } from '@/lib/accountState'
@@ -19,6 +19,14 @@ const CONSOLIDATE_PRELOAD_NOTE_THRESHOLD = 5
 // The chain the app expects (137 = Polygon in prod; 31337 = Anvil in dev). On any other
 // network, on-chain reads (USDC balance, allowance) silently return nothing.
 const EXPECTED_CHAIN_ID = Number(process.env.NEXT_PUBLIC_CHAIN_ID ?? '137')
+
+// How long to wait for wagmi to restore a prior session before treating the connector as wedged.
+// Healthy injected/WalletConnect reconnects settle in 1–3s; sitting in 'reconnecting' past this is
+// almost always a broken WC session / dead relay. Generous enough not to nuke a slow-but-valid one.
+const RECONNECT_TIMEOUT_MS = 10_000
+// sessionStorage key: one-shot guard so the auto-recover (wipe + reload) fires at most once per
+// stuck episode — never a reload loop. Cleared on the next successful connect.
+const WC_AUTORESET_FLAG = 'ps_wc_autoreset'
 
 // Full-height centered gate (connect / reconnecting / wrong-network) over the animated
 // node-edge backdrop. Children render in a z-raised, opaque panel so contrast is unaffected.
@@ -54,17 +62,40 @@ export default function AppLayout({ children }: { children: React.ReactNode }) {
   const [reconnectTimedOut, setReconnectTimedOut] = useState(false)
   useEffect(() => {
     if (status === 'reconnecting' || status === 'connecting') {
-      const t = setTimeout(() => setReconnectTimedOut(true), 6000)
+      const t = setTimeout(() => setReconnectTimedOut(true), RECONNECT_TIMEOUT_MS)
       return () => clearTimeout(t)
     }
     setReconnectTimedOut(false) // settled → reset for any future reconnect
   }, [status])
+
+  // Auto-recover a wedged reconnect. When the restore times out while still disconnected, the
+  // connector is stuck — and the connect gate's button would just reopen a connect modal that
+  // conflicts with the half-alive connector (the "nav shows my address, but the connect page is up
+  // and won't connect; only Reset fixes it" report). Run the same reset the manual button does, but
+  // automatically and at most ONCE per stuck episode (sessionStorage guard, cleared on a successful
+  // connect) so the page lands on a clean, working connect gate instead of stranding the user. A
+  // clean slate post-reload has no stored connector to restore → settles to 'disconnected' → this
+  // won't re-fire, so there is no reload loop.
+  useEffect(() => {
+    if (!reconnectTimedOut || isConnected || typeof window === 'undefined') return
+    if (sessionStorage.getItem(WC_AUTORESET_FLAG)) return
+    sessionStorage.setItem(WC_AUTORESET_FLAG, '1')
+    resetConnection()
+  }, [reconnectTimedOut, isConnected])
+  // Clear the one-shot guard once a session is actually established, so a later wedge in the same tab
+  // can auto-recover again.
+  useEffect(() => {
+    if (isConnected && typeof window !== 'undefined') sessionStorage.removeItem(WC_AUTORESET_FLAG)
+  }, [isConnected])
 
   // Start fetching the entry-flow circuit .wasm and .zkey files as soon as the
   // user enters the app, well before they reach any proof step.
   useEffect(() => {
     initProver()
   }, [])
+
+  // Dev-only: expose window.polyshield console helpers (list / hide a stranded open position).
+  useEffect(() => { installDevConsole() }, [])
 
   // Once notes have hydrated, lazily warm the heavy consolidate artifacts for fragmented wallets
   // (many free notes ⇒ a spend will likely need a merge). Idempotent, so re-running on note

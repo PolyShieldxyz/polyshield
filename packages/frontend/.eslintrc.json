@@ -1,0 +1,18 @@
+{
+  "extends": "next/core-web-vitals",
+  "rules": {
+    "no-restricted-syntax": [
+      "error",
+      {
+        "selector": "ImportSpecifier[imported.name=/^generate(BetAuth|Withdrawal|Settlement|BetCancel|CancelCredit|Deposit|PositionClose|PartialCredit|Consolidate)Proof$/]",
+        "message": "PERF-001/004: the main-thread proof generators leak the snarkjs WASM heap (multi-GB, never freed — see src/workers/prover.worker.ts). Use generateProofInWorker({ type, inputs }) instead, which terminates the worker and returns the heap to the OS. Only prover.ts and prover.worker.ts may import these directly."
+      }
+    ]
+  },
+  "overrides": [
+    {
+      "files": ["src/lib/prover.ts", "src/workers/prover.worker.ts"],
+      "rules": { "no-restricted-syntax": "off" }
+    }
+  ]
+}

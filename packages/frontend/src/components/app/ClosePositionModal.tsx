@@ -6,39 +6,26 @@ import * as ToggleGroup from '@radix-ui/react-toggle-group'
 import { Modal } from '@/components/app/Modal'
 import { KV } from '@/components/app/KV'
 import { LiveRegion } from '@/components/app/LiveRegion'
-import {
-  addNote,
-  computeCommitment,
-  computeNullifier,
-  formatUsdc,
-  getFreeNoteForDeposit,
-  markNoteSpent,
-  markBetReceiptSpent,
-  recordWalletActivity,
-  type Note,
-} from '@/lib/notes'
-import { getNoteSecret } from '@/lib/secretSession'
-import {
-  fetchMerklePath,
-  fetchAttestation,
-  fetchBetRecord,
-  relayClose,
-  requestClose,
-  waitForTransactionConfirmation,
-  type SignedAttestation,
-} from '@/lib/api'
-import { generatePositionCloseProof } from '@/lib/prover'
+import { formatUsdc, type Note } from '@/lib/notes'
+import { fetchAttestation, fetchBetRecord, requestClose } from '@/lib/api'
+import { finalizeClose } from '@/lib/finalizeClose'
+import { markCloseSubmitted, clearCloseMarker } from '@/lib/closeMarker'
 import { type OrderKind, ORDER_KIND_LABEL } from '@/lib/orderType'
 
 // FC-9: proceeds are conveyed by the operator's SOLD attestation (reportType 4), not an
 // on-chain CLOSING status. We poll the attestation endpoint until the operator signs it.
 const REPORT_SOLD = 4
+// A market (FAK) close fills in seconds or is killed — wait this long inline for immediate feedback,
+// then hand off. A LIMIT close never blocks; it goes straight to the background finalizer.
+const MARKET_WAIT_MS = 30_000
 
 // Polymarket prices live in (0,1) — i.e. (0¢, 100¢), and can be fractional below 1¢ or above 99¢.
 // Allow up to 2 decimal places of a cent; clamp into the open interval only when we actually use it.
 const clampPriceCents = (p: number): number => Math.min(99.99, Math.max(0.01, Number.isFinite(p) ? p : 0.01))
 
-type Phase = 'input' | 'selling' | 'proving' | 'done' | 'error'
+// 'resting' (new) = the SELL is live on the book / awaiting credit; the user is free to leave and the
+// portfolio's background finalizer credits the proceeds when the operator's SOLD attestation lands.
+type Phase = 'input' | 'selling' | 'proving' | 'resting' | 'done' | 'error'
 
 interface ClosePositionModalProps {
   open: boolean
@@ -84,20 +71,14 @@ export function ClosePositionModal({
     return () => window.clearTimeout(id)
   }, [phase, onClose, onComplete])
 
-  // Poll the operator's attestation endpoint until a SOLD attestation appears (the operator
-  // signs it once the SELL fills, fully or partially). Returns the signed attestation.
-  async function pollUntilSold(nullifierOfBet: `0x${string}`, timeoutMs = 60_000): Promise<SignedAttestation> {
-    const start = Date.now()
-    while (Date.now() - start < timeoutMs) {
-      // Fetch the SOLD slot specifically (reportType 4). A filled position already has a
-      // FILLED bet-outcome attestation; without this selector the store would return FILLED
-      // and the close would never see SOLD (the cause of the "did not fill in time" timeout).
-      const att = await fetchAttestation(nullifierOfBet, REPORT_SOLD)
-      if (att && att.reportType === REPORT_SOLD) return att
-      await new Promise((r) => setTimeout(r, 2_000))
-    }
-    throw new Error('The close has not filled yet — your position stays open. A limit close keeps resting on the book; reopen Close later to credit it once it fills, or try a more aggressive price.')
-  }
+  // Auto-dismiss the "resting" confirmation after a few seconds. The order is now in the portfolio's
+  // hands (background finalizer), and the portfolio holds off finalizing the receipt that's open in
+  // this modal — so closing it promptly hands off cleanly. The user can also dismiss immediately.
+  useEffect(() => {
+    if (phase !== 'resting') return
+    const id = window.setTimeout(() => { void onComplete() }, 6_000)
+    return () => window.clearTimeout(id)
+  }, [phase, onComplete])
 
   const run = async () => {
     setError(null)
@@ -126,8 +107,7 @@ export function ClosePositionModal({
       const rec = await fetchBetRecord(vaultAddress, nullifierOfBet)
       const soldShares = rec.expectedShares
 
-      // Phase 1: ask the signing layer to submit the FOK SELL, then wait for the operator's
-      // SOLD attestation (FC-9: gasless — no on-chain CLOSING status anymore).
+      // Phase 1: ask the signing layer to submit the SELL.
       setPhase('selling')
       await requestClose({
         nullifier_of_bet: nullifierOfBet,
@@ -137,107 +117,70 @@ export function ClosePositionModal({
         order_type: orderKind === 'LIMIT' ? (expiryEnabled ? 'GTD' : 'GTC') : 'FAK',
         expiration: orderKind === 'LIMIT' && expiryEnabled ? expiryMinutes * 60 : undefined,
       })
-      // A Market (FAK) close fills now; a resting Limit (GTC/GTD) close can take a while.
-      const soldAtt = await pollUntilSold(nullifierOfBet, orderKind === 'LIMIT' ? 180_000 : 60_000)
-      // Use the operator-attested proceeds; the Vault injects att.amountB as sell_proceeds.
-      const computedProceeds = BigInt(soldAtt.amountB)
-      setProceeds(computedProceeds)
 
-      // Phase 2: credit the proceeds into the note via a position_close proof.
-      // Must spend a note from the SAME deposit chain as the bet receipt: the close
-      // circuit derives nullifier_of_bet = Poseidon2(secret, bet_nonce) from this
-      // note's deposit index, so a note from a different deposit would produce a
-      // non-matching nullifier_of_bet and the proof would not verify. No cross-deposit
-      // fallback (that mismatch is exactly the bug being fixed).
-      setPhase('proving')
-      const freeNote = getFreeNoteForDeposit(address, receipt.depositIndex)
-      if (!freeNote) {
-        throw new Error('No spendable note for this position’s deposit. Recover your notes and try again.')
-      }
-
-      const secret = await getNoteSecret(signMessageAsync, address, freeNote.depositIndex, freeNote.derivationVersion ?? 1)
-      const merkle = await fetchMerklePath(freeNote.commitment)
-      const newNonce = freeNote.nonce + 1n
-      const newBalance = freeNote.balance + computedProceeds
-      const newCommitment = computeCommitment(secret, newBalance, newNonce, address)
-      const newNullifier = computeNullifier(secret, newNonce)
-
-      const { proof } = await generatePositionCloseProof({
-        secret,
-        balance_before_credit: freeNote.balance,
-        nonce: freeNote.nonce,
-        bet_nonce: receipt.nonce,
-        merkle_path: merkle.path,
-        merkle_path_indices: merkle.pathIndices,
-        owner_address: address,
-        merkle_root: merkle.root,
-        nullifier: freeNote.nullifier,
-        new_commitment: newCommitment,
-        nullifier_of_bet: nullifierOfBet,
-        sell_proceeds: computedProceeds,
+      // Record the in-flight close so the portfolio can finalize it in the BACKGROUND even if this
+      // window is closed — the proceeds credit when the operator's SOLD attestation lands. This is
+      // what makes a resting limit close non-blocking (no "do not close this tab" trap).
+      markCloseSubmitted(address, {
+        nullifierOfBet,
+        depositIndex: receipt.depositIndex,
+        orderKind,
+        priceCents: orderKind === 'LIMIT' ? clampPriceCents(priceCents) : 0,
+        expiration: orderKind === 'LIMIT' && expiryEnabled ? expiryMinutes * 60 : 0,
+        submittedAt: Date.now(),
       })
 
-      const { txHash } = await relayClose(proof, {
-        merkle_root: merkle.root,
-        nullifier: freeNote.nullifier,
-        new_commitment: newCommitment,
-        nullifier_of_bet: nullifierOfBet,
-      }, soldAtt)
-      await waitForTransactionConfirmation(txHash as `0x${string}`)
-
-      markNoteSpent(freeNote.commitment)
-      // Full close → retire the receipt (terminal). Partial close → keep it: the unsold remainder
-      // still settles at resolution (the Vault nets out sold_shares in creditSettlement).
-      const fullClose = BigInt(soldAtt.amountA) >= rec.expectedShares
-      if (fullClose) markBetReceiptSpent(nullifierOfBet)
-      recordWalletActivity({
-        id: `close-${txHash}-${receipt.id}`,
-        wallet: address,
-        kind: 'settlement',
-        amount: computedProceeds,
-        createdAt: Date.now(),
-        txHash,
-        marketId: receipt.marketId as `0x${string}` | undefined,
-        receiptId: receipt.id,
-        receiptNullifier: nullifierOfBet,
-        payout: computedProceeds,
-      })
-
-      const credited: Note = {
-        id: newCommitment,
-        kind: 'SETTLE_CREDIT',
-        owner_address: address,
-        depositIndex: freeNote.depositIndex,
-        balance: newBalance,
-        nonce: newNonce,
-        commitment: newCommitment,
-        nullifier: newNullifier,
-        spent: false,
-        createdAt: Date.now(),
-        txHash,
-        marketId: receipt.marketId,
-        condition_id: receipt.condition_id,
-        derivationVersion: freeNote.derivationVersion ?? 1, // FC-13: inherit lineage version
+      if (orderKind === 'LIMIT') {
+        // A limit close rests on the book — possibly for a long time. Do NOT block: hand off to the
+        // background finalizer and free the user immediately.
+        setPhase('resting')
+        return
       }
-      addNote(credited)
-      setPhase('done')
+
+      // Market (FAK): fills now or is killed (it never rests). Wait briefly for the SOLD attestation,
+      // then credit inline for immediate feedback.
+      const start = Date.now()
+      while (Date.now() - start < MARKET_WAIT_MS) {
+        const att = await fetchAttestation(nullifierOfBet, REPORT_SOLD)
+        if (att && att.reportType === REPORT_SOLD) {
+          setPhase('proving')
+          const res = await finalizeClose(address, receipt, vaultAddress, signMessageAsync)
+          if (res.done) {
+            setProceeds(res.proceeds)
+            clearCloseMarker(address, nullifierOfBet)
+            setPhase('done')
+          } else {
+            // SOLD seen but couldn't credit yet (e.g. no free note this instant) — keep the marker;
+            // the background finalizer will complete it.
+            setPhase('resting')
+          }
+          return
+        }
+        await new Promise((r) => setTimeout(r, 2_000))
+      }
+      // No fill in the window → the FAK was killed (a market sell never rests). Nothing was sold.
+      clearCloseMarker(address, nullifierOfBet)
+      setPhase('error')
+      setError('The market close didn’t fill — your position is still open. Try again, or use a Limit close to rest on the book.')
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err))
       setPhase('error')
     }
   }
 
-  // WCAG 4.1.3 — announce sell submission, proof generation, and the credited result.
+  // WCAG 4.1.3 — announce each milestone.
   const announce =
     phase === 'selling'
-      ? 'Waiting for your close order to fill on Polymarket…'
+      ? 'Submitting your close order to Polymarket…'
       : phase === 'proving'
-        ? 'Generating the close proof and crediting your proceeds…'
-        : phase === 'done'
-          ? `Position closed. $${formatUsdc(proceeds)} credited to your balance.`
-          : phase === 'error'
-            ? error ?? 'Close failed.'
-            : ''
+        ? 'Crediting your proceeds…'
+        : phase === 'resting'
+          ? 'Your sell order is working. We’ll credit your balance automatically when it fills — you can leave this page.'
+          : phase === 'done'
+            ? `Position closed. $${formatUsdc(proceeds)} credited to your balance.`
+            : phase === 'error'
+              ? error ?? 'Close failed.'
+              : ''
 
   return (
     <Modal open={open} title="Close position (sell before settlement)" onClose={() => { if (phase !== 'selling' && phase !== 'proving') onClose() }}>
@@ -247,8 +190,9 @@ export function ClosePositionModal({
           <p className="body" style={{ margin: 0 }}>
             Sell your shares back before the market resolves. A <strong>Market</strong> close sells now
             at the best available price (down to your floor); a <strong>Limit</strong> close rests at
-            your price until it fills or expires. Either may fill partially — the unfilled remainder
-            stays open and settles at resolution. Proceeds are credited to your private balance.
+            your price until it fills or expires — you don’t have to wait around, we credit you
+            automatically when it fills. Either may fill partially; the unfilled remainder stays open
+            and settles at resolution. Proceeds are credited to your private balance.
           </p>
           <div className="panel" style={{ padding: 16 }}>
             <KV l="Market" v={receipt.marketId ?? receipt.id} />
@@ -326,13 +270,32 @@ export function ClosePositionModal({
 
       {(phase === 'selling' || phase === 'proving') && (
         <div className="col gap-4">
-          <div className="micro">{phase === 'selling' ? 'SUBMITTING SELL' : 'GENERATING CLOSE PROOF'}</div>
+          <div className="micro">{phase === 'selling' ? 'SUBMITTING SELL' : 'CREDITING PROCEEDS'}</div>
           <h3 className="h4" style={{ margin: 0 }}>
             {phase === 'selling'
-              ? 'Waiting for your close order to fill on Polymarket…'
-              : 'Crediting the sale proceeds back to your note…'}
+              ? 'Filling your market close on Polymarket…'
+              : 'Crediting the sale proceeds to your note…'}
           </h3>
-          <p className="small" style={{ margin: 0 }}>Do not close this window.</p>
+          <p className="small" style={{ margin: 0 }}>This usually takes a few seconds.</p>
+        </div>
+      )}
+
+      {phase === 'resting' && (
+        <div className="col gap-4">
+          <div className="micro" style={{ color: 'var(--cyan)' }}>SELL ORDER WORKING</div>
+          <h3 className="h4" style={{ margin: 0 }}>
+            {orderKind === 'LIMIT'
+              ? `Resting at ${clampPriceCents(priceCents).toFixed(2)}¢ on Polymarket.`
+              : 'Sale captured — crediting shortly.'}
+          </h3>
+          <p className="body" style={{ margin: 0 }}>
+            You can safely close this window and keep using the app — we’ll credit your balance
+            automatically when it fills. Track it as <strong>“Sell resting”</strong> on your Portfolio,
+            where you can also cancel it.
+          </p>
+          <div className="row" style={{ justifyContent: 'flex-end' }}>
+            <button className="btn btn-primary" onClick={() => void onComplete()}>Done</button>
+          </div>
         </div>
       )}
 

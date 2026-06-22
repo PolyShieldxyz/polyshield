@@ -5,6 +5,7 @@ import { createPublicClient, http } from 'viem'
 import { polygon, polygonAmoy } from 'viem/chains'
 import { defineChain } from 'viem'
 import { polygonReadRpc } from '../../lib/rpc'
+import { usePager, TablePagerRow } from '../../components/ui/Pager'
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -223,6 +224,7 @@ export default function ExplorerPage() {
   }, [refresh])
 
   const visible = filter === 'ALL' ? txs : txs.filter((t) => t.type === filter)
+  const { pageItems, page, setPage, totalPages } = usePager(visible, 20)
 
   const stats = [
     { label: 'Total events', value: txs.length },
@@ -306,7 +308,7 @@ export default function ExplorerPage() {
             <button
               key={f}
               className={`btn btn-sm ${filter === f ? 'btn-primary' : 'btn-ghost'}`}
-              onClick={() => setFilter(f)}
+              onClick={() => { setFilter(f); setPage(0) }}
               style={{ fontSize: 10 }}
             >
               {f}
@@ -343,7 +345,7 @@ export default function ExplorerPage() {
                   </tr>
                 </thead>
                 <tbody>
-                  {visible.map((tx) => (
+                  {pageItems.map((tx) => (
                     <tr key={tx.id}>
                       <td>
                         <span style={{ color: TYPE_COLOR[tx.type], fontWeight: 600, fontSize: 11 }}>
@@ -381,6 +383,7 @@ export default function ExplorerPage() {
                       </td>
                     </tr>
                   ))}
+                  <TablePagerRow page={page} totalPages={totalPages} onChange={setPage} colSpan={7} />
                 </tbody>
               </table>
             </div>

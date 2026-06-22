@@ -64,6 +64,8 @@ type GammaMarket = {
 // which leads with the primary category) wins, so check buckets per-tag.
 const TAG_BUCKETS: Array<[RegExp, string]> = [
   [/crypto|bitcoin|ethereum|solana|memecoin|defi|\bbtc\b|\beth\b|\bxrp\b|dogecoin/, 'CRYPTO'],
+  [/oil|crude|\bwti\b|brent|natural.?gas|commodit|gasoline/, 'COMMODITIES'],
+  [/weather|temperature|\brain\b|hurricane|snowfall|\bclimate\b/, 'WEATHER'],
   [/geopolit|iran|israel|russia|ukraine|china|taiwan|\bwar\b|middle.?east|nato|gaza/, 'GEO'],
   [/econ|\bfed\b|interest.?rate|inflation|recession|\bgdp\b|\bcpi\b|jobs|macro/, 'MACRO'],
   [/\bai\b|artificial|technology|\btech\b|science|space|software|openai/, 'TECH'],

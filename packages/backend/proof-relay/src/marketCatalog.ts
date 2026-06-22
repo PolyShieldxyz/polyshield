@@ -56,8 +56,49 @@ function db(): Database.Database {
     CREATE INDEX IF NOT EXISTS idx_catalog_vol  ON market_catalog(volume);
     CREATE INDEX IF NOT EXISTS idx_catalog_end  ON market_catalog(end_date);
     CREATE INDEX IF NOT EXISTS idx_catalog_cat  ON market_catalog(category);
+
+    -- Durable market NAME registry: field_safe_id → (real conditionId, question). Unlike the bettable
+    -- catalog above this is NEVER purged, so a CLOSED/RESOLVED market (removed from Polymarket, gone
+    -- from market_catalog) still resolves its name — including by the on-chain FIELD-SAFE market_id,
+    -- which a client can recover from BetAuthorized after a cache wipe but can't reverse to the real
+    -- conditionId. Self-seeds from upsertRows (every market seen while live) + resolveMarketName's
+    -- Gamma fallback. ~150 B/row, public data only (no wallet/bet linkage).
+    CREATE TABLE IF NOT EXISTS market_names (
+      field_safe_id  TEXT PRIMARY KEY,
+      condition_id   TEXT NOT NULL,
+      question       TEXT NOT NULL,
+      updated_at     INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_names_cid ON market_names(condition_id);
   `);
   return _db;
+}
+
+/** Upsert name rows into the durable registry (field_safe_id, real conditionId, question). */
+function upsertNames(rows: Array<{ fieldSafe: string; conditionId: string; question: string }>): void {
+  if (rows.length === 0) return;
+  const ts = Math.floor(Date.now() / 1000);
+  const stmt = db().prepare(
+    `INSERT INTO market_names (field_safe_id, condition_id, question, updated_at)
+     VALUES (@field_safe_id, @condition_id, @question, @updated_at)
+     ON CONFLICT(field_safe_id) DO UPDATE SET condition_id=excluded.condition_id, question=excluded.question, updated_at=excluded.updated_at`,
+  );
+  const tx = db().transaction((items: typeof rows) => {
+    for (const r of items) {
+      if (!r.conditionId || !r.question) continue;
+      stmt.run({ field_safe_id: r.fieldSafe.toLowerCase(), condition_id: r.conditionId.toLowerCase(), question: r.question, updated_at: ts });
+    }
+  });
+  tx(rows);
+}
+
+/** Resolve a market name from the durable registry by EITHER its real conditionId or field-safe id. */
+export function getMarketName(id: string): { conditionId: string; question: string } | null {
+  const lc = id.toLowerCase();
+  const row = db()
+    .prepare(`SELECT condition_id, question FROM market_names WHERE field_safe_id = ? OR condition_id = ? LIMIT 1`)
+    .get(lc, lc) as { condition_id: string; question: string } | undefined;
+  return row ? { conditionId: row.condition_id, question: row.question } : null;
 }
 
 // ── Gamma → catalog mapping (ported from frontend lib/polymarket.ts) ──────────
@@ -84,6 +125,8 @@ type GammaMarket = {
 
 const TAG_BUCKETS: Array<[RegExp, string]> = [
   [/crypto|bitcoin|ethereum|solana|memecoin|defi|\bbtc\b|\beth\b|\bxrp\b|dogecoin/, "CRYPTO"],
+  [/oil|crude|\bwti\b|brent|natural.?gas|commodit|gasoline/, "COMMODITIES"],
+  [/weather|temperature|\brain\b|hurricane|snowfall|\bclimate\b/, "WEATHER"],
   [/geopolit|iran|israel|russia|ukraine|china|taiwan|\bwar\b|middle.?east|nato|gaza/, "GEO"],
   [/econ|\bfed\b|interest.?rate|inflation|recession|\bgdp\b|\bcpi\b|jobs|macro/, "MACRO"],
   [/\bai\b|artificial|technology|\btech\b|science|space|software|openai/, "TECH"],
@@ -203,6 +246,9 @@ export function upsertRows(rows: CatalogRow[]): number {
     for (const r of items) stmt.run(r);
   });
   tx(rows);
+  // Seed the durable name registry too, so a name survives this market later being purged from the
+  // bettable catalog on resolution (every market is seen here at least once while live).
+  upsertNames(rows.map((r) => ({ fieldSafe: r.field_safe_id, conditionId: r.condition_id, question: r.question })));
   return rows.length;
 }
 
@@ -217,8 +263,11 @@ async function fetchGamma(query: string): Promise<GammaMarket[]> {
   }
 }
 
-const PAGE = 500;
-const MAX_PAGES = 20; // up to ~10k by volume — well above the active binary universe
+// Gamma caps /markets `limit` at 100. Requesting more silently returns 100, and the
+// `data.length < PAGE` guard in syncPages would then stop after a single page — so the whole catalog
+// was only ever the top ~100 markets. Request exactly 100 so pagination actually advances.
+const PAGE = 100;
+const MAX_PAGES = 25; // ~2.5k markets by volume for the ALL view; per-tag depth comes from the click-deepen
 
 async function syncPages(orderQuery: string, maxPages: number, ts: number): Promise<number> {
   let upserted = 0;
@@ -357,31 +406,38 @@ export function countCatalog(): number {
 }
 
 /**
- * Resolve JUST the human-readable question for a conditionId — including CLOSED/ended markets that
- * are filtered out of the bettable catalog (so e.g. a portfolio's settled/expired bets still show a
- * name instead of a hex id). Checks the bettable catalog first, then asks Gamma directly with NO
- * bettable filter (a closed market still carries its `question`). Returns null if Gamma has nothing.
+ * Resolve JUST the human-readable question for a conditionId OR a field-safe market_id — including
+ * CLOSED/ended markets removed from the bettable catalog (so a portfolio's settled/closed bets show a
+ * name, not a hex id), AND surviving a client cache wipe (the durable name registry is keyed by the
+ * field-safe id, which a chain-recovered bet carries). Order: bettable catalog → durable registry →
+ * Gamma (open then closed). A Gamma hit self-seeds the registry, so a later field-safe lookup for the
+ * same market resolves locally forever.
  */
 export async function resolveMarketName(conditionId: string): Promise<string | null> {
   const cid = conditionId.toLowerCase();
   const cached = getMarketByCondition(cid);
   if (cached) return cached.name;
-  // The id might be a FIELD-SAFE on-chain id rather than a real conditionId (e.g. a chain-recovered
-  // bet) — resolve it from the catalog while the market is still listed. (Closed markets are purged,
-  // and Gamma can't be queried by a field-safe id, so a settled bet known only by field-safe id can't
-  // be resolved — its name must come from what was stored at bet time.)
   const byField = getMarketByFieldSafe(cid);
   if (byField) return byField.name;
-  const pick = (data: GammaMarket[]): string | null => {
-    const q = data.find((m) => (m.conditionId ?? "").toLowerCase() === cid)?.question;
-    return q && q.trim() ? q : null;
+  // Durable registry — resolves by real conditionId OR field-safe id, and unlike the catalog is never
+  // purged on resolution. This is what makes a removed market's name survive a hard refresh / cache
+  // deletion (a recovered note knows only the field-safe id, which can't be reversed to a conditionId).
+  const named = getMarketName(cid);
+  if (named) return named.question;
+  // Not in any local store. Ask Gamma by the real conditionId (a field-safe id can't be queried — it
+  // would only get here un-seeded if the market was never synced while live). closed=true so resolved
+  // markets still carry their question. Self-seed the registry on a hit so future lookups are local.
+  const pickMarket = (data: GammaMarket[]): GammaMarket | undefined =>
+    data.find((m) => (m.conditionId ?? "").toLowerCase() === cid && (m.question ?? "").trim());
+  const seedAndReturn = (m: GammaMarket | undefined): string | null => {
+    if (!m?.conditionId || !m.question) return null;
+    upsertNames([{ fieldSafe: toFieldSafe(m.conditionId), conditionId: m.conditionId, question: m.question }]);
+    return m.question;
   };
   try {
-    // Open markets come back from the default query; CLOSED/ended markets are omitted unless we
-    // explicitly pass closed=true. Try open first, then closed, so either resolves.
-    const name = pick(await fetchGamma(`condition_ids=${encodeURIComponent(cid)}`));
-    if (name) return name;
-    return pick(await fetchGamma(`condition_ids=${encodeURIComponent(cid)}&closed=true`));
+    const open = seedAndReturn(pickMarket(await fetchGamma(`condition_ids=${encodeURIComponent(cid)}`)));
+    if (open) return open;
+    return seedAndReturn(pickMarket(await fetchGamma(`condition_ids=${encodeURIComponent(cid)}&closed=true`)));
   } catch {
     return null;
   }
@@ -432,6 +488,95 @@ export async function searchMarkets(q: string, limit = 50): Promise<{ markets: C
   if (rows.length > 0) upsertRows(rows);
   // Re-query so live results merge with any local hits, de-duplicated and uniformly sorted.
   return { markets: queryCatalog({ q, limit, sort: "Volume" }).markets, wentLive: true };
+}
+
+// ── Live per-category deepen (tag click → top markets for that tag) ────────────
+// The bulk sync is volume-sorted across the WHOLE universe, so a low-volume category (Sports,
+// Culture) only surfaces the handful of entries that rank in the global top set. On a tag click we
+// re-run the SAME query the global sync uses (bettable-only, volume-ordered) but scoped to that
+// category's Gamma tag, upsert the results, and re-query — so the category shows its real top
+// markets regardless of global rank.
+//
+// Why tag_id and not public-search seeds: a seed query like "nfl" returns mostly CLOSED past-game
+// markets that don't come back from /markets, yielding 0 new bettable rows for exactly the sparse
+// sports-type tags this is meant to fix. `/markets?...&tag_id=<id>` returns open, bettable,
+// volume-ordered markets reliably for every category.
+//
+// Gamma numeric tag ids (resolved via /tags/slug/<slug>; stable). For a mapped tag the fetched rows
+// are FORCED into the clicked category: Gamma already tag-filtered them, but categoryFromTags would
+// otherwise re-bin many to a sibling bucket (e.g. geopolitics markets carry political tags → POLITICS),
+// hiding them from queryCatalog({category}). A market spanning two tags is re-forced into whichever
+// category the user next clicks, so each tag view shows its full set.
+const CATEGORY_TAG_IDS: Record<string, string> = {
+  POLITICS: "2",       // politics
+  CRYPTO: "21",        // crypto
+  COMMODITIES: "101031", // commodities
+  WEATHER: "84",       // weather
+  MACRO: "100328",     // economy
+  TECH: "1401",        // tech
+  GEO: "100265",       // geopolitics
+  SPORTS: "1",         // sports
+  CULTURE: "596",      // pop-culture
+  // ALL = the global sync already covers it (no per-tag deepen).
+};
+// OTHER is the residual bucket — no single Gamma tag. After Commodities/Weather are carved out, what
+// remains is dominated by stocks/equities/IPOs/forex, which all live under the `finance` tag. So
+// deepen OTHER from `finance` but DON'T force the category: natural bucketing routes oil→COMMODITIES,
+// tech stocks→TECH, etc., leaving only genuinely-uncategorized markets in OTHER. The residual is thin
+// per page, so OTHER pages a little deeper than a mapped tag.
+const OTHER_DEEPEN_TAG = "120"; // finance
+const OTHER_DEEPEN_PAGES = 3;
+const CATEGORY_LIVE_COOLDOWN_MS = 60_000;
+const CATEGORY_FETCH_LIMIT = 100; // Gamma's per-request cap; frontend shows <= 60
+const _lastCategoryLive = new Map<string, number>();
+
+/**
+ * Deepen one category live and return its top `limit` markets. Per-category cooldown
+ * (CATEGORY_LIVE_COOLDOWN_MS) bounds Gamma load: the first click of a tag goes live, repeat clicks
+ * within the window serve the (now-deepened) catalog instantly. Mapped tags fetch one page and force
+ * the clicked category; OTHER fetches a few `finance` pages with natural bucketing. Fail-soft: any
+ * Gamma error falls back to the catalog. `wentLive` mirrors searchMarkets for an honest indicator.
+ */
+export async function syncCategoryLive(
+  category: string,
+  limit = 60,
+  sort = "Volume",
+): Promise<{ markets: ClientMarket[]; total: number; wentLive: boolean }> {
+  const cat = category.toUpperCase();
+  const isOther = cat === "OTHER";
+  const tagId = isOther ? OTHER_DEEPEN_TAG : CATEGORY_TAG_IDS[cat];
+  const last = _lastCategoryLive.get(cat) ?? 0;
+  // No mapped tag (ALL), or deepened within the cooldown → serve the catalog as-is.
+  if (!tagId || Date.now() - last < CATEGORY_LIVE_COOLDOWN_MS) {
+    return { ...queryCatalog({ category: cat, limit, sort }), wentLive: false };
+  }
+  _lastCategoryLive.set(cat, Date.now()); // mark before the call → a slow/down Gamma isn't re-hit for a minute
+  const pages = isOther ? OTHER_DEEPEN_PAGES : 1;
+  let upserted = 0;
+  try {
+    const ts = Date.now() / 1000;
+    for (let p = 0; p < pages; p++) {
+      const data = await fetchGamma(
+        `closed=false&active=true&archived=false&order=volume24hr&ascending=false&limit=${CATEGORY_FETCH_LIMIT}&offset=${p * CATEGORY_FETCH_LIMIT}&tag_id=${tagId}`,
+      );
+      if (data.length === 0) break;
+      const mapped = data
+        .map((m) => toCatalogRow(m, "search", ts))
+        .filter((r): r is CatalogRow => r !== null);
+      // Mapped tag → force the clicked category; OTHER → keep natural bucketing (see note above).
+      const rows = isOther ? mapped : mapped.map((r) => ({ ...r, category: cat }));
+      if (rows.length > 0) {
+        upsertRows(rows);
+        upserted += rows.length;
+      }
+      if (data.length < CATEGORY_FETCH_LIMIT) break;
+    }
+    logger.info({ category: cat, tagId, forced: !isOther, upserted }, "category live deepen");
+  } catch (err) {
+    logger.warn({ err: String(err), category: cat }, "category live deepen failed");
+  }
+  // Re-query so freshly upserted markets merge with the existing catalog rows, uniformly sorted.
+  return { ...queryCatalog({ category: cat, limit, sort }), wentLive: true };
 }
 
 // ── Odds overlay: live CLOB midpoints for the visible markets ─────────────────

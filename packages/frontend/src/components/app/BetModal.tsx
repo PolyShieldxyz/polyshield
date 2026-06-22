@@ -26,6 +26,7 @@ import { getNoteSecret } from '@/lib/secretSession'
 import { consolidateNotes } from '@/lib/consolidate'
 import { fetchMerklePath, relayBet, requestLimitOrder, waitForTransactionConfirmation } from '@/lib/api'
 import { generateProofInWorker, type AssetProgress } from '@/lib/prover'
+import { LowMemoryNotice } from '@/components/app/LowMemoryNotice'
 import { LiveRegion } from '@/components/app/LiveRegion'
 import { log, proofSummary } from '@/lib/logger'
 import { marketBuyCeilingFromBook, roundToTick, type BookLevel } from '@/lib/pricing'
@@ -503,6 +504,7 @@ export function BetModal({
       <LiveRegion message={announce} assertive={phase === 'error'} />
       {phase === 'edit' && (
         <div className="col gap-4">
+          <LowMemoryNotice />
           <div className="panel" style={{ padding: 16 }}>
             <KV l="Market" v={marketName} />
             <KV l="Side" v={sideLabel ?? side} />
