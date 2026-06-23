@@ -191,3 +191,37 @@
   .blog .pptable .col + .col { border-left: none; border-top: 1px solid var(--line-strong); }
   .blog .terms dl { grid-template-columns: 1fr; }
 }
+
+/* ── Markdown-rendered blocks (MarkdownRenderer) ──────────────────────────────
+   Styling for content produced by react-markdown that the TSX kit never emitted:
+   GFM tables, blockquote callouts, body figures, directive callouts, and LaTeX. */
+.blog .mdx .tablewrap { overflow-x: auto; margin: 22px 0; }
+.blog .mdx table { width: 100%; border-collapse: collapse; font-size: 14px; }
+.blog .mdx :where(th, td) { border: 1px solid var(--line-strong); padding: 9px 12px; text-align: left; vertical-align: top; line-height: 1.55; }
+.blog .mdx thead th { background: var(--surface-1); color: var(--text-1); font-weight: 600; }
+.blog .mdx tbody tr:nth-child(even) { background: var(--bg-1); }
+
+.blog .mdx blockquote { margin: 22px 0; padding: 10px 18px; border-left: 3px solid var(--brand); background: var(--brand-soft); border-radius: 0 var(--r-2) var(--r-2) 0; color: var(--text-1); }
+.blog .mdx blockquote p { margin: 6px 0; }
+
+.blog .callout-md { margin: 22px 0; padding: 14px 18px; border: 1px solid var(--brand-line); background: var(--brand-soft); border-radius: var(--r-2); }
+.blog .callout-md p:first-child { margin-top: 0; }
+.blog .callout-md p:last-child { margin-bottom: 0; }
+
+.blog .mdx figure.bodyfig { margin: 26px 0; text-align: center; }
+.blog .mdx figure.bodyfig img { max-width: 100%; height: auto; border: 1px solid var(--line-strong); border-radius: var(--r-3); }
+.blog .mdx figure.bodyfig .caption { text-align: center; margin-top: 10px; }
+
+/* Keep wide display math from overflowing the column on small screens. */
+.blog .mdx .katex-display { overflow-x: auto; overflow-y: hidden; padding: 6px 0; }
+
+/* Clickable self-anchored headings: the whole heading is a link to its own section,
+   styled to look like a plain heading with a faint gold # affordance on hover. */
+.blog .mdx :where(h2, h3, h4) { scroll-margin-top: 80px; }
+.blog .mdx :where(h2, h3, h4) > a.heading-anchor { color: inherit; text-decoration: none; }
+.blog .mdx :where(h2, h3, h4) > a.heading-anchor::after {
+  content: "#"; margin-left: .35em; color: var(--brand); font-weight: 400;
+  opacity: 0; transition: opacity .12s ease;
+}
+.blog .mdx :where(h2, h3, h4):hover > a.heading-anchor::after { opacity: .5; }
+.blog .mdx :where(h2, h3, h4) > a.heading-anchor:hover::after { opacity: .9; }

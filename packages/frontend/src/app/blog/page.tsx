@@ -2,7 +2,7 @@ import type { Metadata } from 'next'
 import Link from 'next/link'
 import Image from 'next/image'
 import { toCardData, PILLARS, fmtDate, type Pillar } from '@/lib/blog'
-import { PUBLISHED_POSTS } from '@/content/blog/registry'
+import { getPublishedPosts } from '@/lib/blogContent'
 import { PostGrid } from '@/components/blog/PostGrid'
 import { BlogIndexJsonLd } from '@/components/blog/JsonLd'
 
@@ -25,8 +25,11 @@ export const metadata: Metadata = {
 
 const PILLAR_ORDER: Pillar[] = [1, 2, 3, 4]
 
+// Reads the content dir at request time; refreshed on publish via /api/revalidate.
+export const revalidate = 3600
+
 export default function BlogIndex() {
-  const posts = PUBLISHED_POSTS
+  const posts = getPublishedPosts()
   const featured = posts.find((p) => p.meta.featured) ?? posts[0]
   const rest = posts.filter((p) => p.meta.slug !== featured?.meta.slug)
   const present = PILLAR_ORDER.filter((n) => posts.some((p) => p.meta.pillar === n)).map((n) => PILLARS[n])

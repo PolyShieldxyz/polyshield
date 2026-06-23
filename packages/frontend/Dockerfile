@@ -7,6 +7,12 @@
 
 FROM node:22-bookworm AS build
 WORKDIR /app
+# Raise Node's heap ceiling for install + build. The build context is only
+# packages/frontend, so the monorepo pnpm-lock.yaml isn't available here and pnpm must do
+# a full from-scratch dependency resolution (memory-heavy). With the markdown/remark/katex
+# stack the resolution graph + the Next build exceed Node's default ~2 GB heap and V8 aborts
+# (exit 134). 4 GB clears both phases; this host has swap headroom to back it.
+ENV NODE_OPTIONS=--max-old-space-size=4096
 RUN corepack enable
 COPY package.json ./
 # pnpm 11 blocks native build scripts (ERR_PNPM_IGNORED_BUILDS) unless explicitly allowed.
