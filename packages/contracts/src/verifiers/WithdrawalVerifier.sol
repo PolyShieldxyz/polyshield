@@ -8,7 +8,7 @@ import {OwnableUpgradeable} from "@openzeppelin-upgradeable/access/OwnableUpgrad
 
 // snarkJS-generated Groth16 verifier — withdrawal circuit (5 public signals).
 // The <Name>G16Base contract below is generated; the <Name>Verifier adapter is UUPS-upgradeable.
-// Regenerate via Benchmarking/groth16 (pnpm generate:verifiers). Do not edit by hand.
+// Regenerate via packages/circuits/pipeline (pnpm generate:verifiers). Do not edit by hand.
 contract WithdrawalG16Base {
     // Scalar field size
     uint256 constant r    = 21888242871839275222246405745257275088548364400416034343698204186575808495617;

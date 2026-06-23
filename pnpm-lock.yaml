@@ -20,7 +20,7 @@ importers:
         specifier: ^5.4.0
         version: 5.9.3
 
-  Benchmarking/groth16:
+  packages/circuits/pipeline:
     dependencies:
       ethers:
         specifier: ^6.13.0

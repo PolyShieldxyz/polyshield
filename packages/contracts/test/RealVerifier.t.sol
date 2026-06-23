@@ -17,7 +17,7 @@ import {DeployLib} from "../script/DeployLib.sol";
 /// REAL proofs (not MockVerifier). Confirms the snarkjs-generated pairing, the IC
 /// public-input count, and the frontend's ABI/G2-swap proof encoding all agree with
 /// the Solidity adapter. Fixtures are produced by the snarkjs pipeline in
-/// Benchmarking/groth16 (pnpm generate:test-proofs) and committed under test/fixtures/.
+/// packages/circuits/pipeline (pnpm generate:test-proofs) and committed under test/fixtures/.
 contract RealVerifierTest is Test {
     BetAuthVerifier betAuth;
     SettlementCreditVerifier settlementCredit;
