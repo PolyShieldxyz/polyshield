@@ -112,16 +112,14 @@ packages/
   circuits/
     groth16/     Active Circom (Groth16/snarkjs) — bet_auth, settlement_credit, withdrawal, bet_cancel,
                  cancel_credit, deposit, position_close, partial_credit, consolidate (9 circuits)
-    bet_auth/    Noir source — reference only, not compiled or used
-    (…other Noir dirs)  see packages/circuits/README.md
+    Noir/        Noir source — reference only, not compiled or used
+    pipeline/    
   backend/
     signing-layer/     Node.js — BetAuthorized → FAK/GTC/GTD orders; settlement resolver; JIT funding;
                        FC-9 attestations; auto-settlement API (port 3004)
     proof-relay/       Relays proofs (relayer EOA pays gas) + backend index/cache + market catalog:
                        /merkle-path (CachedMerkleTree), /recovery-data + /events (VaultEventIndex),
                        /relay/settlement (settlement credit), /markets (Gamma catalog), /analytics, SQLite merkle.db
-    mock-clob-server/  Fake Polymarket CLOB for local dev (mock only — all other components are real)
-    mock-env/          Anvil + contract deployment + service orchestration (pnpm dev:mock)
   frontend/      Next.js + Wagmi — deposit, bet, settle, withdraw UIs
   test-fixtures/ Generated test data (markets, users, action sequences)
 
@@ -132,10 +130,6 @@ docs/
   future-changes.md                  Approved/implemented change log (FC-1 … FC-12)
   diagrams/                          Mermaid process & path diagrams (visual companion to architecture.md)
   open-questions.md                  Unresolved design questions — check before implementing
-  polymarket-api.md                  CLOB/CTF integration reference
-  Q16-proving-backend-comparison.md  UltraPLONK vs Groth16 benchmark results
-  collateral-flow-audit.md           pUSD/USDC collateral flow analysis
-  codespaces-setup.md                Dev environment setup (Codespaces / fresh machine)
 ```
 
 > `deploy/` — single-host Docker Compose deployment (Caddy + frontend + backend services). See [`deploy/README.md`](deploy/README.md).

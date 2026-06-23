@@ -2,7 +2,8 @@ import path from "path";
 
 // This file lives at packages/circuits/pipeline/src/lib/paths.ts
 export const PIPELINE_ROOT = path.resolve(__dirname, "..", ".."); // packages/circuits/pipeline
-export const REPO_ROOT = path.resolve(__dirname, "..", "..", "..", ".."); // repo root
+// 5 levels up: src/lib -> src -> pipeline -> circuits -> packages -> <repo root>.
+export const REPO_ROOT = path.resolve(__dirname, "..", "..", "..", "..", ".."); // repo root
 
 // Circuit sources (the ACTIVE Circom circuits)
 export const CIRCUITS_SRC = path.join(REPO_ROOT, "packages", "circuits", "groth16");
