@@ -1,0 +1,4 @@
+secret = "101"
+commitment = "0x09784ca16ce17eac8a6f3d8037bb93f96267e5d631ce1fd71bc6b602adfcb726"
+amount = "250000000"
+owner_address = "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266"

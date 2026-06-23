@@ -21,9 +21,11 @@ fn test_settlement_credit_valid() {
     let secret: Field = 77;
     let balance_before_credit: u64 = 900_000_000; // 900 USDC
     let nonce: u64 = 1;
+    // The bet was authorized from the note at bet_nonce (< nonce). SEC-001.
+    let bet_nonce: u64 = 0;
     let owner_address: Field = 0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266;
 
-    // total_credit is now Vault-verified (shares_held * payout_per_share checked on-chain)
+    // total_credit is Vault-verified (shares_held * payout_per_share checked on-chain)
     let total_credit: u64 = 500_000_000;
 
     let old_commitment = bn254::hash_4([secret, balance_before_credit as Field, nonce as Field, owner_address]);
@@ -31,6 +33,7 @@ fn test_settlement_credit_valid() {
     let merkle_path = build_zero_path();
 
     let nullifier = bn254::hash_2([secret, nonce as Field]);
+    let nullifier_of_bet = bn254::hash_2([secret, bet_nonce as Field]);
     let new_balance = balance_before_credit + total_credit;
     let new_commitment = bn254::hash_4([secret, new_balance as Field, (nonce + 1) as Field, owner_address]);
 
@@ -38,6 +41,9 @@ fn test_settlement_credit_valid() {
     assert(merkle_verify(old_commitment, merkle_path, [0; 32]) == merkle_root);
     assert(bn254::hash_2([secret, nonce as Field]) == nullifier);
     assert(bn254::hash_4([secret, new_balance as Field, (nonce + 1) as Field, owner_address]) == new_commitment);
+    // SEC-001: bet_nonce < nonce and nullifier_of_bet binds to the bet note
+    assert(bet_nonce < nonce);
+    assert(bn254::hash_2([secret, bet_nonce as Field]) == nullifier_of_bet);
 }
 
 // Print witness values for Prover.toml generation
@@ -46,21 +52,23 @@ fn test_print_bench_inputs() {
     let secret: Field = 77;
     let balance_before_credit: u64 = 900_000_000;
     let nonce: u64 = 1;
+    let bet_nonce: u64 = 0;
     let owner_address: Field = 0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266;
     let total_credit: u64 = 500_000_000;
-    let nullifier_of_bet: Field = 1; // arbitrary for bench
     let market_id: Field = 1;
 
     let old_commitment = bn254::hash_4([secret, balance_before_credit as Field, nonce as Field, owner_address]);
     let merkle_path = build_zero_path();
     let merkle_root = single_leaf_root(old_commitment);
     let nullifier = bn254::hash_2([secret, nonce as Field]);
+    let nullifier_of_bet = bn254::hash_2([secret, bet_nonce as Field]);
     let new_balance = balance_before_credit + total_credit;
     let new_commitment = bn254::hash_4([secret, new_balance as Field, (nonce + 1) as Field, owner_address]);
 
     println(f"BENCH secret {secret}");
     println(f"BENCH balance_before_credit {balance_before_credit}");
     println(f"BENCH nonce {nonce}");
+    println(f"BENCH bet_nonce {bet_nonce}");
     println(f"BENCH owner_address {owner_address}");
     println(f"BENCH total_credit {total_credit}");
     println(f"BENCH nullifier_of_bet {nullifier_of_bet}");
@@ -101,4 +109,15 @@ fn test_settlement_wrong_new_commitment() {
     let new_balance = balance_before + total_credit;
     let correct = bn254::hash_4([secret, new_balance as Field, (nonce + 1) as Field, owner_address]);
     assert(correct == 0, "Invalid new_commitment");
+}
+
+// Wrong nullifier_of_bet -- SEC-001 binding (constraint 4) should fail
+#[test(should_fail_with = "Invalid nullifier_of_bet")]
+fn test_settlement_wrong_bet_nullifier() {
+    let secret: Field = 77;
+    let bet_nonce: u64 = 0;
+    let wrong_nullifier_of_bet: Field = 4242;
+
+    let correct = bn254::hash_2([secret, bet_nonce as Field]);
+    assert(correct == wrong_nullifier_of_bet, "Invalid nullifier_of_bet");
 }

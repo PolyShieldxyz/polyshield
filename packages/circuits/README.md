@@ -105,19 +105,28 @@ cd packages/contracts && forge build && forge test --match-contract RealVerifier
 
 > **Not compiled. Not used for proof generation. Do not run `nargo compile` and copy outputs into the build.**
 
-All Noir circuits live under the `Noir/` subdirectory:
+All Noir circuits live under the `Noir/` subdirectory. They mirror, one-to-one, the nine
+active Circom circuits in `groth16/` (same public inputs, same constraint logic):
 
 ```
 Noir/
-  Nargo.toml               — Noir workspace (members: lib, bet_auth, settlement_credit, withdrawal, bet_cancel, cancel_credit)
+  Nargo.toml               — Noir workspace (members: lib + the nine circuits below)
   lib/                     — shared Noir lib (package name `merkle`)
-  bet_auth/                — main.nr + test.nr + Prover.toml
-  settlement_credit/
-  withdrawal/
-  bet_cancel/
-  cancel_credit/
+  bet_auth/                — (slot 0) main.nr + test.nr; 10 public inputs incl. Vault-injected fee (FC-10)
+  settlement_credit/       — (slot 1)
+  withdrawal/              — (slot 2)
+  bet_cancel/              — (slot 3)
+  cancel_credit/           — (slot 4)
+  deposit/                 — (slot 5) mandatory deposit binding (FC-2); single-hash, no merkle dep
+  position_close/          — (slot 6) pre-settlement secondary-sale credit (FC-1)
+  partial_credit/          — (slot 7) partial limit-fill refund (FC-4)
+  consolidate/             — (slot 8) merge up to 4 same-owner notes into 1 (FC-8)
   bench.sh                 — legacy UltraPLONK-vs-UltraHonk benchmark script (requires nargo; not part of the build)
 ```
+
+> The credit circuits (`settlement_credit`, `bet_cancel`, `cancel_credit`, `position_close`,
+> `partial_credit`) take a private `bet_nonce` and bind `nullifier_of_bet == Poseidon2(secret, bet_nonce)`
+> with `bet_nonce < nonce` — the SEC-001 / decoupled-reclaim constraint from the Circom sources.
 
 These Noir circuits are kept as a canonical specification reference. They describe the same protocol logic as the Circom circuits and are useful for:
 

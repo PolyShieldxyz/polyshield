@@ -1,7 +1,6 @@
-bet_amount = "100000000"
+secret = "42"
 current_balance = "1000000000"
-expected_shares = "153846153"
-market_id = "0x01"
+nonce = "0"
 merkle_path = [
   "0x0000000000000000000000000000000000000000000000000000000000000000",
   "0x2098f5fb9e239eab3ceac3f27b81e481dc3124d55ffed523a839ee8446b64864",
@@ -37,13 +36,15 @@ merkle_path = [
   "0x1bbeb01b4c479ecde76917645e404dfa2e26f90d0afc5a65128513ad375c5ff2"
 ]
 merkle_path_indices = ["0","0","0","0","0","0","0","0","0","0","0","0","0","0","0","0","0","0","0","0","0","0","0","0","0","0","0","0","0","0","0","0"]
+share_remainder = "55000000"
+owner_address = "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266"
 merkle_root = "0x002ae5afa882455b1e8827b79859d9aef608ec74932f7eba5e171f28d87d99fc"
-new_commitment = "0x0b57026b0ffb2946d08cc99e7b8e0b2004614ee93370401fb5316331279c120b"
-nonce = "0"
 nullifier = "0x08fb15898b5e4c6b8c1ee35eff746c62fc2f2c64c777e78640ece1f70a326d58"
+new_commitment = "0x1b235135d34aa06287ba6e1bfafff2b3e4dda8f0889b008e9dd28b95763eae7b"
+bet_amount = "100000000"
+price = "65000000"
+expected_shares = "153846153"
+market_id = "0x01"
 outcome_side = "1"
 position_id = "0x02"
-price = "65000000"
-owner_address = "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266"
-secret = "42"
-share_remainder = "55000000"
+fee = "200000"

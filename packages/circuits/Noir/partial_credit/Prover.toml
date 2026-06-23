@@ -1,7 +1,6 @@
-secret = "77"
-balance_before_credit = "900000000"
+secret = "64"
+current_balance = "800000000"
 nonce = "1"
-bet_nonce = "0"
 merkle_path = [
   "0x0000000000000000000000000000000000000000000000000000000000000000",
   "0x2098f5fb9e239eab3ceac3f27b81e481dc3124d55ffed523a839ee8446b64864",
@@ -38,9 +37,9 @@ merkle_path = [
 ]
 merkle_path_indices = ["0","0","0","0","0","0","0","0","0","0","0","0","0","0","0","0","0","0","0","0","0","0","0","0","0","0","0","0","0","0","0","0"]
 owner_address = "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266"
-merkle_root = "0x3052d64fcfc40e656ebb635e1ba7d51b9b6de3c5405e0f6d88edb559664d0020"
-nullifier = "0x2da132475763e195462742943b96e5adeef9ff2145c7fce17fff7cd5a12b1de7"
-new_commitment = "0x0ae9d4165f3a2d8a8dfb1e14e61429bc92fc4d30432ff5eea1d6ab78c7808216"
-nullifier_of_bet = "0x2690147f529219c51d5afa7d677a8ae226627d8df337a2dd0401a7baa24ce015"
-market_id = "0x01"
-total_credit = "500000000"
+bet_nonce = "0"
+merkle_root = "0x1f2f36211e888dc23bbeb874a9587f4670a0a347b257bcefe2ba08adfe1a4812"
+nullifier = "0x04a96f9ec0832cbd5f218f375378032eae005ccff708d4f8970b1325df77cd1c"
+new_commitment = "0x08bc569ea24586c5741095c4c5a969ac54dc27ed3636986852e4146a8b30d03c"
+nullifier_of_bet = "0x0960c3f2bb09f0514ffcc7a5eaf107df88bcfbdb93c6614e5f475d7755c4fa2d"
+refund_amount = "120000000"

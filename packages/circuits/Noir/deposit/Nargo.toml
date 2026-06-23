@@ -1,0 +1,7 @@
+[package]
+name = "deposit"
+type = "bin"
+authors = []
+compiler_version = ">=0.30.0"
+
+# No Merkle dependency: deposit is a single-hash binding circuit (no tree, no nullifier).

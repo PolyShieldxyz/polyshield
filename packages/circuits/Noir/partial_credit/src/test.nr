@@ -15,15 +15,15 @@ fn single_leaf_root(leaf: Field) -> Field {
     merkle_verify(leaf, build_zero_path(), [0; 32])
 }
 
-// Valid proof (happy path)
+// Valid proof (happy path) -- limit order partially filled, remainder refunded
 #[test]
-fn test_bet_cancel_valid() {
-    let secret: Field = 55;
-    let current_balance: u64 = 900_000_000; // post-bet: original 1000 - 100 bet
-    let nonce: u64 = 1; // post-bet nonce
-    // The bet was authorized from the note at bet_nonce (< nonce).
+fn test_partial_credit_valid() {
+    let secret: Field = 64;
+    let current_balance: u64 = 800_000_000; // post-bet balance
+    let nonce: u64 = 1;
     let bet_nonce: u64 = 0;
-    let bet_amount: u64 = 100_000_000; // Vault-injected
+    // refund_amount = bet_amount - spent_amount, Vault-injected from reportPartialFill
+    let refund_amount: u64 = 120_000_000;
     let owner_address: Field = 0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266;
 
     let old_commitment = bn254::hash_4([secret, current_balance as Field, nonce as Field, owner_address]);
@@ -32,13 +32,12 @@ fn test_bet_cancel_valid() {
 
     let nullifier = bn254::hash_2([secret, nonce as Field]);
     let nullifier_of_bet = bn254::hash_2([secret, bet_nonce as Field]);
-    let restored_balance = current_balance + bet_amount;
+    let restored_balance = current_balance + refund_amount;
     let new_commitment = bn254::hash_4([secret, restored_balance as Field, (nonce + 1) as Field, owner_address]);
 
     assert(merkle_verify(old_commitment, merkle_path, [0; 32]) == merkle_root);
     assert(bn254::hash_2([secret, nonce as Field]) == nullifier);
     assert(bn254::hash_4([secret, restored_balance as Field, (nonce + 1) as Field, owner_address]) == new_commitment);
-    // Decoupled reclaim: bet_nonce < nonce and nullifier_of_bet binds to the bet note
     assert(bet_nonce < nonce);
     assert(bn254::hash_2([secret, bet_nonce as Field]) == nullifier_of_bet);
 }
@@ -46,11 +45,11 @@ fn test_bet_cancel_valid() {
 // Print witness values for Prover.toml generation
 #[test]
 fn test_print_bench_inputs() {
-    let secret: Field = 55;
-    let current_balance: u64 = 900_000_000;
+    let secret: Field = 64;
+    let current_balance: u64 = 800_000_000;
     let nonce: u64 = 1;
     let bet_nonce: u64 = 0;
-    let bet_amount: u64 = 100_000_000;
+    let refund_amount: u64 = 120_000_000;
     let owner_address: Field = 0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266;
 
     let old_commitment = bn254::hash_4([secret, current_balance as Field, nonce as Field, owner_address]);
@@ -58,7 +57,7 @@ fn test_print_bench_inputs() {
     let merkle_root = single_leaf_root(old_commitment);
     let nullifier = bn254::hash_2([secret, nonce as Field]);
     let nullifier_of_bet = bn254::hash_2([secret, bet_nonce as Field]);
-    let restored_balance = current_balance + bet_amount;
+    let restored_balance = current_balance + refund_amount;
     let new_commitment = bn254::hash_4([secret, restored_balance as Field, (nonce + 1) as Field, owner_address]);
 
     println(f"BENCH secret {secret}");
@@ -66,7 +65,7 @@ fn test_print_bench_inputs() {
     println(f"BENCH nonce {nonce}");
     println(f"BENCH bet_nonce {bet_nonce}");
     println(f"BENCH owner_address {owner_address}");
-    println(f"BENCH bet_amount {bet_amount}");
+    println(f"BENCH refund_amount {refund_amount}");
     println(f"BENCH nullifier_of_bet {nullifier_of_bet}");
     println(f"BENCH merkle_root {merkle_root}");
     println(f"BENCH nullifier {nullifier}");
@@ -80,9 +79,9 @@ fn test_print_bench_inputs() {
 
 // Wrong Merkle root
 #[test(should_fail_with = "Invalid Merkle proof")]
-fn test_bet_cancel_wrong_root() {
-    let secret: Field = 55;
-    let current_balance: u64 = 900_000_000;
+fn test_partial_credit_wrong_root() {
+    let secret: Field = 64;
+    let current_balance: u64 = 800_000_000;
     let nonce: u64 = 1;
     let owner_address: Field = 0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266;
 
@@ -94,24 +93,24 @@ fn test_bet_cancel_wrong_root() {
 
 // Wrong new_commitment -- restored balance is wrong
 #[test(should_fail_with = "Invalid new_commitment")]
-fn test_bet_cancel_wrong_new_commitment() {
-    let secret: Field = 55;
-    let current_balance: u64 = 900_000_000;
-    let bet_amount: u64 = 100_000_000;
+fn test_partial_credit_wrong_new_commitment() {
+    let secret: Field = 64;
+    let current_balance: u64 = 800_000_000;
+    let refund_amount: u64 = 120_000_000;
     let nonce: u64 = 1;
     let owner_address: Field = 0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266;
 
-    let restored_balance = current_balance + bet_amount;
+    let restored_balance = current_balance + refund_amount;
     let correct = bn254::hash_4([secret, restored_balance as Field, (nonce + 1) as Field, owner_address]);
     assert(correct == 0, "Invalid new_commitment");
 }
 
 // Wrong nullifier_of_bet -- decoupled-reclaim binding should fail
 #[test(should_fail_with = "Invalid nullifier_of_bet")]
-fn test_bet_cancel_wrong_bet_nullifier() {
-    let secret: Field = 55;
+fn test_partial_credit_wrong_bet_nullifier() {
+    let secret: Field = 64;
     let bet_nonce: u64 = 0;
-    let wrong_nullifier_of_bet: Field = 7777;
+    let wrong_nullifier_of_bet: Field = 2468;
 
     let correct = bn254::hash_2([secret, bet_nonce as Field]);
     assert(correct == wrong_nullifier_of_bet, "Invalid nullifier_of_bet");

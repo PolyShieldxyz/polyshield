@@ -6,4 +6,8 @@ members = [
   "withdrawal",
   "bet_cancel",
   "cancel_credit",
+  "deposit",
+  "position_close",
+  "partial_credit",
+  "consolidate",
 ]
