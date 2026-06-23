@@ -1,8 +1,9 @@
-import { PUBLISHED_POSTS } from '@/content/blog/registry'
+import { getPublishedPosts } from '@/lib/blogContent'
 import { SITE_URL } from '@/lib/brand'
 
-// RSS feed for distribution + answer-engine ingestion. Static at build time.
-export const dynamic = 'force-static'
+// RSS feed for distribution + answer-engine ingestion. Reads the content dir at request
+// time and is cached; refreshed on publish via /api/revalidate (revalidate = safety net).
+export const revalidate = 3600
 
 function esc(s: string): string {
   return s
@@ -13,7 +14,7 @@ function esc(s: string): string {
 }
 
 export function GET() {
-  const items = PUBLISHED_POSTS.map(
+  const items = getPublishedPosts().map(
     ({ meta }) => `    <item>
       <title>${esc(meta.title)}</title>
       <link>${SITE_URL}/blog/${meta.slug}</link>

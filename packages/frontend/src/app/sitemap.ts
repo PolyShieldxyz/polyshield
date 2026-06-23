@@ -1,11 +1,14 @@
 import type { MetadataRoute } from 'next'
 import { SITE_URL } from '@/lib/brand'
-import { PUBLISHED_POSTS } from '@/content/blog/registry'
+import { getPublishedPosts } from '@/lib/blogContent'
 import { DOC_PAGES } from '@/content/docs'
 
 // SEO: serve a real /sitemap.xml so search engines discover the educational/marketing
 // surface without relying on crawl-link discovery. The blog index + every post are
-// emitted dynamically from the MDX content dir. The authenticated /app dApp is excluded.
+// emitted from the runtime content dir (BLOG_CONTENT_DIR). The authenticated /app dApp
+// is excluded. Refreshed on publish via /api/revalidate; revalidate is the safety net.
+export const revalidate = 3600
+
 export default function sitemap(): MetadataRoute.Sitemap {
   const staticRoutes: {
     path: string
@@ -35,7 +38,7 @@ export default function sitemap(): MetadataRoute.Sitemap {
     priority: i === 0 ? 0.8 : 0.6,
   }))
 
-  const postEntries = PUBLISHED_POSTS.map(({ meta }) => ({
+  const postEntries = getPublishedPosts().map(({ meta }) => ({
     url: `${SITE_URL}/blog/${meta.slug}`,
     lastModified: new Date(meta.date_modified ?? meta.date),
     changeFrequency: 'monthly' as const,

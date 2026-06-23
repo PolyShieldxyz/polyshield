@@ -21,6 +21,8 @@ volumes:
   proofrelay_data:  # persistent: proof-relay merkle cache (rebuildable from chain — safe to lose, just slower cold start).
   caddy_data:       # persistent: Let's Encrypt certs/account. Losing it re-issues certs.
   caddy_config:
+  frontend_next_cache:  # ISR/full-route cache (.next/cache). Safe to lose (re-renders on demand);
+                        # persisting it just avoids a cold blog cache + render storm after a restart.
 
 services:
   caddy:
@@ -64,6 +66,17 @@ services:
       # Server-side proxy targets — private compose-network DNS names.
       - PROOF_RELAY_URL=http://proof-relay:3002
       - SIGNING_LAYER_URL=http://signing-layer:3004
+      # Blog content is read at RUNTIME from this dir (a bind mount, below) — publishing a
+      # post or flipping draft↔live needs NO image rebuild, just a file change + a poke to
+      # /api/revalidate. BLOG_REVALIDATE_SECRET authenticates that poke (see scripts/publish-blog.sh).
+      - BLOG_CONTENT_DIR=/content/blog
+      - BLOG_REVALIDATE_SECRET=${BLOG_REVALIDATE_SECRET}
+    volumes:
+      # The in-repo Markdown posts ARE the live source of truth. Mounted read-only: the
+      # container only reads; the publish step edits these files on the host (git pull of
+      # approved content) and then calls /api/revalidate. Decouples publishing from deploy.
+      - ../packages/frontend/content/blog-md:/content/blog:ro
+      - frontend_next_cache:/app/.next/cache
     networks: [internal]
     depends_on: [proof-relay, signing-layer]
 

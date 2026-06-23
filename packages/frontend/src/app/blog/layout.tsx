@@ -1,4 +1,5 @@
 import '@/styles/blog.css'
+import 'katex/dist/katex.min.css' // LaTeX math ($$…$$) rendered by rehype-katex
 import type { ReactNode } from 'react'
 
 // All blog pages share the scoped `.blog` wrapper (so blog.css selectors apply)
