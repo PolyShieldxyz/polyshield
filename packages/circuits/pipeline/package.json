@@ -1,0 +1,24 @@
+{
+  "name": "@polyshield/groth16-pipeline",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Circom 2.1.6 + snarkjs Groth16 build pipeline: compile circuits, run trusted setup, generate IVerifier-adapter Solidity verifiers, copy wasm/zkey to the frontend, and regenerate RealVerifier test fixtures.",
+  "scripts": {
+    "compile:circuits": "ts-node src/cli/compile.ts",
+    "setup:circuits": "ts-node src/cli/setupCircuits.ts",
+    "generate:verifiers": "ts-node src/cli/generateVerifiers.ts",
+    "copy:artifacts": "ts-node src/cli/copyArtifacts.ts",
+    "generate:test-proofs": "ts-node src/cli/generateTestProofs.ts",
+    "all": "pnpm compile:circuits && pnpm setup:circuits && pnpm generate:verifiers && pnpm copy:artifacts && pnpm generate:test-proofs"
+  },
+  "dependencies": {
+    "ethers": "^6.13.0",
+    "poseidon-lite": "^0.3.0",
+    "snarkjs": "^0.7.5"
+  },
+  "devDependencies": {
+    "@types/node": "^20",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.4.0"
+  }
+}

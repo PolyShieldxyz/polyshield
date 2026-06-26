@@ -12,6 +12,5 @@ export default function robots(): MetadataRoute.Robots {
       disallow: ['/app', '/app/', '/api/', '/explorer'],
     },
     sitemap: `${SITE_URL}/sitemap.xml`,
-    host: SITE_URL,
   }
 }

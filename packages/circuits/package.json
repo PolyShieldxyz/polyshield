@@ -2,7 +2,7 @@
   "name": "@polyshield/circuits",
   "version": "0.1.0",
   "private": true,
-  "description": "Polyshield ZK circuits. The active set is Circom/Groth16 in groth16/ (built via Benchmarking/groth16). The Noir .nr files in the other subdirectories are a spec reference only. circomlib is declared here so the relative includes in groth16/lib/*.circom (`../../node_modules/circomlib/...`) resolve to packages/circuits/node_modules/circomlib after `pnpm install`.",
+  "description": "Polyshield ZK circuits. The active set is Circom/Groth16 in groth16/ (built via packages/circuits/pipeline). The Noir .nr files in the other subdirectories are a spec reference only. circomlib is declared here so the relative includes in groth16/lib/*.circom (`../../node_modules/circomlib/...`) resolve to packages/circuits/node_modules/circomlib after `pnpm install`.",
   "dependencies": {
     "circomlib": "^2.0.5"
   }

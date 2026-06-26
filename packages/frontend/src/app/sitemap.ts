@@ -20,11 +20,16 @@ export default function sitemap(): MetadataRoute.Sitemap {
     { path: '/blog', priority: 0.7, changeFrequency: 'weekly' },
     { path: '/roadmap', priority: 0.5, changeFrequency: 'monthly' },
   ]
-  const now = new Date()
+  // SEO: <lastmod> must reflect real content changes, not fetch time. Using
+  // `new Date()` here made every lastmod change on each hourly revalidation, which
+  // teaches Google to distrust the signal. Use a stable date for the static
+  // marketing/docs surface and bump it when those pages meaningfully change. Blog
+  // posts carry their own per-post date (date_modified ?? date) below.
+  const staticLastmod = new Date('2026-06-26')
 
   const staticEntries = staticRoutes.map(({ path, priority, changeFrequency }) => ({
     url: `${SITE_URL}${path}`,
-    lastModified: now,
+    lastModified: staticLastmod,
     changeFrequency,
     priority,
   }))
@@ -33,7 +38,7 @@ export default function sitemap(): MetadataRoute.Sitemap {
   // The first page (Overview) is the canonical docs landing, so it ranks highest.
   const docEntries = DOC_PAGES.map((p, i) => ({
     url: `${SITE_URL}/docs/${p.slug}`,
-    lastModified: now,
+    lastModified: staticLastmod,
     changeFrequency: 'weekly' as const,
     priority: i === 0 ? 0.8 : 0.6,
   }))

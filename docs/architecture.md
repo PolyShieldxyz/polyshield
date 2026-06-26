@@ -100,7 +100,7 @@ Functions:
 
 #### Verifier Contracts
 
-Snarkjs-generated Groth16 verifiers (BN254), one per circuit type, built through the `Benchmarking/groth16` pipeline. Each generated file pairs a stateless `<Name>G16Base` (the pairing math + hardcoded verification key) with a UUPS-upgradeable `<Name>Verifier` adapter implementing `IVerifier`.
+Snarkjs-generated Groth16 verifiers (BN254), one per circuit type, built through the `packages/circuits/pipeline` pipeline. Each generated file pairs a stateless `<Name>G16Base` (the pairing math + hardcoded verification key) with a UUPS-upgradeable `<Name>Verifier` adapter implementing `IVerifier`.
 
 Deployed separately from `Vault.sol` (each behind its own proxy) and registered in the Vault verifier slots via the **48h-timelocked** `proposeVerifier` / `acceptVerifier` flow. Adopting a new verification key without a full proxy migration is also possible via the adapter's owner-only `setBase(address)` (an instant, separate lever).
 

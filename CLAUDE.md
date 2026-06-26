@@ -58,7 +58,7 @@ README.md              Project overview and quick start
 - **Secret derivation (P3+ — wallet-derived):** Secrets are derived deterministically from wallet signatures. **V2 (FC-13, default for new deposits):** one master-seed signature per session derives every note secret locally — `master_seed = keccak256(wallet.sign("PolyShield master seed\nAddress: {W}\nVersion: 2"))`, then `secret_i = keccak256(master_seed ‖ uint32(i)) mod p`. The master seed is held **in memory only** (never persisted) by `secretSession.ts`; this collapses recovery + every spend in a session to one signature. **V1 (legacy):** `keccak256(wallet.signMessage("PolyShield deposit derivation\nAddress: {W}\nIndex: {i}\nVersion: 1")) mod p` — one signature per index; still honored for pre-FC-13 notes (per-note `derivationVersion` selects the path; untagged → V1). **Both message strings are frozen protocol constants — never change them after mainnet deployment.** Users never need to back up a secret in P3+. See `docs/zk-design.md` §3 and FC-13.
 - **Merkle tree:** Poseidon-hashed, depth 32, append-only. Rolling **1024-root** history window with O(1) `mapping(bytes32 => bool) knownRoots` membership (FC-3, implemented). `isKnownRoot` is a single mapping read; `insert` maintains the window via a `mapping(uint256 => bytes32) rootRing` keyed by `seq % ROOT_WINDOW`, evicting the oldest root on overflow. `currentRoot` is the single source of truth for the latest root (read it instead of `recentRoots`/`currentRootIndex`, which were removed). The window size is the `internal virtual _rootWindow()` (constant `ROOT_WINDOW = 1024` in production; a test subclass overrides it to exercise eviction). The changing root does NOT serialize transactions to one per block (see T8). Do not shrink the window below the client proving span (≈15–60 Polygon blocks) without Project Agent approval.
 - **Deposit binding (MANDATORY, T20):** The deposit commitment MUST be bound to the deposited amount and depositor via a mandatory deposit ZK proof. `deposit` is NOT trivial. The committed `balance` is otherwise unconstrained against the transferred `amount`, allowing a depositor to commit a larger balance than they paid and drain the pool. Add `circuits/deposit`: private `secret`; public `(commitment, amount, owner_address)`; constraint `commitment == Poseidon4(secret, amount, 0, owner_address)`. The Vault passes `owner_address = uint256(uint160(msg.sender))` and `amount` from the on-chain transfer, forcing `balance == amount`, `nonce == 0`, `owner == msg.sender`. No change to the Poseidon4 formula or the four existing circuits. See FC-2. Treat as a blocker for any deposit-handling code.
-- **ZK language:** Circom + snarkjs (BN254 / Groth16). Active circuits live in `packages/circuits/groth16/`; the Noir `.nr` files in `packages/circuits/Noir/` are a specification reference only — they are not compiled and not wired into any build step. New Circom circuits are built through the `Benchmarking/groth16/` pipeline (`src/cli/compile.ts`, `setupCircuits.ts`, `generateVerifiers.ts`). Register new circuits in `Benchmarking/groth16/src/constants.ts` (CIRCUIT_IDS) and `src/interfaces.ts` (CircuitId union) before compiling.
+- **ZK language:** Circom + snarkjs (BN254 / Groth16). Active circuits live in `packages/circuits/groth16/`; the Noir `.nr` files in `packages/circuits/Noir/` are a specification reference only — they are not compiled and not wired into any build step. New Circom circuits are built through the `packages/circuits/pipeline/` pipeline (`src/cli/compile.ts`, `setupCircuits.ts`, `generateVerifiers.ts`). Register new circuits in `packages/circuits/pipeline/src/constants.ts` (CIRCUIT_IDS) and `src/interfaces.ts` (CircuitId union) before compiling.
 - **ZK backend:** Groth16 (snarkjs) for both dev/testnet and mainnet. The frontend generates proofs via `snarkjs.groth16.fullProve()` using WASM artifacts compiled from Circom. On-chain verification uses snarkjs-generated Solidity verifier contracts. UltraHonk and UltraPLONK have been evaluated (see `docs/Q16-proving-backend-comparison.md`) and are not used. Do not introduce UltraPLONK or UltraHonk verifiers anywhere.
 - **Chain:** Polygon mainnet (Polymarket runs here). Testnet target: Polygon Amoy.
 - **Upgradeability = UUPS (OpenZeppelin, Solidity), all production contracts.** Every deployed contract — `Vault`, `CommitmentMerkleTree`, `NullifierRegistry`, `PoseidonT3Hasher`, and all 8 Groth16 verifier adapters — is a UUPS implementation behind an `ERC1967Proxy`. The proxy addresses are the permanent protocol addresses. Constructors are replaced by `initialize(...)` (`initializer`-guarded); implementations carry `constructor() { _disableInitializers(); }`. `_authorizeUpgrade` is gated by **plain `onlyOwner`, instant (no timelock)** — this is a deliberate decision and a major trust assumption: the owner can replace any contract's logic in a single tx (fund-drain / de-anon vector). The owner role MUST be a multisig/HSM in production. See `docs/threat-model.md` (T-UPGRADE) and `docs/architecture.md`. Mechanics: uses `@openzeppelin-upgradeable` mixins (`Ownable2StepUpgradeable`, `PausableUpgradeable`) + `ReentrancyGuardTransient` (EIP-1153; `evm_version = "cancun"` in `foundry.toml`, supported on Polygon since the Napoli hardfork). Each upgradeable contract reserves a trailing `__gap`; never reorder/insert state — append by shrinking the gap. `CommitmentMerkleTree`'s storage layout (`poseidon, vault, zeros[32], filledSubtrees[32], currentRoot, knownRoots, rootRing, nextIndex, rootCount, __gap`) is frozen. (FC-3 intentionally reset this layout — replacing the old `recentRoots[30], currentRootIndex` block — under the pre-mainnet test-only waiver of the frozen-layout rule, with a fresh redeploy and no migration; treat it as frozen again going forward.) Verifier adapters expose an owner-only `setBase(address)` to adopt a new VK without a full proxy migration (separate lever from the Vault's 48h-timelocked `proposeVerifier`/`acceptVerifier` slot swap). Deploy via the proxy pattern in `script/Deploy.s.sol` / `MockDeploy.s.sol` using `script/DeployLib.sol` (predicts the Vault proxy address to resolve the Vault↔Tree↔Registry init cycle). Do not reintroduce constructors or change `_authorizeUpgrade` gating without Project Agent approval.
@@ -82,7 +82,7 @@ README.md              Project overview and quick start
 
 ## ZK Proofs: Quick Reference
 
-Seven proof types. The **active Circom source** is in `packages/circuits/groth16/`; the `.nr` files in `packages/circuits/Noir/` are specification-only and are NOT compiled. Build new circuits through `Benchmarking/groth16/` (see `packages/circuits/README.md`). Full specs in `docs/zk-design.md`.
+Seven proof types. The **active Circom source** is in `packages/circuits/groth16/`; the `.nr` files in `packages/circuits/Noir/` are specification-only and are NOT compiled. Build new circuits through `packages/circuits/pipeline/` (see `packages/circuits/README.md`). Full specs in `docs/zk-design.md`.
 
 | Proof | Circom source (active) | Verifier slot | Key public inputs |
 |---|---|---|---|
@@ -194,7 +194,7 @@ Lives in `packages/frontend/`. Next.js app with Wagmi for wallet connection.
 ## Testing Standards
 
 - Smart contracts: Foundry tests in `packages/contracts/test/`. Minimum coverage: all state transitions (deposit, bet auth, settlement credit, withdrawal), all nullifier double-spend attempts, all invalid proof rejections, Merkle root window edge cases.
-- Circuits: The authoritative circuit tests are `packages/contracts/test/RealVerifier.t.sol` (end-to-end on-chain verification of generated Groth16 proofs) and the roundtrip in `Benchmarking/groth16/src/cli/generateTestProofs.ts`. The Noir `.nr` spec files have test helpers, but those test the spec document, not the production circuit.
+- Circuits: The authoritative circuit tests are `packages/contracts/test/RealVerifier.t.sol` (end-to-end on-chain verification of generated Groth16 proofs) and the roundtrip in `packages/circuits/pipeline/src/cli/generateTestProofs.ts`. The Noir `.nr` spec files have test helpers, but those test the spec document, not the production circuit.
 - Backend: Jest unit tests for the signing service. Mock the Polymarket API. Test the circuit breaker logic.
 - Never test with a real Polymarket EOA or real USDC on mainnet.
 
@@ -240,7 +240,7 @@ forge test --gas-report
 
 # ── Circuits (Groth16 / snarkjs — authoritative) ─────────────────────────────
 # Build all circuits (compile → trusted setup → generate verifiers):
-cd Benchmarking/groth16
+cd packages/circuits/pipeline
 pnpm compile:circuits       # circom → r1cs + wasm (artifacts/)
 pnpm setup:circuits         # snarkjs groth16 setup → zkeys (setup/)
 pnpm generate:verifiers     # snarkjs → *Verifier.sol (contracts/generated/)
@@ -315,7 +315,7 @@ Rules:
 
 ## Pending Implementation Tasks
 
-These tasks were produced by a full audit of `packages/contracts/src/Vault.sol` and all circuits in `packages/circuits/`. Execute them in the order listed. After completing all contract changes, run `forge build && forge test` and confirm zero failures. After adding a new Groth16 circuit, rebuild through `Benchmarking/groth16` and run `forge test --match-contract RealVerifierTest` to confirm the generated verifier accepts a real proof.
+These tasks were produced by a full audit of `packages/contracts/src/Vault.sol` and all circuits in `packages/circuits/`. Execute them in the order listed. After completing all contract changes, run `forge build && forge test` and confirm zero failures. After adding a new Groth16 circuit, rebuild through `packages/circuits/pipeline` and run `forge test --match-contract RealVerifierTest` to confirm the generated verifier accepts a real proof.
 
 ---
 
@@ -551,9 +551,9 @@ function adminCancelBet(bytes32 nullifier_of_bet) external onlyOwner {
 
 ### TASK-C3 — DONE. `SettlementCreditVerifier.sol` already has 6 public inputs.
 
-The previously documented `bb write_vk`/`bb contract` commands were wrong (the project uses snarkjs Groth16, not barretenberg). The active `SettlementCreditVerifier.sol` in `packages/contracts/src/verifiers/` is a snarkjs-generated adapter with 6 IC constants (6 public inputs), matching `settlement_credit.circom`. If regeneration is ever needed, use the `Benchmarking/groth16` pipeline:
+The previously documented `bb write_vk`/`bb contract` commands were wrong (the project uses snarkjs Groth16, not barretenberg). The active `SettlementCreditVerifier.sol` in `packages/contracts/src/verifiers/` is a snarkjs-generated adapter with 6 IC constants (6 public inputs), matching `settlement_credit.circom`. If regeneration is ever needed, use the `packages/circuits/pipeline` pipeline:
 ```bash
-cd Benchmarking/groth16
+cd packages/circuits/pipeline
 pnpm compile:circuits && pnpm setup:circuits && pnpm generate:verifiers
 ```
 Then copy `contracts/generated/SettlementCreditVerifier.sol` → `packages/contracts/src/verifiers/SettlementCreditVerifier.sol`.

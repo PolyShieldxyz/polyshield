@@ -1,7 +1,7 @@
 packages:
   - "packages/*"
   - "packages/backend/*"
-  - "Benchmarking/groth16"
+  - "packages/circuits/pipeline"
 # Security overrides for transitive CVEs (DEP-002/003/004). pnpm v10 reads these from
 # pnpm-workspace.yaml (the "pnpm.overrides" field in package.json is ignored).
 # Verify with `pnpm install && pnpm audit`.
