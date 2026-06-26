@@ -204,7 +204,16 @@ const components = {
 export function MarkdownRenderer({ body }: { body: string }) {
   return (
     <Markdown
-      remarkPlugins={[remarkGfm, remarkMath, remarkDirective, remarkDirectiveBlocks]}
+      // singleDollarTextMath:false → ONLY `$$…$$` is math; a lone `$` is literal text.
+      // Posts use the dollar sign for currency far more than inline LaTeX, so the default
+      // (single-dollar inline math ON) mangled prose like "$1 per bet … $5 per withdrawal"
+      // into a math span. Block `$$…$$` math is unaffected.
+      remarkPlugins={[
+        remarkGfm,
+        [remarkMath, { singleDollarTextMath: false }],
+        remarkDirective,
+        remarkDirectiveBlocks,
+      ]}
       rehypePlugins={[rehypeSlug, [rehypeKatex, { throwOnError: false, strict: false }]]}
       components={components as unknown as Components}
     >
