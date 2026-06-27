@@ -32,6 +32,8 @@ node_modules/
 /docs/blog-design.md
 /docs/collateral-deployment-strategy-comparison.md
 /docs/blog-content-system.md
+# Private research design (FC-16) — public roadmap carries the idea only, not the mechanics
+/docs/copy-trading-and-track-records.md
 
 # Noir build artifacts
 packages/circuits/**/target/

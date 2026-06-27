@@ -82,6 +82,8 @@ const PHASES: Phase[] = [
       'Multi-chain deposits: accept USDC from Ethereum, Base, and Arbitrum into the Polygon vault via a canonical/lock-and-mint bridge',
       'SMT-based nullifier registry: O(log n) membership proofs replacing the flat mapping',
       'Recursive proofs: aggregate multiple bet authorizations into a single on-chain proof',
+      'Verifiable private track records: let a trader prove a complete, cherry-pick-resistant performance history under a pseudonym — without revealing their wallet or their individual bets',
+      'Opt-in copy-trading: pseudonymous trader reputation plus privacy-preserving mirrored execution with a profit-only performance fee, keeping the followed trader’s wallet and live picks private',
       'WebSocket live vault feed; native-speed mobile WASM prover',
       'Expand beyond Polymarket via a generic CLOB adapter; optional compliant selective-disclosure withdrawal mode',
     ],

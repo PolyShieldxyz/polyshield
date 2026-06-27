@@ -241,7 +241,7 @@ Smart contracts are open-source and MIT licensed. The protocol is currently in a
 | **P2 — Orders, Fees & Infra** | ✅ SHIPPED | FAK market + GTC/GTD limit orders with partial-fill credit (FC-4), gasless operator attestations (FC-9), JIT collateral (FC-7), protocol fees (FC-10), consolidation (FC-8), position close (FC-1), backend index/recovery/explorer (FC-12), live Polymarket integration, single-host Docker deploy |
 | **P3 — Hardening & Beta** | 🔨 IN PROGRESS | Security audit, owner key → multisig/HSM, base-buffer collateral (Option 4 / FC-6), persisted circuit-breaker + alerting, anonymity-set growth, public beta |
 | **P4 — TEE & Trust Min.** | PLANNED | AWS Nitro signing layer v2 + remote attestation gate, multi-EOA rotation, withdrawal timing posture / onion relay, fee governance transition |
-| **P5 — Multi-chain & Scaling** | RESEARCH | Multi-chain deposits, SMT nullifier registry, recursive proofs, mobile WASM prover, generic CLOB adapter beyond Polymarket |
+| **P5 — Multi-chain & Scaling** | RESEARCH | Multi-chain deposits, SMT nullifier registry, recursive proofs, verifiable private track records + opt-in copy-trading (pseudonymous, wallet stays private), mobile WASM prover, generic CLOB adapter beyond Polymarket |
 | **P6 — Cryptography Frontier** | RESEARCH | Post-quantum ZK (STARK/lattice), FHE for private state, ZK coprocessor, proof marketplace |
 
 Full roadmap with per-phase deliverables: [polyshield.xyz/roadmap](https://polyshield.xyz/roadmap)
