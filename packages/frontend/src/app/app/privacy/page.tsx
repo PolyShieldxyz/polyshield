@@ -1,5 +1,6 @@
 'use client'
 import { KV } from '@/components/app/KV'
+import { PrivacyModel } from '@/components/app/PrivacyModel'
 
 // Deterministic pseudo-random in [0,1) from an integer key. Replaces Math.random() in the
 // decorative SVGs below: Math.random() yields different values on the server vs the client,
@@ -86,19 +87,17 @@ function ClusteringGraph() {
 }
 
 export default function PrivacyPage() {
-  // ILLUSTRATIVE PREVIEW. These figures are sample values, not live measurements of the
-  // connected account — the metrics pipeline (anonymity set, k-anonymity, timing entropy,
-  // decoy density) is not computed yet. The page is shipped as a labeled preview of the
-  // privacy dashboard, NOT as a measurement. Do not present these as real numbers: showing
-  // specific-looking values as if measured would be a trust violation for a privacy product.
-  // See docs/ui-ux-audit-2026-06-15.md (PRIV-001).
+  // ILLUSTRATIVE PREVIEW. These figures are sample values, not live measurements of the connected
+  // account — the metrics pipeline is not computed yet. The page is a labeled preview, NOT a
+  // measurement. CRITICAL (ui-ux-audit-2026-06-27): every metric here is scoped to BET-AUTHORSHIP
+  // anonymity (the property PolyShield actually protects: which deposit authorized which bet). Do
+  // NOT add deposit↔withdrawal "unlinkability" / "k-anonymity of deposit patterns" tiles — the
+  // deposit is PUBLIC by design and withdrawal is W→W, so that linkage is ~100%, and claiming
+  // otherwise (even as a sample) installs a false, deanonymizing mental model. See PrivacyModel.tsx.
   const metrics = [
-    { label: 'Anonymity score', value: '94/100', color: 'var(--cyan)', note: 'Composite of set size, timing entropy, decoy density' },
-    { label: 'Anonymity set', value: '1,842', color: 'var(--cyan)', note: 'Unique wallets in the current pool window' },
-    { label: 'Timing entropy', value: '7.4 bits', color: 'var(--green)', note: 'Bits of uncertainty in withdrawal timing' },
-    { label: 'K-anonymity', value: 'k = 312', color: 'var(--green)', note: 'Min wallets with indistinguishable deposit patterns' },
-    { label: 'Unlinkability', value: '99.8%', color: 'var(--violet)', note: 'Prob. no observer links withdrawal to deposit' },
-    { label: 'Decoy density', value: '12.3%', color: 'var(--text-2)', note: 'Fraction of traffic that is decoy (future feature)' },
+    { label: 'Anonymity set', value: '1,842', color: 'var(--cyan)', note: 'Depositors in the current pool window — the crowd a bet’s author hides among' },
+    { label: 'Bet-authorship set', value: 'k = 312', color: 'var(--green)', note: 'Candidate authors per bet that an observer can’t tell apart' },
+    { label: 'Timing & decoys', value: 'Planned', color: 'var(--text-2)', note: 'Randomized relay delay + cover traffic to blur fill timing (roadmap)' },
   ]
 
   return (
@@ -121,6 +120,10 @@ export default function PrivacyPage() {
             arrive in a later release.
           </div>
         </div>
+
+        {/* Always-true privacy boundary — the one thing this page must state honestly, above any
+            sample number: the deposit is public, withdrawal is W→W, only bet-authorship is hidden. */}
+        <PrivacyModel style={{ marginBottom: 20 }} />
 
         {/* Metric tiles */}
         <div className="m-grid" style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 12, marginBottom: 24 }}>
@@ -156,8 +159,9 @@ export default function PrivacyPage() {
                 <ClusteringGraph />
               </div>
               <div className="small mt-2" style={{ fontSize: 11 }}>
-                Illustrative: in a mature pool, deposit-to-withdrawal linkage analysis would show your activity pattern
-                blended among the other wallets in the anonymity set, with no detectable cluster.
+                Illustrative: an observer trying to attribute a <em>bet</em> to its author sees it blended among every
+                depositor in the pool — no cluster ties the bet back to you. (This is about bet authorship, not your
+                deposit, which is public on-chain.)
               </div>
             </div>
           </div>
@@ -169,7 +173,8 @@ export default function PrivacyPage() {
                 <ActivityHeatmap />
               </div>
               <div className="small mt-3" style={{ fontSize: 11 }}>
-                Transaction timing randomized by relay jitter. No time-of-day fingerprint detectable.
+                Illustrative. Randomized relay delay to blur fill timing is on the roadmap; today bets are unlinked to
+                your wallet by the shared-account relay, not yet by timing jitter.
               </div>
             </div>
 
@@ -180,7 +185,7 @@ export default function PrivacyPage() {
                   ['Merkle anonymity', 'Your commitment is one leaf among many in the append-only Merkle tree. A root-membership proof shows inclusion without revealing which leaf is yours.', 'var(--cyan)'],
                   ['Nullifier unlinkability', 'Nullifiers are poseidon(secret, nonce). No observer can link a nullifier to a deposit address.', 'var(--green)'],
                   ['Relay separation', 'Proof relay submits transactions. Your wallet never appears in bet, settle, or withdraw calldata.', 'var(--violet)'],
-                  ['Timing entropy', 'Withdraw relay adds random jitter (3–12 min standard, up to 60 min paranoid). Breaks timing correlation.', 'var(--amber)'],
+                  ['Timing jitter (planned)', 'A future relay option will add random delay (target 3–12 min, up to ~60 min) to blur fill timing. Not yet live — listed here so the model is complete.', 'var(--amber)'],
                   ['Anonymous analytics', 'During beta we count which markets/tags/sorts/searches are popular to tune what we fetch. Aggregate counts only — no wallet address, no IP, no per-user id. Browsing is never linked to your wallet or bets.', 'oklch(0.72 0.10 200)'],
                 ].map(([label, desc, color]) => (
                   <div key={label as string}>

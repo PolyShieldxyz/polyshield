@@ -15,6 +15,16 @@ export function AnimatedNumber({ value, decimals = 0, prefix = '', suffix = '', 
 
   useEffect(() => {
     cancelAnimationFrame(ref.current.raf)
+    // H11: rAF tweens are JS-driven, so the global CSS reduced-motion guard can't
+    // neutralize them. Honor prefers-reduced-motion by snapping to the value with no tween.
+    const reduced =
+      typeof window !== 'undefined' &&
+      typeof window.matchMedia === 'function' &&
+      window.matchMedia('(prefers-reduced-motion: reduce)').matches
+    if (reduced) {
+      setN(value)
+      return
+    }
     const from = n
     const to = value
     const t0 = performance.now()

@@ -29,8 +29,10 @@ import { generateProofInWorker, type AssetProgress } from '@/lib/prover'
 import { LowMemoryNotice } from '@/components/app/LowMemoryNotice'
 import { LiveRegion } from '@/components/app/LiveRegion'
 import { log, proofSummary } from '@/lib/logger'
-import { marketBuyCeilingFromBook, roundToTick, type BookLevel } from '@/lib/pricing'
+import { marketBuyCeilingFromBook, roundToTick, computeOrderPreview, MIN_SHARES, type BookLevel } from '@/lib/pricing'
 import { type OrderKind, ORDER_KIND_LABEL } from '@/lib/orderType'
+import { classifyTxError } from '@/lib/txError'
+import Link from 'next/link'
 
 type Phase = 'edit' | 'running' | 'success' | 'error'
 const VAULT_ADDRESS = (process.env.NEXT_PUBLIC_VAULT_ADDRESS ??
@@ -163,15 +165,6 @@ export function BetModal({
     }
     return roundToTick(limitCents / 100, tickSize)
   }, [orderKind, price, bestAsk, tickSize, limitCents, levels, amountMicro])
-  const shares = useMemo(() => {
-    if (!amountMicro || effectivePrice <= 0) return 0n
-    return (amountMicro * 100_000_000n) / BigInt(Math.round(effectivePrice * 100_000_000))
-  }, [amountMicro, effectivePrice])
-  // Polymarket rejects orders below 5 shares ("Size lower than the minimum: 5"). shares is
-  // 1e6-scaled, so the floor is 5e6. Block here so the user isn't surprised by a failed order.
-  const MIN_SHARES = 5_000_000n
-  const belowMinShares = shares > 0n && shares < MIN_SHARES
-
   // FEE: read the governance fee config so the client computes the SAME Vault-injected fee it
   // must commit to in the bet_auth proof (fee = bet_amount*betFeeBps/10000 + relayGasFeeUSDC).
   // betFeeBps (uint16) comes back as a number; the uint64 fields as bigint — coerce defensively.
@@ -184,19 +177,26 @@ export function BetModal({
   const betFeeBps = feeConfigData ? BigInt(feeConfigData[0]) : 0n
   const relayGasFeeUSDC = feeConfigData ? BigInt(feeConfigData[1]) : 0n
   const minBet = feeConfigData ? BigInt(feeConfigData[2]) : 1_000_000n // default $1 until loaded
-  // Polymarket also enforces a $1 minimum ORDER NOTIONAL, and the signing layer reserves the
-  // per-market taker fee out of the stake BEFORE sizing the order — so a $1 bet sizes a sub-$1 order
-  // the CLOB rejects ("invalid amount … min size: $1"). Require enough headroom that the post-fee
-  // order clears $1 even at a generous (~20%) taker-fee assumption. Sits ON TOP of the on-chain minBet.
-  const POLY_MIN_ORDER_USDC = 1_000_000n
-  const ORDER_FEE_HEADROOM_BPS = 2_000n // assume up to 20% taker-fee reserve (real ≈ 1–7%) → ~$1.25 floor
-  const minOrderBet = (POLY_MIN_ORDER_USDC * 10_000n) / (10_000n - ORDER_FEE_HEADROOM_BPS)
-  const effectiveMinBet = minBet > minOrderBet ? minBet : minOrderBet
-  const fee = useMemo(() => {
-    if (!amountMicro || amountMicro <= 0n) return 0n
-    return (amountMicro * betFeeBps) / 10_000n + relayGasFeeUSDC
-  }, [amountMicro, betFeeBps, relayGasFeeUSDC])
-  const belowMinBet = amountMicro !== null && amountMicro > 0n && amountMicro < effectiveMinBet
+
+  // C4: derive EVERY displayed number (shares, fee, min-bet, totals) from the ONE shared
+  // helper so the rail and this modal agree exactly. The modal restates this preview — it
+  // must never recompute these differently.
+  const preview = useMemo(
+    () =>
+      computeOrderPreview({
+        amountMicro: amountMicro ?? 0n,
+        effectivePrice,
+        protocolFeeBps: betFeeBps,
+        relayGasMicro: relayGasFeeUSDC,
+        minBetMicro: minBet,
+      }),
+    [amountMicro, effectivePrice, betFeeBps, relayGasFeeUSDC, minBet],
+  )
+  const shares = preview.shares
+  const fee = preview.totalFeeMicro
+  const effectiveMinBet = preview.effectiveMinBetMicro
+  const belowMinShares = preview.belowMinShares
+  const belowMinBet = amountMicro !== null && preview.belowMin
 
   // FEE: the spent note must cover bet_amount + fee — the bet_auth circuit computes
   // new_balance = current_balance - bet_amount - fee and range-checks it to 64 bits, so a bet
@@ -216,6 +216,11 @@ export function BetModal({
     return ((combinableBalance - relayGasFeeUSDC) * 10_000n) / (10_000n + betFeeBps)
   }, [combinableBalance, relayGasFeeUSDC, betFeeBps])
   const exceedsBalance = amountMicro !== null && amountMicro > 0n && amountMicro > maxBettable
+  // Pre-disable known blockers in the edit phase instead of erroring at submit: a wallet with no
+  // spendable/combinable cash note can't bet (route them to deposit), and the bet fee can't be
+  // committed until the governance fee config loads.
+  const hasCash = combinableBalance > 0n
+  const feeReady = !!feeConfigData
 
   const submit = async () => {
     if (!address || !amountMicro || amountMicro <= 0n) return
@@ -473,11 +478,13 @@ export function BetModal({
       // generation timed out after 3 minutes"), point the user at a more capable
       // device instead of surfacing the raw timer message.
       const isTimeout = /timed out/i.test(message)
-      setError(
-        isTimeout
-          ? 'Proof generation is taking too long on this device. Try again on a more powerful device (desktop with more RAM).'
-          : message,
-      )
+      if (isTimeout) {
+        setError('Proof generation is taking too long on this device. Try again on a more powerful device (desktop with more RAM).')
+      } else {
+        // Humanize wallet/RPC/revert errors — a rejected signature reads neutrally, not as a hard failure.
+        const c = classifyTxError(err)
+        setError(`${c.title} — ${c.body}`)
+      }
       setPhase('error')
       log('bet_modal_error', { error: message, marketId, marketName })
     }
@@ -515,7 +522,7 @@ export function BetModal({
                 fill is reconciled automatically after the order executes. */}
             <KV
               l={orderKind === 'MARKET' ? 'Est. shares (after ~Polymarket fee)' : 'Estimated shares'}
-              v={`≈ ${((shares * (10_000n - BigInt(process.env.NEXT_PUBLIC_CLOB_TAKER_FEE_BPS ?? '0'))) / 10_000n).toString()}`}
+              v={`≈ ${(preview.sharesAfterTakerFee / 1_000_000n).toLocaleString()}`}
             />
             <KV
               l={`Protocol fee${betFeeBps > 0n ? ` (${(Number(betFeeBps) / 100).toFixed(2)}%)` : ''}`}
@@ -561,6 +568,16 @@ export function BetModal({
                 Polymarket minimum is 5 shares (this is {(Number(shares) / 1e6).toFixed(2)}). Bet ≈${(5 * effectivePrice).toFixed(2)}+ at this price.
               </div>
             )}
+            {!hasCash && (
+              <div className="small mt-1" style={{ color: 'var(--text-3)', fontSize: 11 }}>
+                You have no spendable cash balance to bet with. <Link href="/app/deposit" style={{ color: 'var(--cyan)' }}>Deposit USDC to bet →</Link>
+              </div>
+            )}
+            {hasCash && !feeReady && (
+              <div className="small mt-1" style={{ color: 'var(--text-3)', fontSize: 11 }}>
+                Loading fee schedule…
+              </div>
+            )}
           </div>
           {/* Order type is chosen on the market page; shown here read-only for confirmation. */}
           <div className="col gap-2">
@@ -581,7 +598,7 @@ export function BetModal({
             ) : (
               <div className="small" style={{ fontSize: 11, color: 'var(--text-3)' }}>
                 Fills immediately at the best available price for whatever size the book offers now. If it fills only
-                partially, reclaim the unfilled remainder of your stake afterward.
+                partially, the unfilled portion is returned to your balance automatically — no action needed.
               </div>
             )}
             <div className="small" style={{ fontSize: 11, color: 'var(--text-3)' }}>
@@ -604,9 +621,15 @@ export function BetModal({
           </label>
           <div className="row" style={{ justifyContent: 'space-between', gap: 12 }}>
             <button className="btn" onClick={closeSafely}>Cancel</button>
-            <button className="btn btn-primary" onClick={() => void submit()} disabled={!amountMicro || amountMicro <= 0n || belowMinBet || exceedsBalance || belowMinShares}>
-              Confirm Bet
-            </button>
+            {!hasCash ? (
+              <Link href="/app/deposit" className="btn btn-primary" style={{ textDecoration: 'none' }}>
+                Deposit USDC to bet
+              </Link>
+            ) : (
+              <button className="btn btn-primary" onClick={() => void submit()} disabled={!amountMicro || amountMicro <= 0n || belowMinBet || exceedsBalance || belowMinShares || !feeReady}>
+                Confirm Bet
+              </button>
+            )}
           </div>
         </div>
       )}

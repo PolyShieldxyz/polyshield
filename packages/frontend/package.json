@@ -7,7 +7,9 @@
     "build": "next build",
     "start": "next start",
     "lint": "next lint",
-    "test": "vitest run"
+    "test": "vitest run",
+    "ds:build": "node design-system/build.mjs",
+    "ds:check": "node design-system/build.mjs && git diff --exit-code -- design-system"
   },
   "dependencies": {
     "@radix-ui/react-checkbox": "^1.3.5",

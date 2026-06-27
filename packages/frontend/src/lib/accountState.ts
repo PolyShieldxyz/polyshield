@@ -3,9 +3,14 @@
 import { useEffect, useRef, useState, useCallback } from 'react'
 import { useBlockNumber, useDisconnect, usePublicClient } from 'wagmi'
 import { fetchPendingCredit, fetchMarketResolvedAt, fetchBetStatus, fetchAttestation, fetchBetRecord, BET_STATUS } from '@/lib/api'
+import { classifyReceipt } from '@/lib/betClassify'
 
 // FC-9 attestation reportType: a bet that actually filled has a FILLED (1) attestation.
 const REPORT_FILLED = 1
+// FC-9 attestation reportType: a position the operator has SOLD (close fill) carries a SOLD (4)
+// attestation whose proceeds (amountA) are reclaimable via a position_close credit proof.
+const REPORT_SOLD = 4
+const REPORT_PARTIAL = 3
 import {
   formatUsdc,
   getCashBalance,
@@ -43,6 +48,15 @@ export interface PortfolioState {
   totalDeposited: bigint
   totalWithdrawn: bigint
   totalPnL: bigint
+  // H4: capital that is recoverable RIGHT NOW but needs the user to submit a proof — it is
+  // already counted in totalBalance/totalOpenExposure but isn't spendable until reclaimed. Sum of
+  // (a) reclaimable stakes (FAILED-attested / unfilled-resolved orders → bet-cancel/cancel credit),
+  // (b) sold-but-not-credited proceeds (SOLD attestation → position-close credit), and
+  // (c) pending partial-fill refunds (PARTIAL attestation unfilled remainder → partial-fill credit).
+  // None of these are in cashBalance, so they don't double-count it. actionNeededCount is the number
+  // of receipts contributing.
+  actionNeededTotal: bigint
+  actionNeededCount: number
   depositHistory: WalletActivityEvent[]
   withdrawalHistory: WalletActivityEvent[]
   closedBetHistory: Array<WalletActivityEvent & { betAmount: bigint; pnl: bigint }>
@@ -141,6 +155,81 @@ async function buildReadyToSettle(receipts: Note[]): Promise<{ ready: ReadyToSet
   return { ready, lost, unfilledResolved }
 }
 
+/**
+ * H4: total capital that is recoverable now but needs a user-submitted proof, plus the count of
+ * receipts contributing. This sums the SAME receipts the portfolio's per-row Reclaim/Claim/Credit
+ * buttons key off — it invents no new on-chain logic, only reads the same status + attestation the
+ * page already reads (fetchBetStatus / fetchAttestation) and runs them through the shared
+ * classifyReceipt rulebook. Three addends, none of which are in cashBalance (so no double-count):
+ *   1. reclaimable stakes — a FAILED-attested order (bet-cancel credit) or an unfilled order whose
+ *      market already resolved (cancel credit); the full bet_amount is recoverable.
+ *   2. sold-but-not-credited proceeds — a SOLD attestation is present (position closed/sold) but the
+ *      close credit hasn't landed; the proceeds (amountA) are recoverable.
+ *   3. pending partial-fill refunds — a genuine PARTIAL attestation leaves bet_amount − spent as a
+ *      refundable remainder (partial-fill credit).
+ * Best-effort per receipt: an RPC failure for one receipt simply contributes 0 (never throws).
+ */
+async function buildActionNeeded(
+  receipts: Note[],
+  unfilledResolved: Note[],
+): Promise<{ total: bigint; count: number }> {
+  const unfilledIds = new Set(unfilledResolved.map((n) => n.id))
+  const per = await Promise.all(
+    receipts.map(async (receipt): Promise<bigint> => {
+      const n = (receipt.nullifier_of_bet ?? receipt.nullifier) as `0x${string}`
+      try {
+        let status = -1
+        try { status = await fetchBetStatus(VAULT_ADDRESS, n) } catch { /* leave -1 */ }
+        // A terminal on-chain status means the capital is already credited/settled and back in
+        // cashBalance — never count it as "action needed" (avoids double-counting a SOLD/FAILED
+        // attestation that lingers after its credit). Only ACTIVE/FILLED/PARTIAL_FILLED/RESTING/
+        // CLOSING positions can still be awaiting a user proof.
+        const terminal =
+          status === BET_STATUS.CREDITED ||
+          status === BET_STATUS.CANCELLED_CREDITED ||
+          status === BET_STATUS.CLOSED_CREDITED ||
+          status === BET_STATUS.FAILED
+        if (terminal) return 0n
+        // Sold-but-not-credited: a SOLD attestation means the position was closed/sold and its
+        // proceeds are reclaimable via the close credit (the credit hasn't landed — status isn't
+        // terminal). For a SOLD attestation amountB is the proceeds (micro-USDC) and amountA is
+        // sold_shares — matches finalizeClose.ts (Vault injects amountB as sell_proceeds).
+        const sold = await fetchAttestation(n, REPORT_SOLD)
+        if (sold) return BigInt(sold.amountB)
+        // Outcome attestation drives FAILED / PARTIAL only while the bet is still open on-chain.
+        let outcome = 0
+        let fill: { filled: bigint; spent: bigint } | undefined
+        if (status === BET_STATUS.ACTIVE || status === BET_STATUS.RESTING) {
+          const att = await fetchAttestation(n)
+          outcome = att ? att.reportType : 0
+          if (att && att.reportType === REPORT_PARTIAL) {
+            fill = { filled: BigInt(att.amountA), spent: BigInt(att.amountB) }
+          }
+        }
+        const betAmount = receipt.bet_amount ?? receipt.balance ?? 0n
+        const cls = classifyReceipt({ status, outcome, betAmount, fill })
+        // Reclaimable stake: a FAILED-attested order, or an unfilled order whose market resolved
+        // (surfaced by buildReadyToSettle). Either way the whole stake is recoverable.
+        if (cls.isFailed || unfilledIds.has(receipt.id)) return betAmount
+        // Pending partial-fill refund: the unfilled remainder (bet_amount − spent).
+        if (cls.isPartial && fill) {
+          const refund = betAmount > fill.spent ? betAmount - fill.spent : 0n
+          return refund
+        }
+        return 0n
+      } catch {
+        return 0n
+      }
+    }),
+  )
+  let total = 0n
+  let count = 0
+  for (const v of per) {
+    if (v > 0n) { total += v; count++ }
+  }
+  return { total, count }
+}
+
 export async function loadPortfolioState(wallet: `0x${string}`): Promise<PortfolioState> {
   // Chain-authoritative spent reconciliation: heal any local note whose nullifier is already spent
   // on-chain BEFORE computing balances/cash-note, so the displayed balance and the note selection
@@ -152,6 +241,8 @@ export async function loadPortfolioState(wallet: `0x${string}`): Promise<Portfol
   const openReceipts = getOpenBetReceipts(wallet)
   const activity = getWalletActivity(wallet)
   const { ready: readyToSettle, lost: lostBets, unfilledResolved } = await buildReadyToSettle(openReceipts)
+  // H4: how much of the displayed balance the user must submit a proof to recover.
+  const { total: actionNeededTotal, count: actionNeededCount } = await buildActionNeeded(openReceipts, unfilledResolved)
   // Exclude lost bets from "open" exposure — they're already shown in closed bets
   const lostBetIds = new Set(lostBets.map((n) => n.id))
   const totalOpenExposure = openReceipts
@@ -226,6 +317,8 @@ export async function loadPortfolioState(wallet: `0x${string}`): Promise<Portfol
     totalDeposited,
     totalWithdrawn,
     totalPnL,
+    actionNeededTotal,
+    actionNeededCount,
     depositHistory,
     withdrawalHistory,
     closedBetHistory,
@@ -387,12 +480,31 @@ export function useChainResetDetector(): boolean {
   return justReset
 }
 
-export function portfolioSummaryRows(state: PortfolioState): Array<[string, string, string]> {
+// A summary tile. `tone` colors the value: 'pos' green, 'neg' red, undefined neutral. When `tone`
+// is set the `value` must already carry its own sign + '$' in the right order (e.g. '+$5.00' /
+// '−$5.00'), since formatUsdc would otherwise put the minus INSIDE the dollar sign ('$-5.00').
+export interface PortfolioSummaryRow {
+  label: string
+  value: string
+  note: string
+  tone?: 'pos' | 'neg'
+}
+
+export function portfolioSummaryRows(state: PortfolioState): PortfolioSummaryRow[] {
+  // P&L: format the magnitude and prepend the sign OUTSIDE the '$' so a loss reads '−$50.00' (not
+  // '$-50.00'), matching the closed-bets table cell. Zero is shown neutral as '+$0.00' (no red).
+  const pnl = state.totalPnL
+  const pnlAbs = pnl >= 0n ? pnl : -pnl
   return [
-    ['Total balance', `$${formatUsdc(state.totalBalance)}`, 'Cash plus capital locked in open bets'],
-    ['Cash', `$${formatUsdc(state.cashBalance)}`, 'Available right now for a new bet or withdrawal'],
-    ['Deposited', `$${formatUsdc(state.totalDeposited)}`, 'Cumulative USDC put into the vault'],
-    ['Withdrawn', `$${formatUsdc(state.totalWithdrawn)}`, 'Cumulative USDC sent back to your wallet'],
-    ['P&L', `$${formatUsdc(state.totalPnL)}`, 'Settled gains minus losses'],
+    { label: 'Total balance', value: `$${formatUsdc(state.totalBalance)}`, note: 'Cash plus capital locked in open bets' },
+    { label: 'Cash', value: `$${formatUsdc(state.cashBalance)}`, note: 'Available right now for a new bet or withdrawal' },
+    { label: 'Deposited', value: `$${formatUsdc(state.totalDeposited)}`, note: 'Cumulative USDC put into the vault' },
+    { label: 'Withdrawn', value: `$${formatUsdc(state.totalWithdrawn)}`, note: 'Cumulative USDC sent back to your wallet' },
+    {
+      label: 'P&L',
+      value: `${pnl >= 0n ? '+' : '−'}$${formatUsdc(pnlAbs)}`,
+      note: 'Settled gains minus losses',
+      tone: pnl >= 0n ? 'pos' : 'neg',
+    },
   ]
 }

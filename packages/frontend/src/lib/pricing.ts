@@ -115,3 +115,112 @@ export function marketBuyCeilingFromBook(
   const snapped = ceilToTick(padded, t)
   return clean(Math.min(1 - t, Math.max(t, snapped)))
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Shared order preview (C4) — ONE source of truth for the share/fee/min numbers.
+//
+// The rail (market/[id]/page.tsx) and the confirm modal (BetModal.tsx) used to
+// compute these independently and disagree: the rail showed `floor(amount/price)`
+// "Minimum shares" with no taker-fee note, while the modal showed
+// `shares*(10000-takerFee)/10000` "after ~Polymarket fee", and the ~$1.25
+// min-bet floor was enforced only in the modal. Both surfaces now derive every
+// displayed number from `computeOrderPreview` so they are IDENTICAL, and the rail
+// can surface the same min-bet floor before the user pays for a proof.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** Polymarket's per-order taker fee (bps), reserved from the stake before sizing.
+ *  Inlined from NEXT_PUBLIC_CLOB_TAKER_FEE_BPS at build time; 0 → no net reduction. */
+export const CLOB_TAKER_FEE_BPS =
+  BigInt(process.env.NEXT_PUBLIC_CLOB_TAKER_FEE_BPS ?? '0')
+
+// Polymarket enforces a $1 minimum ORDER NOTIONAL, and the signing layer reserves
+// the per-market taker fee out of the stake BEFORE sizing the order — so a $1 bet
+// sizes a sub-$1 order the CLOB rejects. Require enough headroom that the post-fee
+// order clears $1 even at a generous (~20%) taker-fee assumption (~$1.25 floor).
+// This sits ON TOP of the on-chain governance minBet.
+const POLY_MIN_ORDER_USDC = 1_000_000n
+const ORDER_FEE_HEADROOM_BPS = 2_000n // assume up to 20% taker-fee reserve (real ≈ 1–7%)
+const POLY_MIN_ORDER_BET = (POLY_MIN_ORDER_USDC * 10_000n) / (10_000n - ORDER_FEE_HEADROOM_BPS)
+
+// Polymarket rejects orders below 5 shares ("Size lower than the minimum: 5").
+// shares is 1e6-scaled, so the floor is 5e6.
+export const MIN_SHARES = 5_000_000n
+
+export interface OrderPreviewInput {
+  /** Bet stake in micro-USDC. */
+  amountMicro: bigint
+  /** Committed execution price (human units, e.g. 0.62). For a Market BUY this is the
+   *  walk-the-book ceiling; for a Limit order the tick-snapped limit price. */
+  effectivePrice: number
+  /** Protocol fee rate (bps), from the Vault feeConfig. */
+  protocolFeeBps: bigint
+  /** Flat relay-gas fee in micro-USDC, from the Vault feeConfig. */
+  relayGasMicro: bigint
+  /** Polymarket taker fee (bps); defaults to CLOB_TAKER_FEE_BPS. */
+  takerFeeBps?: bigint
+  /** On-chain governance minimum bet in micro-USDC. The effective floor is the max
+   *  of this and the Polymarket post-fee order floor (~$1.25). */
+  minBetMicro: bigint
+}
+
+export interface OrderPreview {
+  /** Fee-naive committed share cap (bet_amount / price), 1e6-scaled. */
+  shares: bigint
+  /** Estimated shares after the Polymarket taker fee comes out of the stake, 1e6-scaled. */
+  sharesAfterTakerFee: bigint
+  /** Protocol fee in micro-USDC (bet_amount * protocolFeeBps / 10000). */
+  protocolFeeMicro: bigint
+  /** Flat relay-gas fee in micro-USDC. */
+  relayFeeMicro: bigint
+  /** Vault-injected total fee (protocol + relay), in micro-USDC. Matches the bet_auth circuit. */
+  totalFeeMicro: bigint
+  /** amount + total fee, in micro-USDC — what leaves the note. */
+  totalDeductedMicro: bigint
+  /** True when the stake is below the effective minimum bet. */
+  belowMin: boolean
+  /** The effective minimum bet (max of governance minBet and the ~$1.25 order floor). */
+  effectiveMinBetMicro: bigint
+  /** True when the committed shares fall below Polymarket's 5-share minimum. */
+  belowMinShares: boolean
+}
+
+/**
+ * Single shared order-preview calculator. Both the rail and the modal MUST render
+ * from this so the share/fee/min numbers are identical. The modal RESTATES this
+ * preview; it must not recompute the numbers differently.
+ */
+export function computeOrderPreview(input: OrderPreviewInput): OrderPreview {
+  const {
+    amountMicro,
+    effectivePrice,
+    protocolFeeBps,
+    relayGasMicro,
+    takerFeeBps = CLOB_TAKER_FEE_BPS,
+    minBetMicro,
+  } = input
+
+  const effectiveMinBetMicro = minBetMicro > POLY_MIN_ORDER_BET ? minBetMicro : POLY_MIN_ORDER_BET
+
+  const positive = amountMicro > 0n
+  const shares =
+    positive && effectivePrice > 0
+      ? (amountMicro * 100_000_000n) / BigInt(Math.round(effectivePrice * 100_000_000))
+      : 0n
+  const sharesAfterTakerFee = (shares * (10_000n - takerFeeBps)) / 10_000n
+
+  const protocolFeeMicro = positive ? (amountMicro * protocolFeeBps) / 10_000n : 0n
+  const relayFeeMicro = positive ? relayGasMicro : 0n
+  const totalFeeMicro = protocolFeeMicro + relayFeeMicro
+
+  return {
+    shares,
+    sharesAfterTakerFee,
+    protocolFeeMicro,
+    relayFeeMicro,
+    totalFeeMicro,
+    totalDeductedMicro: amountMicro + totalFeeMicro,
+    belowMin: positive && amountMicro < effectiveMinBetMicro,
+    effectiveMinBetMicro,
+    belowMinShares: shares > 0n && shares < MIN_SHARES,
+  }
+}

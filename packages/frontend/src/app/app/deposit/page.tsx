@@ -16,6 +16,10 @@ import {
 import { getNoteSecret } from '@/lib/secretSession'
 import { fetchSpentNullifiers } from '@/lib/api'
 import { generateProofInWorker } from '@/lib/prover'
+import { classifyTxError } from '@/lib/txError'
+import { setMoneyOpInFlight, clearMoneyOpInFlight } from '@/lib/inFlightGuard'
+import { markDepositSubmitted, clearDepositMarker, getDepositMarkers } from '@/lib/depositMarker'
+import Link from 'next/link'
 
 const IS_DEV = process.env.NEXT_PUBLIC_DEV_MODE === 'true'
 const VAULT_ADDRESS = (process.env.NEXT_PUBLIC_VAULT_ADDRESS ?? '0x0000000000000000000000000000000000000000') as `0x${string}`
@@ -72,6 +76,7 @@ function MerkleInsertionVisual({ pct }: { pct: number }) {
 function Step0({
   amount, setAmount, onNext, deriving,
   usdcBalance, mintUsdc, minting, remainingCap,
+  balanceResolved, capResolved,
 }: {
   amount: number
   setAmount: (v: number) => void
@@ -82,9 +87,13 @@ function Step0({
   minting: boolean
   // Dollars remaining under the $50k per-address cumulative cap (50,000 minus prior deposits).
   remainingCap: number
+  // Have the on-chain reads resolved? Until then we must NOT present defaulted 0n as real money.
+  balanceResolved: boolean
+  capResolved: boolean
 }) {
   const balanceFormatted = (Number(usdcBalance) / 1e6).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })
-  const insufficient = usdcBalance < parseUnits(String(amount), 6)
+  // Don't flag "insufficient" against a balance we haven't actually read yet (defaulted 0n).
+  const insufficient = balanceResolved && usdcBalance < parseUnits(String(amount), 6)
   const belowMin = amount > 0 && amount < MIN_DEPOSIT
   // T20/cap: block before the signature+proof+gas instead of letting deposit() revert on-chain.
   const capReached = remainingCap <= 0
@@ -106,11 +115,13 @@ function Step0({
               <button
                 type="button"
                 className="small"
-                style={{ fontSize: 11, color: 'var(--text-3)', background: 'none', border: 'none', cursor: 'pointer', padding: 0 }}
-                onClick={() => setAmount(Math.floor(Number(usdcBalance) / 1e6))}
+                style={{ fontSize: 11, color: 'var(--text-3)', background: 'none', border: 'none', cursor: balanceResolved ? 'pointer' : 'default', padding: 0 }}
+                onClick={() => { if (balanceResolved) setAmount(Math.floor(Number(usdcBalance) / 1e6)) }}
+                disabled={!balanceResolved}
                 title="Use full wallet balance"
               >
-                Wallet: ${balanceFormatted} USDC.e
+                {/* Loading vs real $0: never render a defaulted 0n as a real "$0.00". */}
+                Wallet: {balanceResolved ? `$${balanceFormatted}` : '—'} USDC.e
               </button>
               {IS_DEV && (
                 <button className="btn btn-sm" style={{ fontSize: 10, padding: '3px 8px' }} onClick={mintUsdc} disabled={minting}>
@@ -134,7 +145,11 @@ function Step0({
             <div className="small mt-1" style={{ fontSize: 11, color: 'var(--red)' }}>Insufficient USDC balance{IS_DEV && ' — click "+ Get test USDC" above'}</div>
           )}
           {/* Cap: surface the remaining capacity BEFORE the user proves/pays, never via a revert. */}
-          {capReached ? (
+          {!capResolved ? (
+            <div className="small mt-1" style={{ fontSize: 11, color: 'var(--text-3)' }}>
+              Remaining deposit capacity: — of $50,000
+            </div>
+          ) : capReached ? (
             <div className="small mt-1" style={{ fontSize: 11, color: 'var(--red)' }}>
               You&apos;ve reached the $50,000 per-address deposit cap. Withdraw before depositing more.
             </div>
@@ -149,7 +164,7 @@ function Step0({
           )}
           <div className="row mt-2 gap-2">
             {[5000, 10000, 25000, 50000].map((v) => {
-              const disabled = v > remainingCap
+              const disabled = capResolved && v > remainingCap
               return (
                 <button
                   key={v}
@@ -170,7 +185,7 @@ function Step0({
         <div className="micro">SUMMARY</div>
         <div className="panel mt-3" style={{ padding: 20 }}>
           <KV l="Amount" v={`$${amount.toLocaleString()} USDC`} />
-          <KV l="Remaining cap" v={`$${remainingCap.toLocaleString()} of $50,000`} />
+          <KV l="Remaining cap" v={capResolved ? `$${remainingCap.toLocaleString()} of $50,000` : '— of $50,000'} />
           <KV l="Vault" v={VAULT_ADDRESS ? short(VAULT_ADDRESS) : '(not connected)'} />
           <KV l="Network fee" v="~$0.04 (Polygon)" />
           <KV l="PolyShield fee" v="$0.00" />
@@ -180,7 +195,7 @@ function Step0({
             className="btn btn-primary mt-4"
             style={{ width: '100%', justifyContent: 'center', padding: '14px 0', fontSize: 13 }}
             onClick={onNext}
-            disabled={amount < MIN_DEPOSIT || insufficient || deriving || overCap || capReached}
+            disabled={amount < MIN_DEPOSIT || insufficient || deriving || overCap || capReached || !balanceResolved}
           >
             {deriving ? 'Signing…' : <>Sign to derive key <Icon d={ICONS.arrow} size={12} /></>}
           </button>
@@ -207,7 +222,7 @@ function Step1({
   setPhase: (p: TxPhase) => void
   approveTx: string | undefined
   depositTx: string | undefined
-  txError: string | null
+  txError: ReturnType<typeof classifyTxError> | null
   doApprove: () => void | Promise<void>
   doDeposit: () => void | Promise<void>
   doProve: () => void | Promise<void>
@@ -262,12 +277,21 @@ function Step1({
         <p className="body mt-3">{inProof
           ? 'A zero-knowledge proof binds your hidden balance to the deposited amount. It runs entirely in your browser — your secret never leaves this device. The first time, the proving key downloads (cached afterwards).'
           : 'The commitment hash is appended to the vault’s Merkle tree. Deposit amount is public; your balance details are not.'}</p>
-        {txError && (
-          <div className="panel mt-3" style={{ padding: 14, borderColor: 'var(--red)', background: 'oklch(0.70 0.18 25 / 0.06)' }}>
-            <div className="small" style={{ color: 'var(--red)', fontSize: 12 }}>{inProof ? 'Proof generation failed' : 'Transaction failed'}: {txError}</div>
-            <button className="btn btn-sm mt-2" onClick={() => void (phase === 'prove' ? doProve() : phase === 'approve' || phase === 'wait-approve' ? doApprove() : doDeposit())}>Retry</button>
-          </div>
-        )}
+        {txError && (() => {
+          // Calm (neutral) for a wallet cancellation; red only when something actually failed.
+          const isErr = txError.tone === 'error'
+          return (
+            <div className="panel mt-3" style={{ padding: 14, borderColor: isErr ? 'var(--red)' : 'var(--line-strong)', background: isErr ? 'oklch(0.70 0.18 25 / 0.06)' : 'transparent' }}>
+              <div className="small" style={{ color: isErr ? 'var(--red)' : 'var(--text-2)', fontSize: 12 }}>
+                <strong>{txError.title}</strong> — {txError.body}
+              </div>
+              {/* raw provider string kept available for a "details" disclosure if ever surfaced */}
+              {txError.retry && (
+                <button className="btn btn-sm mt-2" onClick={() => void (phase === 'prove' ? doProve() : phase === 'approve' || phase === 'wait-approve' ? doApprove() : doDeposit())}>Retry</button>
+              )}
+            </div>
+          )
+        })()}
         <div className="panel mt-4" style={{ padding: 20 }}>
           <div className="row" style={{ justifyContent: 'space-between' }}>
             <span className="mono" style={{ fontSize: 12, color: 'var(--cyan)' }}>{statusLabel}</span>
@@ -336,6 +360,11 @@ function Step2({ amount, commitment, txHash, onDone }: { amount: number; commitm
         </div>
         <div className="row gap-3 mt-6">
           <button className="btn btn-primary" onClick={onDone}>Back to portfolio <Icon d={ICONS.arrow} size={12} /></button>
+          {/* C3: explicit recovery path. If the local note ever drifts from chain (e.g. the tab was
+              closed mid-flow on a prior attempt), Restore re-derives + re-syncs notes from chain. */}
+          <Link href="/app/portfolio" className="btn btn-ghost" style={{ textDecoration: 'none' }}>
+            Restore from chain
+          </Link>
         </div>
       </div>
       <div>
@@ -389,32 +418,41 @@ export default function DepositPage() {
   const [phase, setPhase]         = useState<TxPhase>('prove')
   const [approveTx, setApproveTx] = useState<string | undefined>()
   const [depositTx, setDepositTx] = useState<string | undefined>()
-  const [txError, setTxError]     = useState<string | null>(null)
+  // Classified (humanized) error for the active step — drives calm vs red copy + the a11y announce.
+  const [txError, setTxError]     = useState<ReturnType<typeof classifyTxError> | null>(null)
   const [finalTxHash, setFinalTxHash] = useState('')
   // Deposit-proof generation progress (the first tracked step). proofPct drives the bar; provingPhase
   // distinguishes the proving-key download from snarkjs crunching for the status label.
   const [proofPct, setProofPct]         = useState(0)
   const [provingPhase, setProvingPhase] = useState<'download' | 'prove' | null>(null)
+  // Reload-resilience: a leftover deposit marker means a prior deposit may not have finished its local
+  // note-cache update (tab closed / wallet flapped between submit and addNote). Non-alarming hint.
+  const [staleDeposit, setStaleDeposit] = useState(false)
 
   const amountMicro = parseUnits(String(amount), 6)
 
   // ── USDC balance ──────────────────────────────────────────────────────────
-  const { data: usdcBalance = 0n } = useReadContract({
+  // Track resolution (isSuccess) so the UI never renders a defaulted 0n as a real "$0.00":
+  // while the read is in flight we show a placeholder and hold the Confirm button. A connected
+  // wallet with no pending read (enabled:false until `address` exists) counts as unresolved too.
+  const { data: usdcBalance = 0n, isSuccess: balanceLoaded } = useReadContract({
     address: USDC_ADDRESS,
     abi: USDC_ABI,
     functionName: 'balanceOf',
     args: [address ?? '0x0000000000000000000000000000000000000000'],
     query: { enabled: !!address },
   })
+  const balanceResolved = !!address && balanceLoaded
 
   // ── Per-address deposit cap (cumulative, on-chain) ─────────────────────────
-  const { data: cumulativeDeposited = 0n } = useReadContract({
+  const { data: cumulativeDeposited = 0n, isSuccess: capLoaded } = useReadContract({
     address: VAULT_ADDRESS,
     abi: VAULT_ABI,
     functionName: 'cumulativeDeposits',
     args: [address ?? '0x0000000000000000000000000000000000000000'],
     query: { enabled: !!address && VAULT_ADDRESS !== '0x0000000000000000000000000000000000000000' },
   })
+  const capResolved = !!address && capLoaded
   const remainingCapMicro =
     (cumulativeDeposited as bigint) >= DEPOSIT_CAP_MICRO ? 0n : DEPOSIT_CAP_MICRO - (cumulativeDeposited as bigint)
   const remainingCap = Number(remainingCapMicro) / 1e6
@@ -442,7 +480,7 @@ export default function DepositPage() {
 
   // ── Vault deposit ─────────────────────────────────────────────────────────
   const { writeContract: writeDeposit, data: depositTxHash, error: depositError } = useWriteContract()
-  const { isSuccess: depositConfirmed, isError: depositReverted } = useWaitForTransactionReceipt({ hash: depositTxHash })
+  const { isSuccess: depositConfirmed, isError: depositReverted, error: depositReceiptError } = useWaitForTransactionReceipt({ hash: depositTxHash })
   // Guard against React Strict Mode double-invoking the deposit effect.
   const depositSubmittedRef = useRef(false)
   // FC-2: the mandatory deposit binding proof, generated client-side in the track's proof step
@@ -497,6 +535,9 @@ export default function DepositPage() {
       // The addNote above already updated the in-memory cache + persisted (encrypted) and fired the
       // notes-changed event, so the portfolio refreshes without a cache invalidation here.
       depositSecretRef.current = null // note saved — drop the in-memory secret
+      // Note is persisted + index recorded — clear the recovery breadcrumb and the in-flight flag.
+      clearDepositMarker(address, commitment)
+      clearMoneyOpInFlight()
       setFinalTxHash(depositTxHash)
       setPhase('done')
       setStep(2)
@@ -509,22 +550,66 @@ export default function DepositPage() {
   }, [depositConfirmed])
 
   useEffect(() => {
-    if (approveError) { setTxError(approveError.message.split('\n')[0]); setPhase('approve') }
+    if (approveError) {
+      // Humanize: a rejected approval reads as a calm "Cancelled in your wallet", not a red failure.
+      const c = classifyTxError(approveError)
+      setTxError(c); setPhase('approve')
+      // No USDC has moved yet (approval failed before the deposit tx). Release the in-flight flag so a
+      // disconnect during the paused step performs normal hygiene; the user can re-approve to resume.
+      clearMoneyOpInFlight()
+    }
   }, [approveError])
 
   useEffect(() => {
     if (depositError) {
-      setTxError(depositError.message.split('\n')[0])
+      setTxError(classifyTxError(depositError))
       depositSubmittedRef.current = false // allow retry
+      // A deposit write error before broadcast means no funds left the wallet (the marker is only
+      // written once we're about to submit, and is cleared on save) — release the flag.
+      clearMoneyOpInFlight()
     }
   }, [depositError])
 
   useEffect(() => {
     if (depositReverted) {
-      setTxError('Deposit transaction reverted on-chain. Check your deposit cap or retry.')
+      // H10: a confirmed on-chain revert. NEVER guess the cause — the prior copy seeded a literal
+      // "deposit cap" string, which made classifyTxError match its cap rule and wrongly tell the user
+      // to lower a valid amount even when the real cause was InvalidProof / allowance / paused.
+      // Pass the REAL error object (the receipt-wait error often carries a decoded revert reason);
+      // if it has no usable reason, fall back to a neutral, cause-free message that names nothing.
+      const real = depositReceiptError
+      const hasReason = real instanceof Error && (real.message?.trim().length ?? 0) > 0
+      setTxError(
+        hasReason
+          ? classifyTxError(real)
+          : classifyTxError('Deposit reverted on-chain — Restore from your Portfolio and retry, or contact support.'),
+      )
       depositSubmittedRef.current = false // allow retry
+      clearMoneyOpInFlight() // the in-flight phase has terminated (reverted)
     }
-  }, [depositReverted])
+  }, [depositReverted, depositReceiptError])
+
+  // Reload resilience: surface a one-line hint if a prior deposit left a pending marker for this
+  // wallet (it may not have finished syncing locally). We do NOT auto-reconcile — Restore handles that.
+  useEffect(() => {
+    if (!address) { setStaleDeposit(false); return }
+    setStaleDeposit(getDepositMarkers(address).length > 0)
+  }, [address])
+
+  // C3 (money-loss prevention): while the deposit is in-flight (proof generation through on-chain
+  // confirmation), warn before a refresh/close so the user doesn't kill the flow after the USDC has
+  // left the wallet but before the note is persisted. Mirrors the withdraw page's beforeunload guard.
+  useEffect(() => {
+    if (typeof window === 'undefined') return
+    const inFlight = step === 1 && phase !== 'done'
+    if (!inFlight) return
+    const handler = (e: BeforeUnloadEvent) => {
+      e.preventDefault()
+      e.returnValue = ''
+    }
+    window.addEventListener('beforeunload', handler)
+    return () => window.removeEventListener('beforeunload', handler)
+  }, [step, phase])
 
   // ── Handlers ──────────────────────────────────────────────────────────────
 
@@ -562,11 +647,15 @@ export default function DepositPage() {
       setProofPct(0); setProvingPhase('download')
       setTxError(null)
       depositSubmittedRef.current = false // reset for fresh attempt
+      // C3/H7: mark a money op in flight so a wallet flap / account switch during the deposit doesn't
+      // trigger WalletConnect's destructive wipe (which would destroy the just-derived note's
+      // deposit-index counter + encrypted cache before the note is persisted). Cleared on done/abort.
+      setMoneyOpInFlight()
+      setStaleDeposit(false)
       setPhase('prove')
       setStep(1)
     } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err)
-      setTxError(msg.split('\n')[0])
+      setTxError(classifyTxError(err))
       console.error('[deposit] deriveSecret failed:', err)
     } finally {
       setDeriving(false)
@@ -580,7 +669,7 @@ export default function DepositPage() {
     if (provingRef.current || depositProofRef.current) return
     const secret = depositSecretRef.current
     if (!secret || !address) {
-      setTxError('Deposit secret unavailable — please restart the deposit.')
+      setTxError(classifyTxError('Deposit secret unavailable — please restart the deposit.'))
       return
     }
     provingRef.current = true
@@ -611,8 +700,7 @@ export default function DepositPage() {
         void doApprove()
       }
     } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err)
-      setTxError(msg.split('\n')[0])
+      setTxError(classifyTxError(err))
       setProvingPhase(null)
       console.error('[deposit] proof generation failed:', err)
     } finally {
@@ -655,10 +743,21 @@ export default function DepositPage() {
   async function doDeposit() {
     if (depositSubmittedRef.current) return
     if (!depositProofRef.current) {
-      setTxError('Deposit binding proof missing. Please restart the deposit.')
+      setTxError(classifyTxError('Deposit binding proof missing. Please restart the deposit.'))
       return
     }
     depositSubmittedRef.current = true // set synchronously before any await
+    // C3 (reload/crash resilience): record a recovery breadcrumb JUST BEFORE submit so a tab close /
+    // wallet flap between the on-chain tx and the local addNote can be detected on next mount (PUBLIC
+    // data only — commitment + deposit index + amount, no secret). Cleared once the note is saved.
+    if (address) {
+      markDepositSubmitted(address, {
+        commitment,
+        depositIndex,
+        amountMicro: amountMicro.toString(),
+        submittedAt: Date.now(),
+      })
+    }
     writeDeposit({
       address: VAULT_ADDRESS,
       abi: VAULT_ABI,
@@ -677,7 +776,7 @@ export default function DepositPage() {
   // WCAG 4.1.3 — announce the multi-step deposit (proof → approve → deposit → done) and any
   // failure to assistive tech; the long proof/tx steps are otherwise silent.
   const depositAnnounce = txError
-    ? `Deposit error: ${txError}`
+    ? `${txError.title}: ${txError.body}`
     : step === 2
       ? 'Deposit complete. You are in the pool.'
       : step === 1
@@ -699,12 +798,19 @@ export default function DepositPage() {
       step={step}
       onBack={() => router.push('/app/vault')}
     >
-      <LiveRegion message={depositAnnounce} assertive={!!txError} />
+      <LiveRegion message={depositAnnounce} assertive={txError?.tone === 'error'} />
+      {staleDeposit && step === 0 && (
+        <div className="small" style={{ fontSize: 11, color: 'var(--text-2)', marginBottom: 12 }}>
+          A previous deposit may not have finished syncing locally — if your balance looks off, tap{' '}
+          <Link href="/app/portfolio" style={{ color: 'var(--cyan)' }}>Restore on the Portfolio</Link>.
+        </div>
+      )}
       {step === 0 && (
         <Step0
           amount={amount} setAmount={setAmount} onNext={handleDeriveAndDeposit} deriving={deriving}
           usdcBalance={usdcBalance as bigint} mintUsdc={mintUsdc} minting={minting}
           remainingCap={remainingCap}
+          balanceResolved={balanceResolved} capResolved={capResolved}
         />
       )}
       {step === 1 && (

@@ -3,9 +3,11 @@
 import Link from 'next/link'
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { useQuery, keepPreviousData } from '@tanstack/react-query'
+import { useAccount } from 'wagmi'
 import { Icon, ICONS } from '@/components/ui/Icon'
 import { Sparkline } from '@/components/ui/Sparkline'
 import { type MarketEntry } from '@/lib/marketsData'
+import { usePortfolioState } from '@/lib/accountState'
 import { track } from '@/lib/analytics'
 
 const CATEGORIES = ['ALL', 'POLITICS', 'CRYPTO', 'MACRO', 'COMMODITIES', 'TECH', 'GEO', 'SPORTS', 'CULTURE', 'WEATHER', 'OTHER']
@@ -32,12 +34,15 @@ function MarketCard({ market }: { market: MarketEntry }) {
   const pct = market.yes * 100
   const [yesLabel, noLabel] = sideLabels(market)
   return (
-    <Link
-      href={`/app/market/${market.id}`}
-      onClick={() => track([{ scope: 'market_view', key: market.id }])}
-      style={{ textDecoration: 'none' }}
-    >
-      <div className="panel market-card" style={{ padding: 0, overflow: 'hidden', cursor: 'pointer' }}>
+    // Card body and YES/NO actions are SIBLINGS — never nest a <button>/action <Link>
+    // inside the card <Link> (invalid HTML + dead controls). The body links to the
+    // market; YES/NO deep-link straight into the bet modal (mirrors the list view).
+    <div className="panel market-card" style={{ padding: 0, overflow: 'hidden' }}>
+      <Link
+        href={`/app/market/${market.id}`}
+        onClick={() => track([{ scope: 'market_view', key: market.id }])}
+        style={{ textDecoration: 'none', display: 'block', cursor: 'pointer' }}
+      >
         <div style={{ padding: '16px 18px 12px' }}>
           <div className="row" style={{ justifyContent: 'space-between', marginBottom: 10 }}>
             <span className="pill pill-soft" style={{ fontSize: 9 }}>{market.cat}</span>
@@ -71,19 +76,31 @@ function MarketCard({ market }: { market: MarketEntry }) {
             <div style={{ height: 3, width: `${pct}%`, background: 'var(--green)', borderRadius: 2 }} />
           </div>
         </div>
-        <div className="row hairline-t" style={{ padding: '10px 18px', justifyContent: 'space-between' }}>
-          <span className="small" style={{ fontSize: 11 }}>{fmtVol(market.vol)} vol</span>
-          <div className="row gap-2">
-            <button className="btn btn-sm" style={{ padding: '4px 10px', fontSize: 11, background: 'oklch(0.78 0.16 152 / 0.08)', borderColor: 'oklch(0.78 0.16 152 / 0.3)', color: 'var(--green)' }}>
-              {yesLabel}
-            </button>
-            <button className="btn btn-sm" style={{ padding: '4px 10px', fontSize: 11, background: 'oklch(0.70 0.18 25 / 0.08)', borderColor: 'oklch(0.70 0.18 25 / 0.3)', color: 'var(--red)' }}>
-              {noLabel}
-            </button>
-          </div>
+      </Link>
+      <div className="row hairline-t" style={{ padding: '10px 18px', justifyContent: 'space-between' }}>
+        <span className="small" style={{ fontSize: 11 }}>{fmtVol(market.vol)} vol</span>
+        <div className="row gap-2">
+          <Link
+            href={`/app/market/${market.id}?modal=bet&side=YES`}
+            onClick={() => track([{ scope: 'market_view', key: market.id }])}
+            aria-label={`Bet ${yesLabel} on ${market.name}`}
+            className="btn btn-sm"
+            style={{ padding: '6px 12px', fontSize: 12, background: 'oklch(0.78 0.16 152 / 0.08)', borderColor: 'oklch(0.78 0.16 152 / 0.3)', color: 'var(--green)' }}
+          >
+            {yesLabel}
+          </Link>
+          <Link
+            href={`/app/market/${market.id}?modal=bet&side=NO`}
+            onClick={() => track([{ scope: 'market_view', key: market.id }])}
+            aria-label={`Bet ${noLabel} on ${market.name}`}
+            className="btn btn-sm"
+            style={{ padding: '6px 12px', fontSize: 12, background: 'oklch(0.70 0.18 25 / 0.08)', borderColor: 'oklch(0.70 0.18 25 / 0.3)', color: 'var(--red)' }}
+          >
+            {noLabel}
+          </Link>
         </div>
       </div>
-    </Link>
+    </div>
   )
 }
 
@@ -109,10 +126,10 @@ function MarketListRow({ market }: { market: MarketEntry }) {
       <td><Sparkline data={market.trend} width={80} height={20} color={market.delta >= 0 ? 'var(--green)' : 'var(--red)'} /></td>
       <td>
         <div className="row gap-1">
-          <Link href={`/app/market/${market.id}?modal=bet&side=YES`} onClick={() => track([{ scope: 'market_view', key: market.id }])} className="btn btn-sm" style={{ padding: '4px 8px', fontSize: 10, background: 'oklch(0.78 0.16 152 / 0.08)', borderColor: 'oklch(0.78 0.16 152 / 0.3)', color: 'var(--green)' }}>
+          <Link href={`/app/market/${market.id}?modal=bet&side=YES`} onClick={() => track([{ scope: 'market_view', key: market.id }])} aria-label={`Bet ${yesLabel} on ${market.name}`} className="btn btn-sm" style={{ padding: '6px 12px', fontSize: 12, background: 'oklch(0.78 0.16 152 / 0.08)', borderColor: 'oklch(0.78 0.16 152 / 0.3)', color: 'var(--green)' }}>
             {yesLabel}
           </Link>
-          <Link href={`/app/market/${market.id}?modal=bet&side=NO`} onClick={() => track([{ scope: 'market_view', key: market.id }])} className="btn btn-sm" style={{ padding: '4px 8px', fontSize: 10, background: 'oklch(0.70 0.18 25 / 0.08)', borderColor: 'oklch(0.70 0.18 25 / 0.3)', color: 'var(--red)' }}>
+          <Link href={`/app/market/${market.id}?modal=bet&side=NO`} onClick={() => track([{ scope: 'market_view', key: market.id }])} aria-label={`Bet ${noLabel} on ${market.name}`} className="btn btn-sm" style={{ padding: '6px 12px', fontSize: 12, background: 'oklch(0.70 0.18 25 / 0.08)', borderColor: 'oklch(0.70 0.18 25 / 0.3)', color: 'var(--red)' }}>
             {noLabel}
           </Link>
         </div>
@@ -131,6 +148,13 @@ export default function MarketsPage() {
   const [view, setView] = useState<'grid' | 'list'>('grid')
   const [search, setSearch] = useState('')
   const [limit, setLimit] = useState(PAGE)
+
+  // Funnel nudge: a connected user with zero spendable cash hasn't deposited yet —
+  // surface a deposit prompt here instead of letting them dead-end in the bet modal.
+  // Gated on resolved state so it never flashes during the portfolio load.
+  const { address, isConnected } = useAccount()
+  const { state: portfolio, loading: portfolioLoading } = usePortfolioState(address)
+  const showDepositNudge = isConnected && !portfolioLoading && portfolio != null && portfolio.cashBalance === 0n
 
   // ── Catalog browse (slow set; cached server-side). keepPreviousData = no flicker on refetch. ──
   const { data, isLoading, isError, isFetching, refetch } = useQuery<MarketsResponse>({
@@ -264,13 +288,18 @@ export default function MarketsPage() {
       </div>
 
       <div style={{ padding: 24 }}>
+        {showDepositNudge && (
+          <div className="panel callout row" style={{ padding: '10px 14px', marginBottom: 16, justifyContent: 'space-between', gap: 12, flexWrap: 'wrap' }}>
+            <span className="small">New here? Deposit USDC into the shared vault to place your first private bet.</span>
+            <Link href="/app/deposit" className="btn btn-sm btn-cyan" style={{ textDecoration: 'none' }}>Deposit USDC</Link>
+          </div>
+        )}
         <div className="row gap-2" style={{ marginBottom: 16, flexWrap: 'wrap' }}>
           {CATEGORIES.map((value) => (
             <button
               key={value}
               onClick={() => { setCategory(value); setLimit(PAGE); if (value !== 'ALL') track([{ scope: 'category_click', key: value }]) }}
               className={`btn btn-sm ${category === value ? 'btn-cyan' : ''}`}
-              style={{ fontSize: 11 }}
             >
               {value}
             </button>
@@ -278,6 +307,7 @@ export default function MarketsPage() {
           <div style={{ flex: 1 }} />
           <select
             value={sort}
+            aria-label="Sort markets"
             onChange={(event) => { setSort(event.target.value); track([{ scope: 'sort_change', key: event.target.value }]) }}
             style={{ background: 'var(--surface)', border: '1px solid var(--line-strong)', borderRadius: 6, color: 'var(--text)', fontFamily: 'var(--mono)', fontSize: 12, padding: '6px 10px' }}
           >

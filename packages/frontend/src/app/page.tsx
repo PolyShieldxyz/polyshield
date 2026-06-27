@@ -108,18 +108,20 @@ function HeroVisual() {
 
 /* ---------- Live vault tape ---------- */
 function HeroTape() {
+  // H2: illustrative placeholders only — no concrete dollar/CREDIT values that could be
+  // mistaken for live vault volume. The layout/animation is unchanged; the data is obviously fake.
   const rows = [
-    ['VAULT TX', '0xVAULT…EOA', 'YES · MARKET-A', '500 USDC', 'FILLED'],
-    ['PROOF', '0xe92b…1147', 'BET-AUTH', '45s', 'VERIFIED'],
-    ['VAULT TX', '0xVAULT…EOA', 'NO · MARKET-B', '1,000 USDC', 'FILLED'],
-    ['SETTLE', '0x1c83…aa07', 'SETTLEMENT', '+2,000', 'CREDIT'],
-    ['VAULT TX', '0xVAULT…EOA', 'YES · MARKET-C', '500 USDC', 'FILLED'],
+    ['VAULT TX', '0x…', 'YES · MARKET-A', '— USDC', 'FILLED'],
+    ['PROOF', '0x…', 'BET-AUTH', '—', 'VERIFIED'],
+    ['VAULT TX', '0x…', 'NO · MARKET-B', '— USDC', 'FILLED'],
+    ['SETTLE', '0x…', 'SETTLEMENT', '+—', 'CREDIT'],
+    ['VAULT TX', '0x…', 'YES · MARKET-C', '— USDC', 'FILLED'],
   ]
   return (
     <div className="panel glass" style={{ padding: 0, overflow: 'hidden' }}>
       <div className="row hairline-b" style={{ padding: '10px 16px', justifyContent: 'space-between' }}>
-        <div className="micro">Simulated vault tape</div>
-        <div className="micro" style={{ color: 'var(--text-2)' }}>● SIMULATED</div>
+        <div className="micro">Illustrative vault tape — not live data</div>
+        <div className="micro" style={{ color: 'var(--accent)', fontWeight: 600, letterSpacing: 1 }}>● SIMULATED</div>
       </div>
       {/* MOBILE-001: the 5-column tape is wider than a phone; scroll it horizontally inside the
           panel instead of letting it clip (the panel's overflow:hidden would cut the State column). */}
@@ -132,7 +134,8 @@ function HeroTape() {
               <td className="mono" style={{ fontSize: 11, color: 'var(--text-2)' }}>{r[0]}</td>
               <td><Hash value={r[1]} /></td>
               <td style={{ color: 'var(--text)' }}>{r[2]}</td>
-              <td className="num">{r[3]}</td>
+              {/* H2: dim the value column so the placeholders never read as live volume */}
+              <td className="num" style={{ color: 'var(--text-3)' }}>{r[3]}</td>
               <td>
                 {/* P5: VERIFIED = proof → indigo (brand); FILLED/CREDIT = value → gold; else warning. */}
                 <span className={`pill ${r[4] === 'VERIFIED' ? 'pill-violet' : r[4] === 'FILLED' || r[4] === 'CREDIT' ? 'pill-cyan' : 'pill-amber'}`} style={{ fontSize: 10 }}>
@@ -373,9 +376,10 @@ function FinalCTA() {
         software — deposit only what you can afford to lose.
       </p>
       <div className="cta-row mt-8" style={{ justifyContent: 'center' }}>
-        <a href="/app/markets" className="btn btn-brand" style={{ padding: '14px 32px', fontSize: 15 }}>
-          Launch app <Icon d={ICONS.arrow} size={14} />
+        <a href="/app/deposit" className="btn btn-brand" style={{ padding: '14px 32px', fontSize: 15 }}>
+          Start trading privately <Icon d={ICONS.arrow} size={14} />
         </a>
+        <a href="/app/markets" className="btn" style={{ padding: '14px 24px', fontSize: 15 }}>Browse markets</a>
         <Link href="/how" className="btn" style={{ padding: '14px 24px', fontSize: 15 }}>How it works</Link>
         <Link href="/docs" className="btn btn-ghost" style={{ padding: '14px 24px', fontSize: 15 }}>Read the docs</Link>
       </div>
@@ -403,7 +407,8 @@ export default function LandingPage() {
                 with cryptographic guarantees, not promises.
               </p>
               <div className="cta-row mt-8">
-                <a href="/app/markets" className="btn btn-brand">Launch app <Icon d={ICONS.arrow} size={12} /></a>
+                <a href="/app/deposit" className="btn btn-brand">Start trading privately <Icon d={ICONS.arrow} size={12} /></a>
+                <a href="/app/markets" className="btn">Browse markets</a>
                 <Link href="/docs" className="btn">Read the docs</Link>
                 <Link href="/how" className="btn btn-ghost">How it works →</Link>
               </div>

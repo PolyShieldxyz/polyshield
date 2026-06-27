@@ -1,10 +1,11 @@
 'use client'
 
 import Link from 'next/link'
-import { Suspense, useEffect, useRef, useState } from 'react'
+import { Suspense, useEffect, useMemo, useRef, useState } from 'react'
 import * as Tabs from '@radix-ui/react-tabs'
 import * as ToggleGroup from '@radix-ui/react-toggle-group'
 import { useParams, useRouter, useSearchParams } from 'next/navigation'
+import { useQuery, keepPreviousData } from '@tanstack/react-query'
 import { useAccount, useReadContract } from 'wagmi'
 import { Icon, ICONS } from '@/components/ui/Icon'
 import { AmountInput } from '@/components/ui/AmountInput'
@@ -15,7 +16,7 @@ import { ClosePositionModal } from '@/components/app/ClosePositionModal'
 import { MARKETS, type MarketEntry } from '@/lib/marketsData'
 import { getFreeNotes, MAX_CONSOLIDATE_INPUTS, formatUsdc, type Note } from '@/lib/notes'
 import { VAULT_ABI } from '@/lib/vaultAbi'
-import { marketBuyCeilingFromBook, roundToTick, type BookLevel } from '@/lib/pricing'
+import { marketBuyCeilingFromBook, roundToTick, computeOrderPreview, type BookLevel } from '@/lib/pricing'
 import { type OrderKind, ORDER_KIND_LABEL } from '@/lib/orderType'
 
 const VAULT_ADDRESS = (process.env.NEXT_PUBLIC_VAULT_ADDRESS ??
@@ -236,8 +237,43 @@ function MarketDetailContent() {
 
   // Hook-safety fallback only — never rendered (the loading/unavailable guards below early-return
   // before any fixture could show). The fixture is no longer a user-facing fallback (FC-15).
-  const market = payload?.market ?? MARKETS.find((entry) => entry.id === id) ?? MARKETS[0]
+  const marketBase = payload?.market ?? MARKETS.find((entry) => entry.id === id) ?? MARKETS[0]
   const book = payload?.book
+
+  // H8: live odds overlay. `market.yes` from /api/markets/[id] is frozen to the slow 10s catalog
+  // payload and was used as the bet price seed. Overlay the fast ~10s /api/markets/prices feed
+  // (same endpoint the markets list uses) keyed on the YES token so the 48px probability, the
+  // side-toggle prices, and the `price` passed into the modal all track the live midpoint.
+  const { data: priceData, dataUpdatedAt } = useQuery<{ prices: Record<string, number> }>({
+    queryKey: ['market-detail-price', marketBase.yesTokenId],
+    queryFn: async () => {
+      const res = await fetch(`/api/markets/prices?ids=${encodeURIComponent(marketBase.yesTokenId ?? '')}`, { cache: 'no-store' })
+      if (!res.ok) return { prices: {} }
+      return res.json() as Promise<{ prices: Record<string, number> }>
+    },
+    enabled: !!marketBase.yesTokenId,
+    refetchInterval: 10_000,
+    placeholderData: keepPreviousData,
+  })
+  const liveYes = marketBase.yesTokenId ? priceData?.prices?.[marketBase.yesTokenId] : undefined
+  // Merge the live YES probability over the catalog value so every downstream read (probability,
+  // side prices, bet-price seed) uses the freshest number without re-deriving each call site.
+  const market = useMemo(
+    () =>
+      liveYes != null && Number.isFinite(liveYes) ? { ...marketBase, yes: liveYes } : marketBase,
+    [marketBase, liveYes],
+  )
+  // Freshness indicator next to the 48px probability: how long since the overlay last refreshed.
+  const [priceAgeMs, setPriceAgeMs] = useState(0)
+  useEffect(() => {
+    if (!marketBase.yesTokenId) return
+    const tick = () => setPriceAgeMs(dataUpdatedAt ? Date.now() - dataUpdatedAt : 0)
+    tick()
+    const id = window.setInterval(tick, 1_000)
+    return () => window.clearInterval(id)
+  }, [dataUpdatedAt, marketBase.yesTokenId])
+  const priceLive = liveYes != null && Number.isFinite(liveYes) && priceAgeMs < 30_000
+
   // Up/Down markets display "UP"/"DOWN"; everything else "YES"/"NO". The internal `side`
   // state stays 'YES'|'NO' (it drives the circuit's outcome_side 0/1) — only the label changes.
   const [yesLabel, noLabel] = market.outcomeLabels
@@ -276,7 +312,6 @@ function MarketDetailContent() {
   const effectivePrice = isLimit
     ? roundToTick(limitCents / 100, tickSize)
     : marketBuyCeilingFromBook(sideLevels, amount, tickSize, bestAsk)
-  const shares = effectivePrice > 0 ? Math.floor(amount / effectivePrice) : 0
 
   // Error prevention: surface affordability on the rail BEFORE the user opens the modal and pays for
   // a proof. Mirror BetModal's guard exactly — combinable = the largest MAX_CONSOLIDATE_INPUTS free
@@ -304,6 +339,7 @@ function MarketDetailContent() {
   })
   const betFeeBps = feeConfigData ? BigInt(feeConfigData[0]) : 0n
   const relayGasFeeUSDC = feeConfigData ? BigInt(feeConfigData[1]) : 0n
+  const minBet = feeConfigData ? BigInt(feeConfigData[2]) : 1_000_000n // default $1 until loaded
   const maxBettable =
     combinableBalance <= relayGasFeeUSDC
       ? 0n
@@ -311,6 +347,20 @@ function MarketDetailContent() {
   const amountMicro = Number.isFinite(amount) && amount > 0 ? BigInt(Math.round(amount * 1_000_000)) : 0n
   const noFunds = combinableBalance === 0n
   const exceedsBalance = amountMicro > 0n && amountMicro > maxBettable
+
+  // C4: the rail derives its shares / fee / min-bet display from the SAME shared helper the
+  // confirm modal uses, so the user never sees one share count here and a different one there,
+  // and the ~$1.25 min-bet floor (previously enforced only in the modal) is surfaced up front.
+  const preview = computeOrderPreview({
+    amountMicro,
+    effectivePrice,
+    protocolFeeBps: betFeeBps,
+    relayGasMicro: relayGasFeeUSDC,
+    minBetMicro: minBet,
+  })
+  const shares = preview.shares
+  const belowMinBet = amountMicro > 0n && preview.belowMin
+  const belowMinShares = preview.belowMinShares
 
   // Default the limit price to the current side's market price. Keyed on `side` only — not
   // `price` — so the user's manual limit edits aren't clobbered every 10s when the polled
@@ -382,7 +432,16 @@ function MarketDetailContent() {
         <div className="hairline-r" style={{ padding: 24, minWidth: 0 }}>
           <div className="row gap-6 mb-4" style={{ marginBottom: 16 }}>
             <div>
-              <div className="micro">{yesLabel} probability</div>
+              <div className="row gap-2" style={{ alignItems: 'center' }}>
+                <div className="micro">{yesLabel} probability</div>
+                {/* H8: freshness indicator for the live ~10s odds overlay. */}
+                {market.yesTokenId && (
+                  <span className="pill pill-soft" style={{ fontSize: 9 }}>
+                    <span className="dot" style={{ background: priceLive ? 'var(--green)' : 'var(--amber)' }} />
+                    &nbsp;{priceLive ? 'LIVE' : `as of ${Math.max(0, Math.round(priceAgeMs / 1000))}s ago`}
+                  </span>
+                )}
+              </div>
               <div className="num" style={{ fontSize: 48, lineHeight: 1 }}>{market.yes.toFixed(2)}</div>
             </div>
             <div style={{ flex: 1 }}>
@@ -557,6 +616,18 @@ function MarketDetailContent() {
                   <span>Available <span className="num">${formatUsdc(combinableBalance)}</span></span>
                   <span>Max bettable <span className="num">${formatUsdc(maxBettable)}</span></span>
                 </div>
+                {/* C4: surface the min-bet floor here too — the ~$1.25 minimum was previously enforced
+                    only in the confirm modal, so a $1 rail bet passed then errored after a click. */}
+                {belowMinBet && (
+                  <div className="small mt-1" style={{ color: 'var(--red)', fontSize: 11 }}>
+                    Minimum bet is ${formatUsdc(preview.effectiveMinBetMicro)} — Polymarket requires a $1 order and the taker fee comes out of your stake first.
+                  </div>
+                )}
+                {!belowMinBet && !exceedsBalance && belowMinShares && (
+                  <div className="small mt-1" style={{ color: 'var(--red)', fontSize: 11 }}>
+                    Polymarket minimum is 5 shares (this is {(Number(shares) / 1e6).toFixed(2)}). Bet ≈${(5 * effectivePrice).toFixed(2)}+ at this price.
+                  </div>
+                )}
               </div>
 
               <div className="hairline-t mt-4" style={{ paddingTop: 12 }}>
@@ -611,7 +682,7 @@ function MarketDetailContent() {
                   </div>
                 ) : (
                   <div className="small mt-2" style={{ fontSize: 11, color: 'var(--text-3)' }}>
-                    Fills immediately at the best available price for whatever size the book offers now; any unfilled remainder of your stake is reclaimable afterward.
+                    Fills immediately at the best available price for whatever size the book offers now. If it fills only partially, the unfilled portion is returned to your balance automatically — no action needed.
                   </div>
                 )}
               </div>
@@ -623,8 +694,14 @@ function MarketDetailContent() {
                     isLimit
                       ? 'The price you bid; the order rests on the book until the market trades at or below it.'
                       : 'The worst price your stake could fill at — walked from the live order book plus a small slippage pad. You commit a guaranteed-minimum number of shares; any surplus returns to the pool.'],
-                  [isLimit ? 'Expected shares' : 'Minimum shares', shares.toLocaleString(),
-                    'Shares ≈ stake ÷ price. For a market order this is the guaranteed minimum; a better fill yields more.'],
+                  // C4: same `preview.sharesAfterTakerFee` the confirm modal renders, so the rail and
+                  // modal never disagree. shares is 1e6-scaled → integer share count for display.
+                  [isLimit ? 'Estimated shares' : 'Est. shares (after ~Polymarket fee)',
+                    `≈ ${(preview.sharesAfterTakerFee / 1_000_000n).toLocaleString()}`,
+                    'Shares ≈ stake ÷ price, less the Polymarket taker fee taken from your stake. For a market order this is a guaranteed minimum; a better fill yields more. The exact fill is reconciled automatically after the order executes.'],
+                  [`Protocol fee${betFeeBps > 0n ? ` (${(Number(betFeeBps) / 100).toFixed(2)}%)` : ''}`,
+                    `$${formatUsdc(preview.totalFeeMicro)}`,
+                    'PolyShield protocol fee plus any flat relay-gas charge, deducted from your note balance along with the stake.'],
                   ['Order type', ORDER_KIND_LABEL[orderKind], undefined],
                   ...(isLimit && expiryEnabled ? [['Expires in', `${gtdMinutes} min`, 'If unfilled by this time the order is cancelled and your full stake becomes reclaimable.'] as [string, string, string]] : []),
                   ['Proof time', '30s–2min', 'A zero-knowledge proof is generated in your browser before the bet is submitted — this is roughly how long that takes.'],
@@ -656,10 +733,16 @@ function MarketDetailContent() {
                 <button
                   className="btn btn-primary mt-4"
                   onClick={() => setModalOpen(true)}
-                  disabled={exceedsBalance || amountMicro <= 0n}
-                  style={{ width: '100%', justifyContent: 'center', padding: '14px 0', fontSize: 14, opacity: exceedsBalance || amountMicro <= 0n ? 0.5 : 1 }}
+                  disabled={exceedsBalance || belowMinBet || belowMinShares || amountMicro <= 0n}
+                  style={{ width: '100%', justifyContent: 'center', padding: '14px 0', fontSize: 14, opacity: exceedsBalance || belowMinBet || belowMinShares || amountMicro <= 0n ? 0.5 : 1 }}
                 >
-                  {exceedsBalance ? 'Amount exceeds balance' : 'Generate ZK proof & authorize'}
+                  {exceedsBalance
+                    ? 'Amount exceeds balance'
+                    : belowMinBet
+                      ? `Minimum bet is $${formatUsdc(preview.effectiveMinBetMicro)}`
+                      : belowMinShares
+                        ? 'Below 5-share minimum'
+                        : 'Generate ZK proof & authorize'}
                 </button>
               )}
               <div className="small mt-2" style={{ textAlign: 'center', color: 'var(--text-3)', fontSize: 11 }}>

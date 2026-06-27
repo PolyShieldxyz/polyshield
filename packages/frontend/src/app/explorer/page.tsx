@@ -394,9 +394,12 @@ export default function ExplorerPage() {
         <div style={{ marginBottom: 40 }}>
           <div className="micro" style={{ marginBottom: 12 }}>PRIVACY METRICS</div>
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: 12 }}>
+            {/* H2: the unique-depositor count IS the anonymity-set size — surface it as the real
+                privacy headline. The dead "Coming soon" tiles were removed (no unbuilt privacy
+                metrics advertised on the privacy-proof page); only the genuinely computed value remains. */}
             <div className="panel" style={{ padding: 20 }}>
               <div className="row" style={{ justifyContent: 'space-between', marginBottom: 8 }}>
-                <div className="micro" style={{ fontSize: 9 }}>UNIQUE DEPOSITORS</div>
+                <div className="micro" style={{ fontSize: 9 }}>ANONYMITY SET</div>
                 <span className="pill" style={{ background: 'oklch(0.25 0.08 85)', color: 'var(--cyan)', fontSize: 9 }}>
                   <span className="dot" style={{ background: 'var(--cyan)', boxShadow: '0 0 6px var(--cyan)' }}></span>
                   LIVE
@@ -406,26 +409,9 @@ export default function ExplorerPage() {
                 {loading ? '—' : (depositors ?? '—')}
               </div>
               <div className="small mt-1" style={{ fontSize: 11, color: 'var(--text-3)' }}>
-                Wallets currently holding funds in the vault
+                Unique depositors currently holding funds — the set any one bet is hidden among
               </div>
             </div>
-
-            {[
-              { label: 'Anonymity set size', note: 'Active depositors whose withdrawal cannot be linked to their deposit' },
-              { label: 'Entropy score', note: 'Measure of indistinguishability across the depositor set' },
-              { label: 'Median time in vault', note: 'Average duration funds remain deposited before withdrawal' },
-            ].map(({ label, note }) => (
-              <div key={label} className="panel" style={{ padding: 20, opacity: 0.45 }}>
-                <div className="row" style={{ justifyContent: 'space-between', marginBottom: 8 }}>
-                  <div className="micro" style={{ fontSize: 9 }}>{label.toUpperCase()}</div>
-                  <span className="pill pill-soft" style={{ fontSize: 9 }}>Coming soon</span>
-                </div>
-                <div className="num" style={{ fontSize: 32 }}>—</div>
-                <div className="small mt-1" style={{ fontSize: 11, color: 'var(--text-3)' }}>
-                  {note}
-                </div>
-              </div>
-            ))}
           </div>
         </div>
       </div>

@@ -6,6 +6,7 @@ import * as ToggleGroup from '@radix-ui/react-toggle-group'
 import { Modal } from '@/components/app/Modal'
 import { KV } from '@/components/app/KV'
 import { LiveRegion } from '@/components/app/LiveRegion'
+import { CreditCannotLand } from '@/components/app/CreditCannotLand'
 import { formatUsdc, type Note } from '@/lib/notes'
 import { fetchAttestation, fetchBetRecord, requestClose } from '@/lib/api'
 import { finalizeClose } from '@/lib/finalizeClose'
@@ -25,7 +26,9 @@ const clampPriceCents = (p: number): number => Math.min(99.99, Math.max(0.01, Nu
 
 // 'resting' (new) = the SELL is live on the book / awaiting credit; the user is free to leave and the
 // portfolio's background finalizer credits the proceeds when the operator's SOLD attestation lands.
-type Phase = 'input' | 'selling' | 'proving' | 'resting' | 'done' | 'error'
+// H3: 'cant-close' = a structural gap (missing position_id / no shares) that no Retry can fix —
+// surfaced via the dedicated CreditCannotLand screen (support CTA, no Retry) instead of raw error.
+type Phase = 'input' | 'selling' | 'proving' | 'resting' | 'done' | 'error' | 'cant-close'
 
 interface ClosePositionModalProps {
   open: boolean
@@ -84,11 +87,13 @@ export function ClosePositionModal({
     setError(null)
     const nullifierOfBet = (receipt.nullifier_of_bet ?? receipt.nullifier) as `0x${string}`
     const positionId = receipt.position_id
+    // H3: these are STRUCTURAL — no Retry can produce a missing position_id or conjure shares.
+    // Route to the dedicated "can't close automatically" screen (support CTA, no Retry).
     if (!positionId) {
-      setPhase('error'); setError('This position is missing its CTF position_id and cannot be closed.'); return
+      setPhase('cant-close'); setError('This position is missing its CTF position_id and cannot be closed.'); return
     }
     if (totalShares <= 0n) {
-      setPhase('error'); setError('Position has no shares to sell.'); return
+      setPhase('cant-close'); setError('Position has no shares to sell.'); return
     }
 
     // Full close in this UI. limit_price is 1e6-scaled (priceCents/100 * 1e6). A MARKET close needs
@@ -178,9 +183,11 @@ export function ClosePositionModal({
           ? 'Your sell order is working. We’ll credit your balance automatically when it fills — you can leave this page.'
           : phase === 'done'
             ? `Position closed. $${formatUsdc(proceeds)} credited to your balance.`
-            : phase === 'error'
-              ? error ?? 'Close failed.'
-              : ''
+            : phase === 'cant-close'
+              ? 'This position can’t be closed automatically. Your funds are safe in the vault and can still be settled at resolution.'
+              : phase === 'error'
+                ? error ?? 'Close failed.'
+                : ''
 
   return (
     <Modal open={open} title="Close position (sell before settlement)" onClose={() => { if (phase !== 'selling' && phase !== 'proving') onClose() }}>
@@ -193,6 +200,11 @@ export function ClosePositionModal({
             your price until it fills or expires — you don’t have to wait around, we credit you
             automatically when it fills. Either may fill partially; the unfilled remainder stays open
             and settles at resolution. Proceeds are credited to your private balance.
+          </p>
+          <p className="small" style={{ margin: 0, color: 'var(--text-3)' }}>
+            These proceeds release after PolyShield’s signing operator confirms the sale. In beta
+            this is a centralized service — if it’s delayed your funds stay safe in the vault, and an
+            admin escape hatch can release them after a timelock.
           </p>
           <div className="panel" style={{ padding: 16 }}>
             <KV l="Market" v={receipt.marketId ?? receipt.id} />
@@ -305,6 +317,14 @@ export function ClosePositionModal({
           <h3 className="h4" style={{ margin: 0 }}>+${formatUsdc(proceeds)} credited to your balance.</h3>
           <p className="small" style={{ margin: 0 }}>Auto close in 5 seconds.</p>
         </div>
+      )}
+
+      {phase === 'cant-close' && (
+        <CreditCannotLand
+          reason="structural"
+          detail={error ?? undefined}
+          onClose={onClose}
+        />
       )}
 
       {phase === 'error' && (

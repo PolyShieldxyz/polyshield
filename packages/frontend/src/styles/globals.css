@@ -74,6 +74,44 @@
 
   --shadow-1: 0 1px 0 rgba(255,255,255,0.03) inset, 0 1px 2px rgba(0,0,0,0.4);
   --shadow-2: 0 12px 40px rgba(0,0,0,0.5), 0 1px 0 rgba(255,255,255,0.04) inset;
+
+  /* Scale tokens (DESIGN-SYSTEM fix). Color + radii were tokenized; type-size, spacing, z-index and
+     motion were ad-hoc across hundreds of inline styles, so new screens kept inventing values and
+     z-index had no ordering (modal-behind-overlay risk). These are the closed scales — prefer them
+     over raw literals in new/edited code. 11px is the body-text floor (do not go below for content). */
+  --fs-1: 11px;   /* micro meta / dense labels — the small floor */
+  --fs-2: 12px;   /* secondary labels, table cells */
+  --fs-3: 13px;   /* .small / button text */
+  --fs-4: 15px;   /* .body */
+  --fs-5: 18px;   /* .h4 / lead */
+  --fs-6: 22px;   /* stat numbers */
+  --fs-7: 26px;   /* large stat */
+  --fs-8: 32px;
+  --fs-9: 44px;
+
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 20px;
+  --space-6: 24px;
+  --space-7: 32px;
+  --space-8: 48px;
+
+  /* Z-index scale — one ordering for the whole app so layers can't collide. */
+  --z-base: 10;
+  --z-nav: 50;
+  --z-dropdown: 60;
+  --z-tooltip: 200;
+  --z-modal: 300;
+  --z-toast: 400;
+  --z-skip: 1000;
+
+  /* Motion — scoped durations/easing so transitions are consistent (and one place to tune). */
+  --dur-fast: 0.12s;
+  --dur: 0.15s;
+  --dur-slow: 0.3s;
+  --ease: ease;
 }
 
 * { box-sizing: border-box; }
@@ -139,7 +177,9 @@ textarea:focus-visible, [role="link"]:focus-visible, [tabindex]:focus-visible {
 .btn-brand:hover { background: oklch(0.86 0.13 85); border-color: oklch(0.86 0.13 85); box-shadow: 0 0 0 3px var(--cyan-glow); }
 .btn-ghost { border-color: transparent; }
 .btn-ghost:hover { background: rgba(255,255,255,0.04); border-color: var(--line); }
-.btn-sm { padding: 6px 10px; font-size: 12px; }
+/* WCAG 2.5.8 (Target Size, AA): interactive controls must be ≥24×24px. min-height enforces the
+   floor even when callsites shrink padding/font for dense layouts. Do not override below 24px. */
+.btn-sm { padding: 6px 10px; font-size: 12px; min-height: 24px; }
 .btn-cyan { background: oklch(0.82 0.13 85 / 0.10); border-color: oklch(0.82 0.13 85 / 0.35); color: var(--cyan); }
 .btn-cyan:hover { background: oklch(0.82 0.13 85 / 0.15); border-color: oklch(0.82 0.13 85 / 0.55); }
 

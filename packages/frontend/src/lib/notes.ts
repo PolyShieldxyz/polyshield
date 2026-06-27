@@ -27,6 +27,8 @@ import {
 import { fetchSpentNullifiers, fetchBetStatus, BET_STATUS } from './api'
 import { readEncrypted, writeEncrypted, removeEncrypted } from './cacheStore'
 import { CLOSE_MARKER_KEY_PREFIX } from './closeMarker'
+import { WITHDRAW_MARKER_KEY_PREFIX } from './withdrawMarker'
+import { DEPOSIT_MARKER_KEY_PREFIX } from './depositMarker'
 
 export type NoteKind = 'DEPOSIT' | 'BET_OUTPUT' | 'SETTLE_CREDIT' | 'CANCEL_CREDIT' | 'BET_RECEIPT'
 
@@ -1717,7 +1719,13 @@ export function resetAllLocalState(): void {
   const toRemove: string[] = []
   for (let i = 0; i < localStorage.length; i++) {
     const key = localStorage.key(i)
-    if (key?.startsWith(INDEX_KEY_PREFIX) || key?.startsWith(CLOSE_MARKER_KEY_PREFIX)) toRemove.push(key)
+    if (
+      key?.startsWith(INDEX_KEY_PREFIX) ||
+      key?.startsWith(CLOSE_MARKER_KEY_PREFIX) ||
+      key?.startsWith(WITHDRAW_MARKER_KEY_PREFIX) ||
+      key?.startsWith(DEPOSIT_MARKER_KEY_PREFIX)
+    )
+      toRemove.push(key)
   }
   toRemove.forEach((k) => localStorage.removeItem(k))
 }

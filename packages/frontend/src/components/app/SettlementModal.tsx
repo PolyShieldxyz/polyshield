@@ -6,11 +6,18 @@ import { Modal } from '@/components/app/Modal'
 import { KV } from '@/components/app/KV'
 import { LiveRegion } from '@/components/app/LiveRegion'
 import { Icon, ICONS } from '@/components/ui/Icon'
+import { CreditCannotLand } from '@/components/app/CreditCannotLand'
 import { formatUsdc, type Note, type ReadyToSettleBet } from '@/lib/notes'
 import { settlePosition } from '@/lib/settlePosition'
 import { log } from '@/lib/logger'
 
-type Phase = 'select' | 'running' | 'done' | 'error'
+// H3: a credit that has no spendable change-note in its deposit lineage can't land. settlePosition
+// throws this exact message; we detect it and route to the recoverable CreditCannotLand screen
+// (Restore from chain) instead of the raw error + a Retry that would re-fail identically.
+const NO_FREE_NOTE_MSG = 'No spendable note is available in this deposit to receive the settlement credit.'
+const isNoFreeNote = (m: string) => m === NO_FREE_NOTE_MSG || /no spendable note/i.test(m)
+
+type Phase = 'select' | 'running' | 'done' | 'error' | 'cant-land'
 
 interface SettlementModalProps {
   open: boolean
@@ -18,6 +25,10 @@ interface SettlementModalProps {
   readyBets: ReadyToSettleBet[]
   /** 'close-losses': zero-credit settlement to formally close lost positions on-chain */
   mode?: 'settle' | 'close-losses'
+  /** H3: parent's "Restore from chain" (re-derives notes). Required to recover a no-free-note credit. */
+  onRestore?: () => void
+  /** H3: spinner state for the Restore button (parent's `recovering`). */
+  restoring?: boolean
   onClose: () => void
   onComplete: () => Promise<void> | void
 }
@@ -29,6 +40,8 @@ export function SettlementModal({
   address,
   readyBets,
   mode = 'settle',
+  onRestore,
+  restoring,
   onClose,
   onComplete,
 }: SettlementModalProps) {
@@ -117,7 +130,7 @@ export function SettlementModal({
         // same-lineage settles both work without tracking the tip here.
         const res = await settlePosition(address, bet, VAULT_ADDRESS, signMessageAsync)
         if (!res.done) {
-          throw new Error('No spendable note is available in this deposit to receive the settlement credit.')
+          throw new Error(NO_FREE_NOTE_MSG)
         }
 
         applied.push(bet)
@@ -131,7 +144,9 @@ export function SettlementModal({
       const message = err instanceof Error ? err.message : String(err)
       setError(message)
       setCompleted([...applied])
-      setPhase('error')
+      // H3: a "no free note" credit isn't a hard error — it's a local-cache gap recoverable via
+      // Restore. Route it to the dedicated screen instead of the raw error + a re-failing Retry.
+      setPhase(isNoFreeNote(message) ? 'cant-land' : 'error')
     }
   }
 
@@ -151,9 +166,11 @@ export function SettlementModal({
         ? (isCloseLosses
             ? `Closed ${completed.length} position${completed.length === 1 ? '' : 's'}.`
             : `Settled ${completed.length} bet${completed.length === 1 ? '' : 's'}. $${formatUsdc(totalCredit)} added to your balance.`)
-        : phase === 'error'
-          ? error ?? 'Settlement failed.'
-          : ''
+        : phase === 'cant-land'
+          ? 'This credit can’t land yet — the change-note for this deposit isn’t in your local cache. Your funds are safe in the vault. Restore from chain to recover it.'
+          : phase === 'error'
+            ? error ?? 'Settlement failed.'
+            : ''
 
   return (
     <Modal open={open} title={isCloseLosses ? 'Close lost positions' : 'Settle resolved bets'} onClose={closeSafely}>
@@ -301,6 +318,16 @@ export function SettlementModal({
             </div>
           )}
         </div>
+      )}
+
+      {phase === 'cant-land' && (
+        <CreditCannotLand
+          reason="no-free-note"
+          detail={completed.length > 0 ? `Settled ${completed.length} bet(s) before this one stopped.` : undefined}
+          onRestore={onRestore}
+          restoring={restoring}
+          onClose={closeSafely}
+        />
       )}
 
       {phase === 'error' && (

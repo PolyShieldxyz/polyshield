@@ -35,15 +35,15 @@ export function TopNav() {
   // The dApp lives on the app.* subdomain (middleware 301s apex/app/* -> app.<host>/*).
   // A Next <Link> soft-navigates and won't reliably switch hosts, so "Launch App" must be a
   // real cross-host navigation. Compute the absolute app URL per environment.
-  const [launchHref, setLaunchHref] = useState('/app/markets')
+  const [launchHref, setLaunchHref] = useState('/app/deposit')
   useEffect(() => {
     if (typeof window === 'undefined') return
     const h = window.location.hostname
     setAppHost(h.startsWith('app.'))
     const isLocal = h === 'localhost' || h === '127.0.0.1' || !h.includes('.')
-    if (h.startsWith('app.')) setLaunchHref('/markets')
-    else if (isLocal) setLaunchHref('/app/markets')
-    else setLaunchHref(`${window.location.protocol}//app.${h.replace(/^www\./, '')}/markets`)
+    if (h.startsWith('app.')) setLaunchHref('/deposit')
+    else if (isLocal) setLaunchHref('/app/deposit')
+    else setLaunchHref(`${window.location.protocol}//app.${h.replace(/^www\./, '')}/deposit`)
   }, [])
   const isApp = pathname.startsWith('/app') || appHost
 
@@ -64,19 +64,25 @@ export function TopNav() {
           </div>
         </div>
         <div className="nav-links">
-          {NAV_LINKS.map(([href, label]) => (
-            <Link
-              key={href}
-              href={href}
-              className={`nav-link ${isActive(href) ? 'active' : ''}`}
-            >
-              {label}
-            </Link>
-          ))}
+          {NAV_LINKS.map(([href, label]) => {
+            const active = isActive(href)
+            return (
+              <Link
+                key={href}
+                href={href}
+                className={`nav-link ${active ? 'active' : ''}`}
+                aria-current={active ? 'page' : undefined}
+                // H12: stronger-than-background active cue (a11y) — gold underline + brighter text.
+                style={active ? { color: 'var(--text-1)', boxShadow: 'inset 0 -2px 0 var(--accent)' } : undefined}
+              >
+                {label}
+              </Link>
+            )
+          })}
         </div>
         <div className="row gap-3">
           <a href={launchHref} className="btn btn-sm btn-primary">
-            Launch App <Icon d={ICONS.arrow} size={12} />
+            Launch app <Icon d={ICONS.arrow} size={12} />
           </a>
           {/* NAV-001: reach the section links below 1180px (where .nav-links is hidden).
               Radix DropdownMenu handles open/close, outside-click, Esc, and keyboard roving focus. */}
@@ -88,13 +94,21 @@ export function TopNav() {
             </DropdownMenu.Trigger>
             <DropdownMenu.Portal>
               <DropdownMenu.Content className="panel nav-menu-panel" align="end" sideOffset={8}>
-                {NAV_LINKS.map(([href, label]) => (
-                  <DropdownMenu.Item key={href} asChild>
-                    <Link href={href} className={`nav-link ${isActive(href) ? 'active' : ''}`}>
-                      {label}
-                    </Link>
-                  </DropdownMenu.Item>
-                ))}
+                {NAV_LINKS.map(([href, label]) => {
+                  const active = isActive(href)
+                  return (
+                    <DropdownMenu.Item key={href} asChild>
+                      <Link
+                        href={href}
+                        className={`nav-link ${active ? 'active' : ''}`}
+                        aria-current={active ? 'page' : undefined}
+                        style={active ? { color: 'var(--text-1)', boxShadow: 'inset 2px 0 0 var(--accent)' } : undefined}
+                      >
+                        {label}
+                      </Link>
+                    </DropdownMenu.Item>
+                  )
+                })}
               </DropdownMenu.Content>
             </DropdownMenu.Portal>
           </DropdownMenu.Root>
@@ -136,8 +150,21 @@ function AppTopNav({ pathname }: { pathname: string }) {
         </div>
 
         <div className="nav-links">
-          <Link href="/app/markets" className={`nav-link ${pathname === '/app/markets' ? 'active' : ''}`}>Markets</Link>
-          <Link href="/app/portfolio" className={`nav-link ${pathname === '/app/portfolio' ? 'active' : ''}`}>Portfolio</Link>
+          {([['/app/markets', 'Markets'], ['/app/portfolio', 'Portfolio']] as [string, string][]).map(([href, label]) => {
+            const active = pathname === href
+            return (
+              <Link
+                key={href}
+                href={href}
+                className={`nav-link ${active ? 'active' : ''}`}
+                aria-current={active ? 'page' : undefined}
+                // H12: gold underline + brighter text so the active tab isn't background-only.
+                style={active ? { color: 'var(--text-1)', boxShadow: 'inset 0 -2px 0 var(--accent)' } : undefined}
+              >
+                {label}
+              </Link>
+            )
+          })}
           <a href="/explorer" target="_blank" rel="noreferrer" className="nav-link">Explorer</a>
         </div>
 
@@ -158,7 +185,14 @@ function AppTopNav({ pathname }: { pathname: string }) {
                     </DropdownMenu.Item>
                   ) : (
                     <DropdownMenu.Item key={href} asChild>
-                      <Link href={href} className={`nav-link ${pathname === href ? 'active' : ''}`}>{label}</Link>
+                      <Link
+                        href={href}
+                        className={`nav-link ${pathname === href ? 'active' : ''}`}
+                        aria-current={pathname === href ? 'page' : undefined}
+                        style={pathname === href ? { color: 'var(--text-1)', boxShadow: 'inset 2px 0 0 var(--accent)' } : undefined}
+                      >
+                        {label}
+                      </Link>
                     </DropdownMenu.Item>
                   ),
                 )}

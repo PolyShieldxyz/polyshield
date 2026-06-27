@@ -1,15 +1,21 @@
 'use client'
 import { useState } from 'react'
 import { Icon, ICONS } from '@/components/ui/Icon'
+import { PrivacyModel } from '@/components/app/PrivacyModel'
 
-const PROOFS = [
-  { id: 'prf_0x4b81…d23f', type: 'BET_AUTH', market: 'Fed cuts rates Dec?', side: 'YES', amount: 500, status: 'FILLED', age: '8m ago', nullifier: '0x4b81…d23f', tx: '0xa731…fe09' },
-  { id: 'prf_0x77ce…be11', type: 'SETTLE_CRED', market: 'GPT5-RELEASE', side: 'YES', amount: 18720, status: 'CREDITED', age: '32m ago', nullifier: '0x77ce…be11', tx: '0xb291…12aa' },
-  { id: 'prf_0x91a3…0fc2', type: 'DEPOSIT', market: '—', side: '—', amount: 25000, status: 'CONFIRMED', age: '2h ago', nullifier: '—', tx: '0xc410…9001' },
-  { id: 'prf_0x2310…44a1', type: 'DEPOSIT', market: '—', side: '—', amount: 50000, status: 'CONFIRMED', age: '5h ago', nullifier: '—', tx: '0xd112…f820' },
-  { id: 'prf_0xa811…3301', type: 'BET_AUTH', market: 'BTC above $150k Dec 31?', side: 'NO', amount: 1000, status: 'UNFILLED', age: '3d ago', nullifier: '0xa811…3301', tx: '0xe201…3abc' },
-  { id: 'prf_0xc210…f9aa', type: 'CANCEL_CRED', market: 'BTC above $150k Dec 31?', side: 'NO', amount: 1000, status: 'CREDITED', age: '3d ago', nullifier: '0xc210…f9aa', tx: '0xf311…8811' },
-  { id: 'prf_0x4404…f9e2', type: 'WITHDRAW', market: '—', side: '—', amount: 5000, status: 'DELIVERED', age: '4d ago', nullifier: '0x4404…f9e2', tx: '0x0120…cc01' },
+// H2: synthetic placeholders only. No concrete amounts, hashes, ages, or "DELIVERED"
+// statuses that a returning user could mistake for their own real account history. The
+// rows exist purely to show the SHAPE of the ledger; every value is obviously a sample.
+const PROOFS: Array<{
+  id: string; type: string; market: string; side: string
+  amount: number | null; status: string; age: string; nullifier: string; tx: string
+}> = [
+  { id: 'prf_SAMPLE', type: 'BET_AUTH', market: 'Example market', side: 'YES', amount: null, status: 'SAMPLE', age: '—', nullifier: '0x…', tx: '0x…' },
+  { id: 'prf_SAMPLE', type: 'SETTLE_CRED', market: 'Example market', side: 'YES', amount: null, status: 'SAMPLE', age: '—', nullifier: '0x…', tx: '0x…' },
+  { id: 'prf_SAMPLE', type: 'DEPOSIT', market: '—', side: '—', amount: null, status: 'SAMPLE', age: '—', nullifier: '—', tx: '0x…' },
+  { id: 'prf_SAMPLE', type: 'BET_AUTH', market: 'Example market', side: 'NO', amount: null, status: 'SAMPLE', age: '—', nullifier: '0x…', tx: '0x…' },
+  { id: 'prf_SAMPLE', type: 'CANCEL_CRED', market: 'Example market', side: 'NO', amount: null, status: 'SAMPLE', age: '—', nullifier: '0x…', tx: '0x…' },
+  { id: 'prf_SAMPLE', type: 'WITHDRAW', market: '—', side: '—', amount: null, status: 'SAMPLE', age: '—', nullifier: '0x…', tx: '0x…' },
 ]
 
 const TYPE_COLOR: Record<string, string> = {
@@ -35,11 +41,13 @@ export default function ProofsPage() {
   const [typeFilter, setTypeFilter] = useState('ALL')
   const filtered = typeFilter === 'ALL' ? PROOFS : PROOFS.filter((p) => p.type === typeFilter)
 
+  // H2: do NOT compute live-looking counts off the sample rows — a returning user could read
+  // them as real activity. Show neutral placeholders until the real per-account feed is wired.
   const stats = [
-    { label: 'Total proofs', value: PROOFS.length },
-    { label: 'Bets authorized', value: PROOFS.filter((p) => p.type === 'BET_AUTH').length },
-    { label: 'Settlements', value: PROOFS.filter((p) => p.type === 'SETTLE_CRED').length },
-    { label: 'Unfilled orders', value: PROOFS.filter((p) => p.status === 'UNFILLED').length },
+    { label: 'Total proofs', value: '—' },
+    { label: 'Bets authorized', value: '—' },
+    { label: 'Settlements', value: '—' },
+    { label: 'Unfilled orders', value: '—' },
   ]
 
   return (
@@ -47,7 +55,7 @@ export default function ProofsPage() {
       <div className="row hairline-b" style={{ padding: '14px 24px', justifyContent: 'space-between' }}>
         <div className="row gap-4">
           <div className="micro">PROOF LEDGER</div>
-          <span className="pill pill-soft" style={{ fontSize: 10 }}>{PROOFS.length} proofs</span>
+          <span className="pill pill-soft" style={{ fontSize: 10 }}>Sample</span>
         </div>
         <span className="pill pill-amber" style={{ fontSize: 10 }}>PREVIEW · SAMPLE DATA</span>
       </div>
@@ -65,6 +73,10 @@ export default function ProofsPage() {
             <a href="/explorer" style={{ color: 'var(--cyan)' }}>explorer</a>.
           </div>
         </div>
+
+        {/* The honest privacy boundary, stated before the guarantees list (which is positive-only):
+            deposits are public, only bet-authorship is hidden. */}
+        <PrivacyModel style={{ marginBottom: 20 }} />
 
         {/* Stats row */}
         <div className="row gap-3 mb-5" style={{ marginBottom: 20, flexWrap: 'wrap' }}>
@@ -108,7 +120,7 @@ export default function ProofsPage() {
                     </span>
                   </td>
                   <td style={{ fontSize: 12, maxWidth: 160, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{p.market}</td>
-                  <td className="num" style={{ textAlign: 'right', fontSize: 12 }}>${p.amount.toLocaleString()}</td>
+                  <td className="num" style={{ textAlign: 'right', fontSize: 12, color: 'var(--text-3)' }}>{p.amount == null ? '$—' : `$${p.amount.toLocaleString()}`}</td>
                   <td>
                     <span style={{ fontSize: 10, color: STATUS_COLOR[p.status] ?? 'var(--text-2)' }}>{p.status}</span>
                   </td>

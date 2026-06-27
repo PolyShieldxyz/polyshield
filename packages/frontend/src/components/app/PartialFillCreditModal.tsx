@@ -5,6 +5,7 @@ import { useSignMessage } from 'wagmi'
 import { Modal } from '@/components/app/Modal'
 import { KV } from '@/components/app/KV'
 import { LiveRegion } from '@/components/app/LiveRegion'
+import { CreditCannotLand } from '@/components/app/CreditCannotLand'
 import {
   addNote,
   computeCommitment,
@@ -30,13 +31,22 @@ import { generateProofInWorker } from '@/lib/prover'
 
 const REPORT_PARTIAL = 3
 
-type Phase = 'input' | 'proving' | 'done' | 'error'
+// H3: getFreeNoteForDeposit returning null throws this; route it to the recoverable Restore screen.
+const NO_FREE_NOTE_MSG =
+  'No spendable note found for this position. Recover your notes from chain (Portfolio → Restore) and retry.'
+const isNoFreeNote = (m: string) => m === NO_FREE_NOTE_MSG || /no spendable note found/i.test(m)
+
+type Phase = 'input' | 'proving' | 'done' | 'error' | 'cant-land'
 
 interface PartialFillCreditModalProps {
   open: boolean
   address: `0x${string}`
   receipt: Note // a BET_RECEIPT note that the operator reported as PARTIAL_FILLED
   vaultAddress: string
+  /** H3: parent's "Restore from chain" (re-derives notes). Required to recover a no-free-note credit. */
+  onRestore?: () => void
+  /** H3: spinner state for the Restore button (parent's `recovering`). */
+  restoring?: boolean
   onClose: () => void
   onComplete: () => Promise<void> | void
 }
@@ -46,6 +56,8 @@ export function PartialFillCreditModal({
   address,
   receipt,
   vaultAddress,
+  onRestore,
+  restoring,
   onClose,
   onComplete,
 }: PartialFillCreditModalProps) {
@@ -78,7 +90,7 @@ export function PartialFillCreditModal({
       try {
         const att = await fetchAttestation(nullifierOfBet)
         if (!att || att.reportType !== REPORT_PARTIAL) {
-          setError('No partial-fill attestation is available for this position yet. The operator signs it once the limit order ends partially filled.')
+          setError('No partial-fill attestation is available for this position yet. The operator signs it once the limit order ends partially filled. These proceeds release after PolyShield’s signing operator confirms the result — in beta this is a centralized service; if it’s delayed your funds stay safe in the vault, and an admin escape hatch can release them after a timelock.')
           setPhase('error')
           return
         }
@@ -112,9 +124,7 @@ export function PartialFillCreditModal({
       // consumed it doesn't orphan the refund.
       const freeNote = getFreeNoteForDeposit(address, receipt.depositIndex)
       if (!freeNote) {
-        throw new Error(
-          'No spendable note found for this position. Recover your notes from chain (Portfolio → Restore) and retry.',
-        )
+        throw new Error(NO_FREE_NOTE_MSG)
       }
       // A $0 refund (full-budget short fill: the full stake was spent but fewer shares filled than
       // quoted) STILL requires this partialFillCredit call — it normalizes the bet record on-chain
@@ -193,8 +203,11 @@ export function PartialFillCreditModal({
 
       setPhase('done')
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err))
-      setPhase('error')
+      const message = err instanceof Error ? err.message : String(err)
+      setError(message)
+      // H3: a missing change-note is recoverable via Restore — route to the dedicated screen
+      // instead of the raw error + a Retry that re-fails identically.
+      setPhase(isNoFreeNote(message) ? 'cant-land' : 'error')
     }
   }
 
@@ -204,9 +217,11 @@ export function PartialFillCreditModal({
       ? 'Generating refund proof and crediting the unfilled remainder…'
       : phase === 'done'
         ? `Refund credited. $${formatUsdc(refundAmount)} returned to your balance.`
-        : phase === 'error'
-          ? error ?? 'Refund failed.'
-          : ''
+        : phase === 'cant-land'
+          ? 'This refund can’t land yet — the change-note for this deposit isn’t in your local cache. Your funds are safe in the vault. Restore from chain to recover it.'
+          : phase === 'error'
+            ? error ?? 'Refund failed.'
+            : ''
 
   return (
     <Modal open={open} title="Claim partial-fill refund" onClose={() => { if (phase !== 'proving') onClose() }}>
@@ -217,6 +232,11 @@ export function PartialFillCreditModal({
             Your limit order filled only partially before it ended. Reclaim the unfilled
             remainder of your stake back to your private balance. Your remaining filled
             position stays open and can be settled or closed later.
+          </p>
+          <p className="small" style={{ margin: 0, color: 'var(--text-3)' }}>
+            These proceeds release after PolyShield’s signing operator confirms the result. In beta
+            this is a centralized service — if it’s delayed your funds stay safe in the vault, and an
+            admin escape hatch can release them after a timelock.
           </p>
           <div className="panel" style={{ padding: 16 }}>
             <KV l="Market" v={receipt.marketId ?? receipt.id} />
@@ -248,6 +268,15 @@ export function PartialFillCreditModal({
           <h3 className="h4" style={{ margin: 0 }}>+${formatUsdc(refundAmount)} returned to your balance.</h3>
           <p className="small" style={{ margin: 0 }}>Auto close in 5 seconds.</p>
         </div>
+      )}
+
+      {phase === 'cant-land' && (
+        <CreditCannotLand
+          reason="no-free-note"
+          onRestore={onRestore}
+          restoring={restoring}
+          onClose={onClose}
+        />
       )}
 
       {phase === 'error' && (

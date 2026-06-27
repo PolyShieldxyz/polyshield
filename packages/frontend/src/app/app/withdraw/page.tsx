@@ -31,6 +31,14 @@ import {
 import { USDC_ABI, VAULT_ABI } from '@/lib/vaultAbi'
 import { LiveRegion } from '@/components/app/LiveRegion'
 import { SettleWithdrawModal } from '@/components/app/SettleWithdrawModal'
+import { classifyTxError } from '@/lib/txError'
+import { PrivacyModelNote } from '@/components/app/PrivacyModel'
+import {
+  clearWithdrawMarker,
+  getWithdrawMarkers,
+  markWithdrawSubmitted,
+} from '@/lib/withdrawMarker'
+import { setMoneyOpInFlight, clearMoneyOpInFlight } from '@/lib/inFlightGuard'
 
 const VAULT_ADDRESS = (process.env.NEXT_PUBLIC_VAULT_ADDRESS ?? '0x0000000000000000000000000000000000000000') as `0x${string}`
 const USDC_ADDRESS  = (process.env.NEXT_PUBLIC_USDC_ADDRESS  ?? '0x0000000000000000000000000000000000000000') as `0x${string}`
@@ -71,6 +79,9 @@ export default function WithdrawPage() {
   // Determinate download progress (0–100) for the proving-key fetch; null when not downloading.
   const [downloadPct, setDownloadPct] = useState<number | null>(null)
   const [settleWithdrawOpen, setSettleWithdrawOpen] = useState(false)
+  // Reload-resilience: a leftover marker means a prior withdrawal may not have finished its local
+  // note-cache sync (tab closed between the on-chain tx and markNoteSpent/addNote). Non-alarming hint.
+  const [staleWithdraw, setStaleWithdraw] = useState(false)
 
   const cashNote = state?.cashNote ?? null
   const cashBalance = state?.cashBalance ?? 0n
@@ -180,6 +191,25 @@ export default function WithdrawPage() {
   const belowMin =
     requestedAmount !== null && requestedAmount > 0n && requestedAmount < minWithdrawal
 
+  // H9: don't dead-end when the vault is short. The shortfall is vault-WIDE (the vault's idle USDC is
+  // shared across all depositors; some of it may be deployed to OTHER users' open positions), not a
+  // personal freeze. Offer what IS withdrawable right now: min(your cash, the vault's available USDC),
+  // capped by the most we can withdraw in one step without stranding an open position (safeMax). The
+  // user can take that now and come back for the rest as positions settle.
+  const withdrawableNowMicro = useMemo(() => {
+    const vaultAvail = vaultUsdcBalance as bigint
+    let m = cashBalance < vaultAvail ? cashBalance : vaultAvail
+    if (safeMax > 0n && m > safeMax) m = safeMax
+    return m
+  }, [cashBalance, vaultUsdcBalance, safeMax])
+  // Worth offering only when it clears the on-chain minimum and is strictly less than the request.
+  const canWithdrawSomeNow =
+    fundsDeployed &&
+    withdrawableNowMicro >= minWithdrawal &&
+    withdrawableNowMicro > 0n &&
+    requestedAmount !== null &&
+    withdrawableNowMicro < requestedAmount
+
   const invalidAmount =
     requestedAmount === null ||
     requestedAmount <= 0n ||
@@ -189,6 +219,37 @@ export default function WithdrawPage() {
   useEffect(() => {
     log('page_view', { route: '/app/withdraw' })
   }, [])
+
+  // Reload resilience: surface a one-line hint if a prior withdrawal left a pending marker for this
+  // wallet (it may not have finished syncing locally). We do NOT auto-reconcile — Restore handles that.
+  useEffect(() => {
+    if (!address) {
+      setStaleWithdraw(false)
+      return
+    }
+    setStaleWithdraw(getWithdrawMarkers(address).length > 0)
+  }, [address])
+
+  // Money-loss prevention: while a proof is being generated/submitted (status === 'running'), warn
+  // before a refresh/close so the user doesn't kill an in-flight withdrawal mid-proof.
+  useEffect(() => {
+    if (typeof window === 'undefined') return
+    if (status !== 'running') return
+    const handler = (e: BeforeUnloadEvent) => {
+      e.preventDefault()
+      e.returnValue = ''
+    }
+    window.addEventListener('beforeunload', handler)
+    return () => window.removeEventListener('beforeunload', handler)
+  }, [status])
+
+  // C3/H7: while the withdrawal is in flight (note spent on-chain, local cache not yet updated), mark
+  // a money op so a wallet flap / account switch doesn't trigger WalletConnect's destructive wipe of
+  // the encrypted note cache + deposit-index counter. Cleared when the op ends (success/error/idle).
+  useEffect(() => {
+    if (status === 'running') setMoneyOpInFlight()
+    else clearMoneyOpInFlight()
+  }, [status])
 
   useEffect(() => {
     if (status !== 'success') return
@@ -317,6 +378,12 @@ export default function WithdrawPage() {
         amount_usdc: effectiveWithdrawal.toString(),
       })
 
+      // Reload-resilience: record the in-flight withdrawal JUST BEFORE submit so a tab close between
+      // the on-chain tx and the local note-cache update can be detected on next mount (PUBLIC data
+      // only — nullifier + timestamp, no secret/amount/recipient). Cleared after the cache update.
+      markWithdrawSubmitted(address, { nullifier: spendNote.nullifier, submittedAt: Date.now() })
+      setStaleWithdraw(false)
+
       setStatusMsg('Submitting withdrawal to relay...')
       const { txHash: nextTxHash } = await relayWithdrawal(proof, inputs, recipient)
       setTxHash(nextTxHash)
@@ -354,14 +421,20 @@ export default function WithdrawPage() {
         addNote(nextNote)
       }
 
+      // Local note-cache is now consistent with chain — clear the in-flight marker.
+      clearWithdrawMarker(address, spendNote.nullifier)
+
       await refresh()
       setStatus('success')
       setStatusMsg('Withdrawal confirmed.')
       log('withdraw_relay_success', { txHash: nextTxHash, recipient, amount_usdc: effectiveWithdrawal.toString() })
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err)
+      // Humanize: user rejections read neutrally; known reverts / prover timeout / network get calm
+      // copy; everything else falls back to the raw first line (classifyTxError handles all of these).
+      const c = classifyTxError(err)
       setStatus('error')
-      setStatusMsg(message)
+      setStatusMsg(`${c.title} — ${c.body}`)
       setDownloadPct(null)
       log('withdraw_relay_error', { error: message, recipient: address, amountInput })
     }
@@ -383,6 +456,12 @@ export default function WithdrawPage() {
 
       {/* LAYOUT-001: center the focused form instead of hugging the left edge. */}
       <div style={{ padding: 24, maxWidth: 600, margin: '0 auto' }}>
+        {staleWithdraw && (
+          <div className="small" style={{ fontSize: 11, color: 'var(--text-2)', marginBottom: 12 }}>
+            A previous withdrawal may not have finished syncing locally — if your balance looks off, tap{' '}
+            <Link href="/app/portfolio" style={{ color: 'var(--cyan)' }}>Restore on the Portfolio</Link>.
+          </div>
+        )}
         <div className="panel" style={{ padding: 20 }}>
           <div className="micro">AVAILABLE TO WITHDRAW</div>
           <div className="num mt-2" style={{ fontSize: 34, color: 'var(--green)' }}>
@@ -391,6 +470,7 @@ export default function WithdrawPage() {
           <div className="small mt-1" style={{ fontSize: 11 }}>
             Destination is fixed to your connected wallet address.
           </div>
+          <PrivacyModelNote style={{ marginTop: 8 }} />
           {!loading && cashBalance === 0n && (
             <div className="small mt-2" style={{ fontSize: 11, color: 'var(--text-3)' }}>
               No funds available. Deposit USDC first.
@@ -434,7 +514,38 @@ export default function WithdrawPage() {
             )}
             {!invalidAmount && fundsDeployed && (
               <div className="small mt-1" style={{ color: 'var(--amber)', fontSize: 11 }}>
-                Vault funds are currently deployed to Polymarket. Check back after open markets settle.
+                The vault doesn&apos;t have enough idle USDC on hand for this amount right now — some of the
+                pool is deployed to open Polymarket positions (vault-wide, not necessarily yours). It frees
+                up as markets settle.
+                {canWithdrawSomeNow ? (
+                  <>
+                    {' '}You can withdraw{' '}
+                    <button
+                      type="button"
+                      onClick={() => setAmountInput(formatUsdcInput(withdrawableNowMicro))}
+                      style={{ background: 'none', border: 'none', padding: 0, color: 'var(--cyan)', cursor: 'pointer', fontFamily: 'var(--mono)', fontSize: 11, textDecoration: 'underline' }}
+                    >
+                      ${formatUsdc(withdrawableNowMicro)} now
+                    </button>
+                    {' '}and come back for the rest once positions settle.
+                  </>
+                ) : (
+                  <>
+                    {' '}If you have open positions,{' '}
+                    {openPositionDeposits.size > 0 ? (
+                      <button
+                        type="button"
+                        onClick={() => setSettleWithdrawOpen(true)}
+                        style={{ background: 'none', border: 'none', padding: 0, color: 'var(--cyan)', cursor: 'pointer', font: 'inherit', textDecoration: 'underline' }}
+                      >
+                        Settle &amp; Withdraw
+                      </button>
+                    ) : (
+                      <Link href="/app/portfolio" style={{ color: 'var(--cyan)' }}>check your Portfolio</Link>
+                    )}
+                    {' '}to free them up.
+                  </>
+                )}
               </div>
             )}
             {!invalidAmount && !fundsDeployed && fragmented && (
@@ -526,6 +637,11 @@ export default function WithdrawPage() {
                       transition: 'width 120ms linear',
                     }}
                   />
+                </div>
+              )}
+              {status === 'running' && (
+                <div className="small mt-2" style={{ fontSize: 11, color: 'var(--text-2)' }}>
+                  Keep this tab open — generating your proof can take up to 2 minutes.
                 </div>
               )}
               {txHash && (

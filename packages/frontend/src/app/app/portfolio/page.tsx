@@ -42,6 +42,8 @@ const STUCK_PENDING_SEC = 180
 // burn a fresh proof every tick.)
 const CLOSE_FINALIZE_RETRY_COOLDOWN_MS = 2 * 60_000
 import { portfolioSummaryRows, usePortfolioState, type PortfolioState } from '@/lib/accountState'
+// H4: smooth-scroll to the first actionable section so the "Action needed" tile is a live anchor.
+const ACTION_ANCHOR_ID = 'action-needed-anchor'
 
 const VAULT_ADDRESS = (process.env.NEXT_PUBLIC_VAULT_ADDRESS ??
   '0x0000000000000000000000000000000000000000') as `0x${string}`
@@ -949,11 +951,40 @@ function PortfolioContent() {
         {state && (
           <>
             <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: 12 }}>
-              {summaryRows.map(([label, value, note]) => (
+              {/* H4: capital that needs a proof to recover. FIRST tile, gold accent = "act"; only
+                  shown when there's something to reclaim. Clicking scroll-anchors to the first
+                  actionable section (Open Positions / Orders), where the per-row actions live. */}
+              {(state.actionNeededTotal ?? 0n) > 0n && (
+                <button
+                  type="button"
+                  className="panel"
+                  onClick={() => document.getElementById(ACTION_ANCHOR_ID)?.scrollIntoView({ behavior: 'smooth', block: 'start' })}
+                  style={{ padding: 16, textAlign: 'left', cursor: 'pointer', borderColor: 'var(--accent)', background: 'transparent' }}
+                  title="Jump to the bets you can reclaim or credit below"
+                >
+                  <div className="micro" style={{ color: 'var(--accent)' }}>ACTION NEEDED</div>
+                  <div className="num mt-2" style={{ fontSize: 24, color: 'var(--accent)' }}>${formatUsdc(state.actionNeededTotal)}</div>
+                  <div className="small mt-1" style={{ fontSize: 11 }}>
+                    {state.actionNeededCount} item{state.actionNeededCount === 1 ? '' : 's'} · click to reclaim or credit
+                  </div>
+                </button>
+              )}
+              {summaryRows.map(({ label, value, note, tone }) => (
                 <div key={label} className="panel" style={{ padding: 16 }}>
                   <div className="micro">{label}</div>
-                  <div className="num mt-2" style={{ fontSize: 24 }}>{value}</div>
+                  <div
+                    className="num mt-2"
+                    style={{ fontSize: 24, color: tone === 'pos' ? 'var(--green)' : tone === 'neg' ? 'var(--red)' : undefined }}
+                  >
+                    {value}
+                  </div>
                   <div className="small mt-1" style={{ fontSize: 11 }}>{note}</div>
+                  {/* H4: clarify that some of the displayed balance isn't spendable until reclaimed. */}
+                  {label === 'Cash' && (state.actionNeededTotal ?? 0n) > 0n && (
+                    <div className="small mt-1" style={{ fontSize: 10, color: 'var(--accent)' }}>
+                      ${formatUsdc(state.actionNeededTotal)} more is recoverable — submit a proof to reclaim it.
+                    </div>
+                  )}
                 </div>
               ))}
             </div>
@@ -963,7 +994,8 @@ function PortfolioContent() {
             ) : (
             <>
             {/* Positions = bets that actually filled (you hold shares): settle / close / claim. */}
-            <div className="panel mt-4 scroll-x" style={{ padding: 0, overflowX: 'auto' }}>
+            {/* H4: scroll anchor for the "Action needed" summary tile (first actionable section). */}
+            <div id={ACTION_ANCHOR_ID} className="panel mt-4 scroll-x" style={{ padding: 0, overflowX: 'auto', scrollMarginTop: 16 }}>
               <div className="row hairline-b" style={{ padding: '12px 16px', justifyContent: 'space-between' }}>
                 <div className="micro">OPEN POSITIONS</div>
                 <span className="small" style={{ fontSize: 11, color: 'var(--text-3)' }}>Filled — you hold shares</span>
@@ -1207,6 +1239,8 @@ function PortfolioContent() {
           readyBets={state.readyToSettle}
           onClose={closeModal}
           onComplete={refresh}
+          onRestore={() => void handleRecover()}
+          restoring={recovering}
         />
       )}
       {state && closeLostOpen && (
@@ -1237,6 +1271,8 @@ function PortfolioContent() {
           vaultAddress={VAULT_ADDRESS}
           onClose={() => setPartialReceipt(null)}
           onComplete={async () => { setPartialReceipt(null); await refresh() }}
+          onRestore={() => void handleRecover()}
+          restoring={recovering}
         />
       )}
       {address && refundReceipt && (
@@ -1247,6 +1283,8 @@ function PortfolioContent() {
           vaultAddress={VAULT_ADDRESS}
           onClose={() => setRefundReceipt(null)}
           onComplete={async () => { setRefundReceipt(null); await refresh() }}
+          onRestore={() => void handleRecover()}
+          restoring={recovering}
         />
       )}
     </div>

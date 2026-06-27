@@ -5,6 +5,7 @@ import { useSignMessage } from 'wagmi'
 import { Modal } from '@/components/app/Modal'
 import { KV } from '@/components/app/KV'
 import { LiveRegion } from '@/components/app/LiveRegion'
+import { CreditCannotLand } from '@/components/app/CreditCannotLand'
 import {
   addNote,
   computeCommitment,
@@ -32,13 +33,22 @@ import { generateProofInWorker } from '@/lib/prover'
 // attested FAILED; the depositor reclaims their FULL stake via betCancellationCredit.
 const REPORT_FAILED = 2
 
-type Phase = 'input' | 'proving' | 'done' | 'error'
+// H3: getFreeNoteForDeposit returning null throws this; route it to the recoverable Restore screen.
+const NO_FREE_NOTE_MSG =
+  'No spendable note found for this bet. Recover your notes from chain (Portfolio → Restore) and retry.'
+const isNoFreeNote = (m: string) => m === NO_FREE_NOTE_MSG || /no spendable note found/i.test(m)
+
+type Phase = 'input' | 'proving' | 'done' | 'error' | 'cant-land'
 
 interface BetCancelRefundModalProps {
   open: boolean
   address: `0x${string}`
   receipt: Note // a BET_RECEIPT note the operator reported FAILED (market no-fill or limit expiry)
   vaultAddress: string
+  /** H3: parent's "Restore from chain" (re-derives notes). Required to recover a no-free-note credit. */
+  onRestore?: () => void
+  /** H3: spinner state for the Restore button (parent's `recovering`). */
+  restoring?: boolean
   onClose: () => void
   onComplete: () => Promise<void> | void
 }
@@ -55,6 +65,8 @@ export function BetCancelRefundModal({
   address,
   receipt,
   vaultAddress,
+  onRestore,
+  restoring,
   onClose,
   onComplete,
 }: BetCancelRefundModalProps) {
@@ -79,7 +91,7 @@ export function BetCancelRefundModal({
       try {
         const att = await fetchAttestation(nullifierOfBet, REPORT_FAILED)
         if (!att || att.reportType !== REPORT_FAILED) {
-          setError('No failure attestation is available for this bet yet. The operator signs it once the market order misses or the limit order expires.')
+          setError('No failure attestation is available for this bet yet. The operator signs it once the market order misses or the limit order expires. These proceeds release after PolyShield’s signing operator confirms the result — in beta this is a centralized service; if it’s delayed your funds stay safe in the vault, and an admin escape hatch can release them after a timelock.')
           setPhase('error')
           return
         }
@@ -112,9 +124,7 @@ export function BetCancelRefundModal({
       // consumed it doesn't orphan the reclaim.
       const freeNote = getFreeNoteForDeposit(address, receipt.depositIndex)
       if (!freeNote) {
-        throw new Error(
-          'No spendable note found for this bet. Recover your notes from chain (Portfolio → Restore) and retry.',
-        )
+        throw new Error(NO_FREE_NOTE_MSG)
       }
       if (betAmount <= 0n) {
         throw new Error('Nothing to reclaim for this bet.')
@@ -189,8 +199,11 @@ export function BetCancelRefundModal({
 
       setPhase('done')
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err))
-      setPhase('error')
+      const message = err instanceof Error ? err.message : String(err)
+      setError(message)
+      // H3: a missing change-note is recoverable via Restore — route to the dedicated screen
+      // instead of the raw error + a Retry that re-fails identically.
+      setPhase(isNoFreeNote(message) ? 'cant-land' : 'error')
     }
   }
 
@@ -200,9 +213,11 @@ export function BetCancelRefundModal({
       ? 'Generating refund proof and crediting your stake back…'
       : phase === 'done'
         ? `Stake reclaimed. $${formatUsdc(betAmount + protocolFee)} returned to your balance.`
-        : phase === 'error'
-          ? error ?? 'Reclaim failed.'
-          : ''
+        : phase === 'cant-land'
+          ? 'This reclaim can’t land yet — the change-note for this deposit isn’t in your local cache. Your funds are safe in the vault. Restore from chain to recover it.'
+          : phase === 'error'
+            ? error ?? 'Reclaim failed.'
+            : ''
 
   return (
     <Modal open={open} title="Reclaim stake (order did not fill)" onClose={() => { if (phase !== 'proving') onClose() }}>
@@ -212,6 +227,11 @@ export function BetCancelRefundModal({
           <p className="body" style={{ margin: 0 }}>
             This order never filled — a market order that missed, or a limit order that expired
             on the book. Reclaim your full stake back to your private balance.
+          </p>
+          <p className="small" style={{ margin: 0, color: 'var(--text-3)' }}>
+            These proceeds release after PolyShield’s signing operator confirms the result. In beta
+            this is a centralized service — if it’s delayed your funds stay safe in the vault, and an
+            admin escape hatch can release them after a timelock.
           </p>
           <div className="panel" style={{ padding: 16 }}>
             <KV l="Market" v={receipt.marketId ?? receipt.id} />
@@ -243,6 +263,15 @@ export function BetCancelRefundModal({
           <h3 className="h4" style={{ margin: 0 }}>+${formatUsdc(betAmount + protocolFee)} returned to your balance.</h3>
           <p className="small" style={{ margin: 0 }}>Auto close in 5 seconds.</p>
         </div>
+      )}
+
+      {phase === 'cant-land' && (
+        <CreditCannotLand
+          reason="no-free-note"
+          onRestore={onRestore}
+          restoring={restoring}
+          onClose={onClose}
+        />
       )}
 
       {phase === 'error' && (
