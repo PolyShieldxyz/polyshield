@@ -30,8 +30,12 @@ export const revalidate = 3600
 
 export default function BlogIndex() {
   const posts = getPublishedPosts()
-  const featured = posts.find((p) => p.meta.featured) ?? posts[0]
-  const rest = posts.filter((p) => p.meta.slug !== featured?.meta.slug)
+  // Hero = the most recently *published* post, keyed on `date` (publish time) — never
+  // date_modified, so editing an old post can't bump it back to the top. getPublishedPosts()
+  // is already sorted newest-first by date, so the head is the latest. (The `featured` flag is
+  // intentionally NOT used for hero selection; it still drives the "★ Pillar" badge on cards.)
+  const featured = posts[0]
+  const rest = posts.slice(1)
   const present = PILLAR_ORDER.filter((n) => posts.some((p) => p.meta.pillar === n)).map((n) => PILLARS[n])
   const cards = rest.map((p) => toCardData(p.meta))
 
@@ -66,7 +70,7 @@ export default function BlogIndex() {
         {featured && (
           <article className="featured">
             <div className="f-body">
-              <span className="pill pill-violet">★ PILLAR GUIDE</span>
+              <span className="pill pill-violet">{featured.meta.featured ? '★ PILLAR GUIDE' : '★ LATEST'}</span>
               <h2>{featured.meta.title}</h2>
               <p className="deck">{featured.meta.subtitle}</p>
               <div className="meta-row">
