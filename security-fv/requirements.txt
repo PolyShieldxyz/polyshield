@@ -1,0 +1,4 @@
+# halmos 0.3.3 pins z3-solver 4.12.6.0; every SMT result in results/ was produced with exactly this solver.
+z3-solver==4.12.6.0
+halmos==0.3.3
+py_ecc==8.0.0
