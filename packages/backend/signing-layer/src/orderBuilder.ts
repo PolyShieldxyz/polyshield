@@ -18,6 +18,7 @@ import {
 import { attestTerminal } from "./terminalAttestation";
 import { trackOrder, isOrderTracked } from "./wsFillTracker";
 import { resolveToken } from "./marketRegistry";
+import { decideCloseToken, isMockClobHost } from "./tokenBinding";
 import { getClobCreds } from "./clobAuth";
 import { createWalletClient, http } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
@@ -821,22 +822,23 @@ async function resolveCloseToken(
   req: CloseRequest,
   provider: ethers.JsonRpcProvider,
 ): Promise<{ tokenId: string; conditionId: string }> {
-  let tokenId = req.position_id;
-  let conditionId = "";
+  // SECURITY: the SELL token is derived ONLY from the bet's on-chain (market_id, outcome_side) via the registry.
+  // The request body's `position_id` is user-supplied and is never trusted in production — the deposit wallet's
+  // CTF balances are pooled, so honouring it would let a bettor sell OTHER depositors' shares and have the
+  // proceeds credited to their own bet. Unresolvable ⇒ throw (fail closed): the close is simply not placed and
+  // the bet is left untouched. See tokenBinding.ts.
+  const vault = new ethers.Contract(config.vaultContractAddress, BET_RECORDS_ABI, provider);
+  const mock = isMockClobHost(process.env.POLY_API_URL);
+  let resolved = null as ReturnType<typeof resolveToken>;
+  let side: number | null = null;
   try {
-    const vault = new ethers.Contract(config.vaultContractAddress, BET_RECORDS_ABI, provider);
     const rec = await vault.betRecords(req.nullifier_of_bet);
-    const resolved = resolveToken(String(rec.market_id ?? rec[0]), Number(rec.outcome_side ?? rec[5]));
-    if (resolved?.tokenId) {
-      tokenId = resolved.tokenId;
-      conditionId = resolved.conditionId;
-    } else {
-      logger.warn({ nullifier_of_bet: req.nullifier_of_bet }, "close: no market-registry entry — using request position_id (SELL may not match)");
-    }
+    side = Number(rec.outcome_side ?? rec[5]);
+    resolved = resolveToken(String(rec.market_id ?? rec[0]), side);
   } catch (err) {
-    logger.warn({ err: String(err), nullifier_of_bet: req.nullifier_of_bet }, "close: real-tokenId resolve failed — using request position_id");
+    logger.warn({ err: String(err), nullifier_of_bet: req.nullifier_of_bet }, "close: could not resolve the bet's token from the registry");
   }
-  return { tokenId, conditionId };
+  return decideCloseToken({ requestPositionId: req.position_id, outcomeSide: side, resolved, mock });
 }
 
 // FC-1 (Market close): submit a FAK (fill-and-kill) market SELL to close a position now. Unlike the

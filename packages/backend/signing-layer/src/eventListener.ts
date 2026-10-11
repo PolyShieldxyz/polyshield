@@ -2,7 +2,8 @@ import fs from "fs";
 import path from "path";
 import { ethers } from "ethers";
 import pino from "pino";
-import { submitLimitOrder, submitFAKOrder } from "./orderBuilder";
+import { submitLimitOrder, submitFAKOrder, attestFailedFor } from "./orderBuilder";
+import { decideBuyToken, isMockClobHost } from "./tokenBinding";
 import { getLimitOrder } from "./limitOrderStore";
 import { getAttestation } from "./attestationStore";
 import { isOrderTracked } from "./wsFillTracker";
@@ -95,7 +96,7 @@ const VAULT_ABI = [
   "function betRecords(bytes32 nullifier) view returns (bytes32 market_id, bytes32 condition_id, bytes32 position_id, uint64 expected_shares, uint64 bet_amount, uint8 outcome_side, uint8 status)",
 ];
 
-async function processBetEvent(
+export async function processBetEvent(
   nullifier: string,
   market_id: string,
   position_id: string,
@@ -107,29 +108,36 @@ async function processBetEvent(
   wallet: ethers.Wallet,
   provider: ethers.JsonRpcProvider
 ): Promise<void> {
-  // Swap the on-chain (field-safe market_id, synthetic position_id) for the REAL Polymarket
-  // conditionId + tokenId so the CLOB order targets a live market. In mock mode (registry
-  // empty) this falls through to the on-chain ids, preserving the existing mock path.
-  let realTokenId = position_id;
-  let realConditionId = market_id;
+  // Derive the REAL Polymarket tokenId + conditionId from (market_id, outcome_side) via the registry.
+  // SECURITY: the user-chosen on-chain `position_id` is NOT trusted in production — settlement pays by
+  // (market_id, outcome_side), so trading a token that was not derived from that pair would let a bettor
+  // be paid for a market other than the one actually bought. See tokenBinding.ts for the policy: reject
+  // (fail closed → FAILED attestation → stake reclaimable) on a registry miss or outcome_side > 1; the
+  // synthetic on-chain ids are used only against the local mock CLOB.
+  let resolved: ReturnType<typeof resolveToken> = null;
   try {
-    const resolved = resolveToken(market_id, outcome_side);
-    if (resolved) {
-      realTokenId = resolved.tokenId;
-      realConditionId = resolved.conditionId;
-      logger.info(
-        { nullifier, market_id, outcome_side, tokenId: resolved.tokenId },
-        "resolved real Polymarket token for bet"
-      );
-    } else {
-      logger.warn(
-        { nullifier, market_id, outcome_side },
-        "market not in registry — using on-chain ids (order may fail on a real CLOB; recoverable via cancellation credit)"
-      );
-    }
+    resolved = resolveToken(market_id, outcome_side);
   } catch (err) {
-    logger.warn({ err, nullifier }, "resolveToken threw — using on-chain ids");
+    logger.warn({ err, nullifier }, "resolveToken threw — treating as registry miss");
   }
+  const decision = decideBuyToken({
+    marketId: market_id,
+    positionId: position_id,
+    outcomeSide: outcome_side,
+    resolved,
+    mock: isMockClobHost(process.env.POLY_API_URL),
+  });
+  if (decision.action === "reject") {
+    logger.error(
+      { nullifier, market_id, outcome_side, position_id, reason: decision.reason },
+      "bet REJECTED (fail-closed): token cannot be derived from (market_id, outcome_side) — no order placed, attesting FAILED so the stake is reclaimable",
+    );
+    await attestFailedFor(wallet, nullifier);
+    return;
+  }
+  const realTokenId = decision.tokenId;
+  const realConditionId = decision.conditionId;
+  logger.info({ nullifier, market_id, outcome_side, tokenId: realTokenId, source: decision.source }, "resolved Polymarket token for bet");
 
   // Persist this market so the settlement poll can resolve it later WITHOUT a historical BetAuthorized
   // log scan (which a pruned RPC refuses with "History has been pruned"). The BetAuthorized log is
