@@ -6,6 +6,8 @@ A zero-knowledge privacy vault for [Polymarket](https://polymarket.com). Deposit
 
 **Status:** Core protocol live on Polygon mainnet (limited test phase) — full deposit → bet → settle → withdraw verified end-to-end with real funds. [Roadmap →](https://polyshield.xyz/roadmap)
 
+> **⚠️ Deployment note:** the contracts currently deployed on Polygon were built from an **earlier revision** of this repository — the verifier verification keys differ from the ones committed here and three circuits (`bet_cancel`, `cancel_credit`, `partial_credit`) are the previous variants — so this repository is **not** an exact description of the live deployment. Treat deployed addresses with caution; `packages/contracts/chain_address.csv` may be out of date.
+
 ---
 
 ## What it does
