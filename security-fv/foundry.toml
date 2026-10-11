@@ -1,0 +1,25 @@
+# Self-contained Foundry/Halmos project for the verifier-level formal checks.
+# Sources are the production contracts (read in place); nothing here is deployed.
+[profile.default]
+src = "../packages/contracts/src"
+test = "test"
+out = "out"
+cache_path = "cache"
+libs = ["../packages/contracts/lib"]
+allow_paths = ["../packages/contracts"]
+solc = "0.8.24"
+evm_version = "cancun"
+optimizer = true
+optimizer_runs = 200
+via_ir = false
+remappings = [
+  "@openzeppelin/=../packages/contracts/lib/openzeppelin-contracts/",
+  "@openzeppelin-upgradeable/=../packages/contracts/lib/openzeppelin-contracts-upgradeable/contracts/",
+  "@poseidon-solidity/=../packages/contracts/lib/poseidon-solidity/contracts/",
+  "forge-std/=../packages/contracts/lib/forge-std/src/",
+  "polyshield/=../packages/contracts/src/",
+]
+fs_permissions = [{ access = "read", path = "../" }]
+
+[profile.default.fuzz]
+runs = 2000
